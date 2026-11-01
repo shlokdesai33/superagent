@@ -1,0 +1,55 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"options": {
+		"typeAware": true,
+		"reportUnusedDisableDirectives": "deny"
+	},
+	"env": {
+		"builtin": true
+	},
+	"categories": {
+		"correctness": "error",
+		"suspicious": "error",
+		"perf": "warn"
+	},
+	"plugins": ["typescript", "unicorn", "oxc", "import", "promise"],
+	"rules": {
+		"import/no-cycle": "error",
+		"eslint/no-fallthrough": "error",
+		"eslint/eqeqeq": "error",
+		"eslint/no-console": "error",
+		"eslint/no-unused-vars": [
+			"error",
+			{
+				"argsIgnorePattern": "^_",
+				"varsIgnorePattern": "^_",
+				"caughtErrorsIgnorePattern": "^_"
+			}
+		],
+		"eslint/no-underscore-dangle": "error",
+		// oxlint recommends using typescript's noImplicitReturns instead
+		"typescript/consistent-return": "off",
+		"typescript/no-explicit-any": "error",
+		"typescript/no-floating-promises": "error",
+		"typescript/no-misused-promises": "error",
+		"typescript/await-thenable": "error",
+		"typescript/no-unnecessary-type-assertion": "error"
+	},
+	"overrides": [
+		{
+			"files": ["test/**"],
+			"rules": {
+				"typescript/no-unnecessary-type-assertion": "off"
+			}
+		},
+		{
+			// the command-line entry point is the one place that writes to the
+			// terminal; everywhere else a console call is a stray debug print
+			"files": ["src/cli.ts"],
+			"rules": {
+				"eslint/no-console": "off"
+			}
+		}
+	],
+	"ignorePatterns": ["dist"]
+}

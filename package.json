@@ -1,0 +1,30 @@
+{
+	"name": "superagent",
+	"version": "0.0.0",
+	"private": true,
+	"license": "MIT",
+	"bin": {
+		"superagent": "./src/cli.ts"
+	},
+	"type": "module",
+	"scripts": {
+		"check": "bun run typecheck && bun run lint && bun run check:format && bun test",
+		"check:format": "oxfmt --check .",
+		"clean": "git clean -dfX --exclude='!.env.*'",
+		"format": "oxfmt --write .",
+		"lint": "oxlint",
+		"prepare": "bun -e \"if (!Bun.semver.satisfies(Bun.version, '>=1.4.4')) { console.error('Bun >=1.4.4 required, found ' + Bun.version); process.exit(1) }\"",
+		"test": "bun test",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"@anthropic-ai/sandbox-runtime": "0.0.81"
+	},
+	"devDependencies": {
+		"@types/bun": "1.4.4",
+		"oxfmt": "0.75.0",
+		"oxlint": "1.90.0",
+		"oxlint-tsgolint": "7.0.2005",
+		"typescript": "7.0.2"
+	}
+}

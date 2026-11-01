@@ -1,0 +1,14 @@
+{
+	"$schema": "./node_modules/oxfmt/configuration_schema.json",
+	"printWidth": 80,
+	"useTabs": true,
+	"singleQuote": true,
+	"sortImports": false,
+	"ignorePatterns": ["dist"],
+	"overrides": [
+		{
+			"files": ["*.md"],
+			"options": { "useTabs": false, "tabWidth": 2 }
+		}
+	]
+}

@@ -1,0 +1,28 @@
+{
+	"compilerOptions": {
+		// modules
+		"module": "preserve",
+		"moduleResolution": "bundler",
+		"allowImportingTsExtensions": true,
+		"moduleDetection": "force",
+		"verbatimModuleSyntax": true,
+		"isolatedModules": true,
+		"noUncheckedSideEffectImports": true,
+		"erasableSyntaxOnly": true,
+
+		// language level
+		"target": "esnext",
+		"lib": ["esnext"],
+		"types": ["bun"],
+
+		// type checking
+		"strict": true,
+		"noEmit": true,
+		"noUncheckedIndexedAccess": true,
+		"exactOptionalPropertyTypes": true,
+		"noImplicitOverride": true,
+		"noImplicitReturns": true,
+		"skipLibCheck": true
+	},
+	"include": ["src", "test"]
+}
