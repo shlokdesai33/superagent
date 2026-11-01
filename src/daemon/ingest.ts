@@ -9,6 +9,7 @@ import {
 	routerChanged,
 	toMessage,
 } from './state.ts';
+import { publishTask } from './task-feed.ts';
 
 const PREVIEW_CHARS = 80;
 
@@ -38,6 +39,17 @@ type Decision =
 	| { route: 'filtered'; reason: string };
 
 const PEOPLE_KINDS = new Set(['message', 'note', 'answer']);
+
+/** Internal events from Workers, addressed to the Router. */
+export const ROUTER_KINDS = new Set([
+	'task_finished',
+	'task_failed',
+	'task_stopped',
+	'task_question',
+	'task_report',
+	'thread_released',
+	'question_answered',
+]);
 
 /**
  * Stores an event and decides where it goes in one transaction, then publishes
@@ -77,16 +89,21 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 					})?.owner ?? null)
 			: null;
 
-		// The Fast Path filter (rule 4) arrives with the script channel; the
-		// console has none.
-		const decision: Decision = event.author.isSelf
-			? { route: 'filtered', reason: 'own message' }
-			: event.taskId !== undefined
-				? { route: 'task', taskId: event.taskId }
-				: owner !== null
-					? { route: 'task', taskId: owner }
-					: { route: 'router' };
-		const taskId = decision.route === 'task' ? decision.taskId : null;
+		// Worker reports skip the table. The Fast Path filter (rule 4) arrives
+		// with the script channel; the console has none.
+		const decision: Decision =
+			event.channel === 'internal' && ROUTER_KINDS.has(event.kind)
+				? { route: 'router' }
+				: event.author.isSelf
+					? { route: 'filtered', reason: 'own message' }
+					: event.taskId !== undefined
+						? { route: 'task', taskId: event.taskId }
+						: owner !== null
+							? { route: 'task', taskId: owner }
+							: { route: 'router' };
+		// For reports to the Router, the reporting task.
+		const taskId =
+			decision.route === 'task' ? decision.taskId : (event.taskId ?? null);
 
 		const eventId = Number(
 			db
@@ -139,6 +156,34 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 				.get(Number(messageId));
 		}
 
+		// A person's message to a task with an open question answers it.
+		let answered = false;
+		if (
+			decision.route === 'task' &&
+			event.channel !== 'internal' &&
+			PEOPLE_KINDS.has(event.kind)
+		) {
+			answered =
+				db
+					.query<unknown, Params>(
+						`UPDATE questions SET state = 'answered', answer = $text, answered_by = $by,
+							answered_at = $at, answer_event_id = $eventId
+						WHERE task_id = $taskId AND state = 'open'`,
+					)
+					.run({
+						text: event.text,
+						by: `${event.author.name} (${event.channel})`,
+						at,
+						eventId,
+						taskId: decision.taskId,
+					}).changes > 0;
+			if (answered) {
+				db.query<unknown, [number, number]>(
+					"UPDATE tasks SET state = 'active', updated_at = ? WHERE id = ? AND state = 'needs_you'",
+				).run(at, decision.taskId);
+			}
+		}
+
 		const handle =
 			taskId === null
 				? null
@@ -147,7 +192,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 							'SELECT handle FROM tasks WHERE id = ?',
 						)
 						.get(taskId)?.handle ?? null);
-		return { eventId, decision, handle, message };
+		return { eventId, decision, handle, message, answered };
 	})();
 
 	if (stored === null) {
@@ -158,7 +203,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 		return null;
 	}
 
-	const { eventId, decision, handle, message } = stored;
+	const { eventId, decision, handle, message, answered } = stored;
 	daemon.log('info', 'event routed', {
 		event: eventId,
 		channel: event.channel,
@@ -170,6 +215,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 	});
 
 	if (decision.route === 'router') daemon.router.wake();
+	if (decision.route === 'task') daemon.runWorker(decision.taskId);
 
 	// The river shows only what arrives from outside.
 	if (event.channel === 'internal') {
@@ -198,6 +244,9 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 		},
 	});
 	if (message) feed.publish({ type: 'message', message: toMessage(message) });
+	if (answered && decision.route === 'task') {
+		publishTask(daemon, decision.taskId);
+	}
 	if (decision.route === 'router') routerChanged(daemon);
 	daemon.channels.set(event.channel, at);
 	return feed.publish({ type: 'health', health: health(daemon) });

@@ -191,6 +191,21 @@ export type Observed = {
 	eventId: number;
 };
 
+/** `GET /v1/tasks/:handle`. */
+export type TaskDetail = {
+	/** The feed sequence this was read at. */
+	seq: number;
+	task: TaskSummary;
+	/** All, oldest first. */
+	steps: Step[];
+	/** Every followed thread plus notes and answers, oldest first, the last 500. */
+	conversation: Message[];
+	/** Markdown. */
+	report: string | null;
+	workDir: string;
+	branch: string | null;
+};
+
 /** `requestId` is unique per attempt; a resent request gets the original result. */
 export type ActionRequest = { requestId: string; action: Action };
 

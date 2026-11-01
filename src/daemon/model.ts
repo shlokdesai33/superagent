@@ -15,6 +15,9 @@ import {
 	usageChanged,
 } from './state.ts';
 
+// Particle publishes no rate limit and advises capping concurrency.
+const MAX_CALLS_IN_FLIGHT = 6;
+
 export const NO_API_KEY = `No Particle API key: set ${API_KEY_ENV} or particleApiKey in config.json, then restart the agent`;
 
 /**
@@ -61,6 +64,56 @@ export async function callModel(
 ): Promise<ChatResult> {
 	const { particle } = daemon;
 	if (particle === null) throw new ModelError(NO_API_KEY, 'account');
+	// The Router's calls (no task) are never queued; it makes one at a time.
+	const worker = call.taskId !== null;
+	if (worker) await takeWorkerCall(daemon, call.signal);
+	try {
+		return await chat(daemon, particle, call);
+	} finally {
+		if (worker) {
+			daemon.calls.workers -= 1;
+			for (const waiter of daemon.calls.waiters) waiter();
+		}
+	}
+}
+
+/** Waits for one of the 5 Worker calls; the 6th is kept for the Router. */
+async function takeWorkerCall(
+	daemon: Daemon,
+	signal: AbortSignal,
+): Promise<void> {
+	while (daemon.calls.workers >= MAX_CALLS_IN_FLIGHT - 1) {
+		signal.throwIfAborted();
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		await new Promise<void>((resolve) => {
+			const done = () => {
+				daemon.calls.waiters.delete(done);
+				signal.removeEventListener('abort', done);
+				resolve();
+			};
+			daemon.calls.waiters.add(done);
+			signal.addEventListener('abort', done, { once: true });
+		});
+	}
+	signal.throwIfAborted();
+	daemon.calls.workers += 1;
+}
+
+/** What a paused Worker shows it's waiting on. */
+export function pausedOn(error: ModelError): string {
+	const status =
+		error.cause instanceof ParticleError ? error.cause.status : null;
+	if (status === 401) return 'Particle (API key rejected)';
+	if (status === 402) return 'Particle (out of credits)';
+	if (status === 403) return 'Particle (API key not allowed)';
+	return 'Particle (no API key)';
+}
+
+async function chat(
+	daemon: Daemon,
+	particle: ParticleClient,
+	call: ModelCall,
+): Promise<ChatResult> {
 	const startedAt = Date.now();
 	let result: ChatResult;
 	try {
