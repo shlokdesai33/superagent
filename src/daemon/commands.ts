@@ -106,9 +106,12 @@ export async function runCommand(
 		return `error: ${sandbox.text}. The operator has to fix that and restart the agent; the file tools still work.`;
 	}
 	const startedAt = Date.now();
-	mkdirSync(join(taskFolder(daemon, task.handle), 'commands'), {
-		recursive: true,
-	});
+	const folder = taskFolder(daemon, task.handle);
+	mkdirSync(join(folder, 'commands'), { recursive: true });
+	// Its TMPDIR and a write root of the sandbox; tasks from before the sandbox,
+	// or whose tmp was deleted, don't have one.
+	const tmp = join(folder, 'tmp');
+	mkdirSync(tmp, { recursive: true });
 	const stepId = Number(
 		db
 			.query<unknown, Params>(
@@ -127,13 +130,7 @@ export async function runCommand(
 	let child: ReturnType<typeof spawn>;
 	let sandboxed: SandboxedCommand | null = null;
 	try {
-		sandboxed = await sandboxCommand(
-			daemon,
-			task,
-			join(taskFolder(daemon, task.handle), 'tmp'),
-			command,
-			'requested',
-		);
+		sandboxed = await sandboxCommand(daemon, task, tmp, command, 'requested');
 		child = spawn(
 			sandboxed.argv,
 			task.workDir,

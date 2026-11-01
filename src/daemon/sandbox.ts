@@ -1,5 +1,11 @@
 import type { Database } from 'bun:sqlite';
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	statSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,7 +63,10 @@ const NEVER_DOMAINS = [
 // Readable toolchain folders in your home folder; the rest of it is hidden.
 const TOOLCHAINS = [
 	'.bun',
-	'.cargo',
+	// Not all of ~/.cargo, which holds its credentials.
+	'.cargo/bin',
+	'.cargo/registry',
+	'.cargo/git',
 	'.rustup',
 	'go',
 	'.nvm',
@@ -223,6 +232,7 @@ async function runProbe(
 	loginPath: string,
 ): Promise<string | null> {
 	let wrapped: string;
+	commandStarted();
 	try {
 		wrapped = await SandboxManager.wrapWithSandbox('true', '/bin/bash', {
 			network: NETWORK,
@@ -234,6 +244,7 @@ async function runProbe(
 			},
 		});
 	} catch (error) {
+		commandEnded(false);
 		return error instanceof Error ? error.message : String(error);
 	}
 	try {
@@ -250,7 +261,7 @@ async function runProbe(
 		]);
 		return code === 0 ? null : stderr.trim() || `exit ${code}`;
 	} finally {
-		SandboxManager.cleanupAfterCommand();
+		commandEnded(true);
 	}
 }
 
@@ -405,8 +416,6 @@ export async function sandboxCommand(
 	const home = homedir();
 	const repoPaths = daemon.config.repos.map((repo) => repo.path);
 	const credentials = CREDENTIALS.map((path) => join(home, path));
-	// A read allowance at or inside a hidden folder would win over hiding it.
-	const secret = [daemon.paths.home, ...credentials];
 	const gitDir =
 		task.repo === null ? null : await repositoryGitDir(daemon, task.repo);
 	const readable = [
@@ -414,54 +423,121 @@ export async function sandboxCommand(
 		task.workDir,
 		tmpDir,
 		...(gitDir === null ? [] : [gitDir]),
-		...[
-			...TOOLCHAINS.map((folder) => join(home, folder)),
-			...daemon.loginPath.split(delimiter),
-			...daemon.config.sandboxReadPaths,
-		].filter(
-			(path) =>
-				isBelow(path, home) &&
-				!secret.some((folder) => path === folder || isBelow(path, folder)) &&
-				existsSync(path),
+		...readableHomeFolders(
+			[
+				...TOOLCHAINS.map((folder) => join(home, folder)),
+				...daemon.loginPath.split(delimiter),
+				...daemon.config.sandboxReadPaths,
+			],
+			home,
+			[daemon.paths.home, ...credentials],
 		),
 	];
 	const commandId = Buffer.from(
 		crypto.getRandomValues(new Uint8Array(16)),
 	).toString('base64url');
-	// sandbox-runtime sets TMPDIR to a folder shared by every command.
-	const wrapped = await SandboxManager.wrapWithSandbox(
-		`export TMPDIR=${shellQuote(tmpDir)}\n${command}`,
-		'/bin/bash',
-		{
-			network: NETWORK,
-			filesystem: {
-				denyRead: [home, daemon.paths.home, ...repoPaths, ...credentials],
-				allowRead: readable,
-				allowWrite: [task.workDir, tmpDir],
-				// A worktree's `.git` file points git at the repository's own folder.
-				denyWrite: task.repo === null ? [] : [join(task.workDir, '.git')],
+	commandStarted();
+	let wrapped: string;
+	try {
+		// sandbox-runtime sets TMPDIR to a folder shared by every command.
+		wrapped = await SandboxManager.wrapWithSandbox(
+			`export TMPDIR=${shellQuote(tmpDir)}\n${command}`,
+			'/bin/bash',
+			{
+				network: NETWORK,
+				filesystem: {
+					denyRead: [home, daemon.paths.home, ...repoPaths, ...credentials],
+					allowRead: readable,
+					allowWrite: [task.workDir, tmpDir],
+					// A worktree's `.git` file points git at the repository's own folder.
+					denyWrite: task.repo === null ? [] : [join(task.workDir, '.git')],
+				},
 			},
-		},
-		undefined,
-		{ commandId, commandText: command },
-	);
-	SandboxManager.registerCommandNetworkLists(commandId, {
-		allowedDomains: allowedHosts(daemon.db, task.id, kind),
-	});
+			undefined,
+			{ commandId, commandText: command },
+		);
+	} catch (error) {
+		// A wrap that threw has released what it held.
+		commandEnded(false);
+		throw error;
+	}
 	let finished = false;
-	return {
-		argv: ['/bin/bash', '-c', wrapped],
-		finish: () => {
-			if (finished) return [];
-			finished = true;
-			SandboxManager.unregisterCommandNetworkLists(commandId);
-			SandboxManager.cleanupAfterCommand();
-			const lines = SandboxManager.getSandboxViolationStore()
-				.getViolationsForCommand(commandId)
-				.map((violation) => violation.line);
-			return [...new Set(lines)].slice(0, MAX_VIOLATIONS);
-		},
+	const finish = () => {
+		if (finished) return [];
+		finished = true;
+		SandboxManager.unregisterCommandNetworkLists(commandId);
+		commandEnded(true);
+		const lines = SandboxManager.getSandboxViolationStore()
+			.getViolationsForCommand(commandId)
+			.map((violation) => violation.line);
+		return [...new Set(lines)].slice(0, MAX_VIOLATIONS);
 	};
+	try {
+		SandboxManager.registerCommandNetworkLists(commandId, {
+			allowedDomains: allowedHosts(daemon.db, task.id, kind),
+		});
+	} catch (error) {
+		finish();
+		throw error;
+	}
+	return { argv: ['/bin/bash', '-c', wrapped], finish };
+}
+
+// cleanupAfterCommand() is process-wide: it removes the mount points
+// bubblewrap left for every sandbox at once. sandbox-runtime counts wraps
+// itself; the calls are also held until no sandboxed command is running, so
+// one command's exit never cleans up under another.
+let runningCommands = 0;
+let owedCleanups = 0;
+
+function commandStarted(): void {
+	runningCommands += 1;
+}
+
+/** `wrapped`: the wrap succeeded, so sandbox-runtime is owed a cleanup. */
+function commandEnded(wrapped: boolean): void {
+	runningCommands -= 1;
+	if (wrapped) owedCleanups += 1;
+	if (runningCommands > 0) return;
+	for (; owedCleanups > 0; owedCleanups -= 1) {
+		SandboxManager.cleanupAfterCommand();
+	}
+}
+
+/**
+ * The folders below your home folder that commands may read. Compared after
+ * resolving `..`, trailing slashes and symlinks: an entry that is, holds or
+ * sits inside a hidden folder is dropped, since reading it would win over
+ * hiding that folder.
+ */
+function readableHomeFolders(
+	candidates: string[],
+	home: string,
+	hidden: string[],
+): string[] {
+	const realHome = canonical(home);
+	const realHidden = hidden.map(canonical);
+	return candidates.filter((path) => {
+		if (!existsSync(path)) return false;
+		const real = canonical(path);
+		return (
+			isBelow(real, realHome) &&
+			!realHidden.some(
+				(folder) =>
+					real === folder || isBelow(real, folder) || isBelow(folder, real),
+			)
+		);
+	});
+}
+
+/** `path` made absolute, with `..` resolved and symlinks followed where it exists. */
+function canonical(path: string): string {
+	const absolute = resolve(path);
+	try {
+		return realpathSync(absolute);
+	} catch {
+		return absolute;
+	}
 }
 
 const gitDirs = new Map<string, string | null>();
