@@ -168,7 +168,10 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 					.query<unknown, Params>(
 						`UPDATE questions SET state = 'answered', answer = $text, answered_by = $by,
 							answered_at = $at, answer_event_id = $eventId
-						WHERE task_id = $taskId AND state = 'open'`,
+						WHERE id = (
+							SELECT id FROM questions WHERE task_id = $taskId AND state = 'open'
+							ORDER BY id DESC LIMIT 1
+						)`,
 					)
 					.run({
 						text: event.text,

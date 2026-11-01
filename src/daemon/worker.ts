@@ -299,14 +299,20 @@ async function runTools(
 			tool: call.function.name,
 			result: cut(outcome.result.split('\n')[0] ?? '', 160),
 		});
-		if (call.function.name === 'finish' && outcome.result === 'finished') {
+		// `ask`, `wait_for` and `finish` end the turn; later calls are answered
+		// so the transcript stays valid.
+		if (outcome.endsTurn) {
+			const reason =
+				call.function.name === 'finish'
+					? 'not run: the task finished'
+					: `not run: ${call.function.name} ended your turn`;
 			appendItems(
 				db,
 				sessionId,
 				calls.slice(index + 1).map((rest) => ({
 					role: 'tool',
 					tool_call_id: rest.id,
-					content: 'not run: the task finished',
+					content: reason,
 				})),
 			);
 			return;

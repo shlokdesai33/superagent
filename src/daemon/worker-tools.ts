@@ -10,7 +10,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { FunctionTool, ToolCall } from '../particle/types.ts';
 import { readOutput, runCommand, stopCommand } from './commands.ts';
 import { type Daemon, type Params, cut } from './state.ts';
-import { publishStep, taskChanged } from './task-feed.ts';
+import { openQuestion, publishStep, taskChanged } from './task-feed.ts';
 import { askQuestion, endTask, toRouter } from './tasks.ts';
 import {
 	type Args,
@@ -198,6 +198,12 @@ export async function runWorkerTool(
 			case 'edit_file':
 				return done(editFile(daemon, task, args));
 			case 'ask': {
+				const open = openQuestion(daemon.db, task.id);
+				if (open) {
+					throw new ToolError(
+						`question ${open.id} is still open; wait for its answer`,
+					);
+				}
 				const options = optionalStrings(args, 'options');
 				if (options.length > MAX_OPTIONS) {
 					throw new ToolError(`at most ${MAX_OPTIONS} options`);
