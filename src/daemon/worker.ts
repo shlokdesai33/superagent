@@ -152,6 +152,7 @@ async function workerLoop(
 	let nudged = false;
 	let needsCompaction =
 		lastPromptTokens(db, sessionId, 'worker') > COMPACT_AT_PROMPT_TOKENS;
+	let worktreeChecked = false;
 
 	while (!signal.aborted) {
 		const task = taskRow(db, live.taskId);
@@ -179,33 +180,36 @@ async function workerLoop(
 			return;
 		}
 		let worktreeNote: string | null = null;
-		if (!existsSync(task.workDir)) {
-			if (task.repo === null) {
-				mkdirSync(task.workDir, { recursive: true });
-			} else {
-				// New, or removed by cleanup while the task was ended.
-				setBlocked(daemon, live, 'its git worktree');
-				try {
-					worktreeNote = await prepareWorktree(daemon, {
-						handle: task.handle,
-						repo: task.repo,
-						workDir: task.workDir,
-					});
-				} catch (error) {
-					endTask(daemon, live.taskId, {
-						state: 'failed',
-						failure: `couldn't create its git worktree: ${error instanceof Error ? error.message : String(error)}`,
-					});
-					return;
-				}
-				setBlocked(daemon, live, null);
+		if (task.repo === null) {
+			mkdirSync(task.workDir, { recursive: true });
+		} else if (!worktreeChecked || !existsSync(task.workDir)) {
+			// Checked under the repository's lock once per loop, so a cleanup
+			// removal in progress finishes first. Missing when new, or removed
+			// while the task was ended.
+			setBlocked(daemon, live, 'its git worktree');
+			try {
+				worktreeNote = await prepareWorktree(daemon, {
+					handle: task.handle,
+					repo: task.repo,
+					workDir: task.workDir,
+				});
+			} catch (error) {
+				endTask(daemon, live.taskId, {
+					state: 'failed',
+					failure: `couldn't create its git worktree: ${error instanceof Error ? error.message : String(error)}`,
+				});
+				return;
+			}
+			setBlocked(daemon, live, null);
+			worktreeChecked = true;
+			if (worktreeNote !== null) {
 				daemon.log('info', 'worktree ready', {
 					task: task.handle,
 					path: task.workDir,
 					note: worktreeNote,
 				});
-				if (signal.aborted) return;
 			}
+			if (signal.aborted) return;
 		}
 		if (!(await takeSlot(daemon, live))) return;
 

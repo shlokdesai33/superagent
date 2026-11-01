@@ -48,11 +48,15 @@ function gitEnv(daemon: Daemon | null): Record<string, string> {
 export async function git(
 	daemon: Daemon,
 	args: string[],
-	options: { cwd?: string; timeoutMs?: number } = {},
+	options: {
+		cwd?: string;
+		timeoutMs?: number;
+		env?: Record<string, string>;
+	} = {},
 ): Promise<GitResult> {
 	const child = Bun.spawn(['git', ...SAFE_FLAGS, ...args], {
 		cwd: options.cwd ?? daemon.paths.home,
-		env: gitEnv(daemon),
+		env: { ...gitEnv(daemon), ...options.env },
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
@@ -129,11 +133,23 @@ function withRepoLock<T>(path: string, run: () => Promise<T>): Promise<T> {
 export function prepareWorktree(
 	daemon: Daemon,
 	task: { handle: string; repo: string; workDir: string },
-): Promise<string> {
-	const path = repoPath(daemon, task.repo);
+): Promise<string | null> {
+	const found = daemon.config.repos.find((entry) => entry.name === task.repo);
+	if (!found) {
+		// Cleanup keeps worktrees of repositories it doesn't know, so there's no
+		// removal to wait for.
+		return existsSync(task.workDir)
+			? Promise.resolve(null)
+			: Promise.reject(
+					new Error(`repository ${task.repo} isn't in config.json`),
+				);
+	}
+	const path = found.path;
 	return withRepoLock(path, async () => {
 		const run = (args: string[], timeoutMs?: number) =>
 			git(daemon, ['-C', path, ...args], timeoutMs ? { timeoutMs } : {});
+		// Checked under the lock, so a removal by cleanup has finished.
+		if (existsSync(task.workDir)) return null;
 		if (!existsSync(path)) {
 			throw new Error(`${path} doesn't exist`);
 		}
@@ -285,14 +301,14 @@ export async function editDiff(
  */
 export async function cleanUp(daemon: Daemon): Promise<void> {
 	const now = Date.now();
-	const ended = daemon.db
-		.query<{ handle: string; repo: string; workDir: string }, [number]>(
-			`SELECT handle, repo, work_dir AS workDir FROM tasks
+	const cutoff = now - WORKTREE_RETENTION_MS;
+	const candidates = daemon.db
+		.query<{ id: number; handle: string; repo: string }, [number]>(
+			`SELECT id, handle, repo FROM tasks
 			WHERE repo IS NOT NULL AND state IN ('done', 'failed', 'stopped') AND ended_at < ?`,
 		)
-		.all(now - WORKTREE_RETENTION_MS);
-	for (const task of ended) {
-		if (!existsSync(task.workDir)) continue;
+		.all(cutoff);
+	for (const task of candidates) {
 		let path: string;
 		try {
 			path = repoPath(daemon, task.repo);
@@ -303,15 +319,12 @@ export async function cleanUp(daemon: Daemon): Promise<void> {
 			});
 			continue;
 		}
+		// Under the lock worktree creation uses, so a reopened task's Worker
+		// waits for this and then re-creates its worktree from the branch.
 		// oxlint-disable-next-line eslint/no-await-in-loop
-		const removed = await withRepoLock(path, () =>
-			git(daemon, ['-C', path, 'worktree', 'remove', '--force', task.workDir]),
+		await withRepoLock(path, () =>
+			removeOldWorktree(daemon, task.id, path, cutoff),
 		);
-		daemon.log(removed.code === 0 ? 'info' : 'warn', 'worktree removed', {
-			task: task.handle,
-			path: task.workDir,
-			...(removed.code === 0 ? {} : { error: firstLine(removed.stderr) }),
-		});
 	}
 
 	const tasksDir = join(daemon.paths.home, 'tasks');
@@ -329,6 +342,189 @@ export async function cleanUp(daemon: Daemon): Promise<void> {
 	}
 	if (removedLogs > 0) {
 		daemon.log('info', 'old command logs removed', { count: removedLogs });
+	}
+}
+
+/** Whether the task is still ended before `cutoff`, with no Worker running; read fresh each time. */
+function stillOld(
+	daemon: Daemon,
+	taskId: number,
+	cutoff: number,
+): string | null {
+	if (daemon.workers.has(taskId)) return null;
+	const task = daemon.db
+		.query<
+			{ state: string; endedAt: number | null; workDir: string },
+			[number]
+		>(
+			'SELECT state, ended_at AS endedAt, work_dir AS workDir FROM tasks WHERE id = ?',
+		)
+		.get(taskId);
+	if (
+		!task ||
+		!['done', 'failed', 'stopped'].includes(task.state) ||
+		task.endedAt === null ||
+		task.endedAt >= cutoff ||
+		!existsSync(task.workDir)
+	) {
+		return null;
+	}
+	return task.workDir;
+}
+
+/**
+ * Removes one old worktree, after saving everything in it onto its task's
+ * branch. A worktree whose save didn't land on that branch is kept.
+ */
+async function removeOldWorktree(
+	daemon: Daemon,
+	taskId: number,
+	repo: string,
+	cutoff: number,
+): Promise<void> {
+	let workDir = stillOld(daemon, taskId, cutoff);
+	if (workDir === null) return;
+	const handle = basename(workDir);
+	const saved = await saveToBranch(daemon, workDir, handle);
+	if (!saved.ok) {
+		daemon.log('warn', 'worktree kept', {
+			task: handle,
+			path: workDir,
+			reason: saved.reason,
+		});
+		return;
+	}
+	if (saved.commit !== null) {
+		daemon.log('info', 'uncommitted work saved', {
+			task: handle,
+			branch: taskBranch(handle),
+			commit: saved.commit.slice(0, 7),
+		});
+	}
+	// Reopened while the save ran: keep it.
+	workDir = stillOld(daemon, taskId, cutoff);
+	if (workDir === null) return;
+	let removed = await git(daemon, ['-C', repo, 'worktree', 'remove', workDir]);
+	// Its branch now holds everything in it, so forcing past a HEAD or index
+	// that differs loses nothing.
+	if (removed.code !== 0) {
+		removed = await git(daemon, [
+			'-C',
+			repo,
+			'worktree',
+			'remove',
+			'--force',
+			workDir,
+		]);
+	}
+	daemon.log(
+		removed.code === 0 ? 'info' : 'warn',
+		removed.code === 0 ? 'worktree removed' : 'worktree kept',
+		{
+			task: handle,
+			path: workDir,
+			...(removed.code === 0 ? {} : { error: firstLine(removed.stderr) }),
+		},
+	);
+}
+
+/**
+ * Commits a snapshot of the worktree onto `refs/heads/superagent/<handle>`,
+ * whatever the worktree has checked out, without touching its own index.
+ * Succeeds only when the branch's tree then equals the snapshot; `commit` is
+ * `null` when the branch already held it.
+ */
+async function saveToBranch(
+	daemon: Daemon,
+	workDir: string,
+	handle: string,
+): Promise<
+	{ ok: true; commit: string | null } | { ok: false; reason: string }
+> {
+	const ref = `refs/heads/${taskBranch(handle)}`;
+	const run = (args: string[], env?: Record<string, string>) =>
+		git(daemon, ['-C', workDir, ...args], env ? { env } : {});
+	const tip = await run([
+		'rev-parse',
+		'--verify',
+		'--quiet',
+		`${ref}^{commit}`,
+	]);
+	if (tip.code !== 0) return { ok: false, reason: `${ref} doesn't exist` };
+	const parent = tip.stdout.trim();
+
+	const tmp = join(daemon.paths.home, 'tasks', handle, 'tmp');
+	mkdirSync(tmp, { recursive: true });
+	const scratch = mkdtempSync(join(tmp, 'save-'));
+	try {
+		// A temporary index from the checkout, so files tracked despite
+		// .gitignore stay in the snapshot.
+		const env = { GIT_INDEX_FILE: join(scratch, 'index') };
+		for (const args of [
+			['read-tree', 'HEAD'],
+			['add', '-A'],
+		]) {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			const step = await run(args, env);
+			if (step.code !== 0) {
+				return {
+					ok: false,
+					reason: `git ${args[0]}: ${firstLine(step.stderr)}`,
+				};
+			}
+		}
+		const tree = await run(['write-tree'], env);
+		if (tree.code !== 0) {
+			return { ok: false, reason: `git write-tree: ${firstLine(tree.stderr)}` };
+		}
+		const snapshot = tree.stdout.trim();
+		const branchTree = async () =>
+			(await run(['rev-parse', `${ref}^{tree}`])).stdout.trim();
+		if ((await branchTree()) === snapshot) return { ok: true, commit: null };
+
+		const commit = await run([
+			// A signing requirement in the user's config would fail the save.
+			'-c',
+			'commit.gpgsign=false',
+			'-c',
+			'user.name=superagent',
+			'-c',
+			'user.email=superagent@localhost',
+			'commit-tree',
+			'--no-gpg-sign',
+			'-p',
+			parent,
+			'-m',
+			'superagent: save uncommitted work before removing the worktree',
+			snapshot,
+		]);
+		if (commit.code !== 0) {
+			return {
+				ok: false,
+				reason: `git commit-tree: ${firstLine(commit.stderr)}`,
+			};
+		}
+		const sha = commit.stdout.trim();
+		const moved = await run([
+			'update-ref',
+			'-m',
+			'superagent: save before removing the worktree',
+			ref,
+			sha,
+			parent,
+		]);
+		if (moved.code !== 0) {
+			return {
+				ok: false,
+				reason: `git update-ref: ${firstLine(moved.stderr)}`,
+			};
+		}
+		if ((await branchTree()) !== snapshot) {
+			return { ok: false, reason: `${ref} doesn't hold the saved snapshot` };
+		}
+		return { ok: true, commit: sha };
+	} finally {
+		rmSync(scratch, { recursive: true, force: true });
 	}
 }
 
