@@ -1,30 +1,78 @@
 #!/usr/bin/env bun
 import packageJson from '../package.json' with { type: 'json' };
+import { DaemonUnreachable, readSnapshot } from './client.ts';
+import { runDaemon } from './daemon/main.ts';
+import { StartupError } from './daemon/setup.ts';
+import { dataPaths } from './home.ts';
+import { formatStatus } from './status.ts';
 
-const usage = `Usage: superagent [options]
+const usage = `Usage: superagent <command> [options]
+
+Commands:
+  daemon         Run the agent in the foreground until Ctrl-C
+  status         Print the agent's status and exit
 
 Options:
+  --json         With status: print the raw snapshot JSON
   -h, --help     Show this help
-  -v, --version  Show the version`;
+  -v, --version  Show the version
 
-const [arg, ...rest] = Bun.argv.slice(2);
+The data folder is $SUPERAGENT_HOME, or ~/.superagent.`;
 
-if (rest.length > 0) {
-	console.error(`Unexpected argument: ${rest[0]}\n\n${usage}`);
-	process.exitCode = 1;
-} else {
-	switch (arg) {
-		case undefined:
-		case '-h':
-		case '--help':
-			console.log(usage);
-			break;
-		case '-v':
-		case '--version':
-			console.log(packageJson.version);
-			break;
-		default:
-			console.error(`Unknown option: ${arg}\n\n${usage}`);
-			process.exitCode = 1;
+const [command, ...rest] = Bun.argv.slice(2);
+
+switch (command) {
+	case undefined:
+	case '-h':
+	case '--help':
+		if (rest.length > 0) fail(`Unexpected argument: ${rest[0]}`);
+		else console.log(usage);
+		break;
+	case '-v':
+	case '--version':
+		if (rest.length > 0) fail(`Unexpected argument: ${rest[0]}`);
+		else console.log(packageJson.version);
+		break;
+	case 'daemon':
+		if (rest.length > 0) fail(`Unexpected argument: ${rest[0]}`);
+		else await daemon();
+		break;
+	case 'status': {
+		const unexpected = rest.find((arg) => arg !== '--json');
+		if (unexpected !== undefined) fail(`Unexpected argument: ${unexpected}`);
+		else await status(rest.includes('--json'));
+		break;
 	}
+	default:
+		fail(`Unknown command: ${command}`);
+}
+
+async function daemon(): Promise<void> {
+	try {
+		await runDaemon();
+	} catch (error) {
+		if (!(error instanceof StartupError)) throw error;
+		console.error(error.message);
+		process.exitCode = 1;
+	}
+}
+
+async function status(json: boolean): Promise<void> {
+	try {
+		const snapshot = await readSnapshot();
+		console.log(
+			json
+				? JSON.stringify(snapshot, null, 2)
+				: formatStatus(snapshot, dataPaths().home),
+		);
+	} catch (error) {
+		if (!(error instanceof DaemonUnreachable)) throw error;
+		console.error(error.message);
+		process.exitCode = 1;
+	}
+}
+
+function fail(message: string): void {
+	console.error(`${message}\n\n${usage}`);
+	process.exitCode = 1;
 }
