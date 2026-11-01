@@ -1,13 +1,14 @@
 import type { Database } from 'bun:sqlite';
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readFileSync,
 	realpathSync,
 	statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
 	SandboxManager,
@@ -418,20 +419,22 @@ export async function sandboxCommand(
 	const credentials = CREDENTIALS.map((path) => join(home, path));
 	const gitDir =
 		task.repo === null ? null : await repositoryGitDir(daemon, task.repo);
+	const homeFolders = readableHomeFolders(
+		[
+			...TOOLCHAINS.map((folder) => join(home, folder)),
+			...daemon.loginPath.split(delimiter),
+			...daemon.config.sandboxReadPaths,
+		],
+		home,
+		[daemon.paths.home, ...credentials],
+		repoPaths,
+	);
 	const readable = [
 		VENDOR,
 		task.workDir,
 		tmpDir,
 		...(gitDir === null ? [] : [gitDir]),
-		...readableHomeFolders(
-			[
-				...TOOLCHAINS.map((folder) => join(home, folder)),
-				...daemon.loginPath.split(delimiter),
-				...daemon.config.sandboxReadPaths,
-			],
-			home,
-			[daemon.paths.home, ...credentials],
-		),
+		...homeFolders.readable,
 	];
 	const commandId = Buffer.from(
 		crypto.getRandomValues(new Uint8Array(16)),
@@ -441,7 +444,11 @@ export async function sandboxCommand(
 	try {
 		// sandbox-runtime sets TMPDIR to a folder shared by every command.
 		wrapped = await SandboxManager.wrapWithSandbox(
-			`export TMPDIR=${shellQuote(tmpDir)}\n${command}`,
+			[
+				`export TMPDIR=${shellQuote(tmpDir)}`,
+				...linkCommands(homeFolders.links),
+				command,
+			].join('\n'),
 			'/bin/bash',
 			{
 				network: NETWORK,
@@ -504,29 +511,95 @@ function commandEnded(wrapped: boolean): void {
 	}
 }
 
+type HomeLink = { link: string; target: string };
+
 /**
- * The folders below your home folder that commands may read. Compared after
- * resolving `..`, trailing slashes and symlinks: an entry that is, holds or
- * sits inside a hidden folder is dropped, since reading it would win over
- * hiding that folder.
+ * The folders in your home folder that commands may read, by their name
+ * there. A symlink on the way to one (a Nix profile, asdf shims, Homebrew
+ * links) makes its target readable too, and comes back as a link to recreate.
+ * Compared after resolving `..`, trailing slashes and symlinks: an entry
+ * whose name or target is, holds or sits inside a hidden folder is dropped,
+ * since reading it would win over hiding that folder; so is a link into a
+ * repository's checkout.
  */
 function readableHomeFolders(
 	candidates: string[],
 	home: string,
 	hidden: string[],
-): string[] {
-	const realHome = canonical(home);
-	const realHidden = hidden.map(canonical);
-	return candidates.filter((path) => {
-		if (!existsSync(path)) return false;
-		const real = canonical(path);
-		return (
-			isBelow(real, realHome) &&
-			!realHidden.some(
-				(folder) =>
-					real === folder || isBelow(real, folder) || isBelow(folder, real),
-			)
+	checkouts: string[],
+): { readable: string[]; links: HomeLink[] } {
+	const named = resolve(home);
+	const homes = [named, canonical(home)];
+	const hiddenForms = hidden.flatMap((path) => [
+		resolve(path),
+		canonical(path),
+	]);
+	const realCheckouts = checkouts.map(canonical);
+	const overlapsHidden = (path: string) =>
+		hiddenForms.some(
+			(folder) =>
+				path === folder || isBelow(path, folder) || isBelow(folder, path),
 		);
+	const readable = new Set<string>();
+	const links = new Map<string, string>();
+	for (const candidate of candidates) {
+		if (!existsSync(candidate)) continue;
+		const path = resolve(candidate);
+		if (
+			!homes.some((folder) => isBelow(path, folder)) ||
+			overlapsHidden(path) ||
+			overlapsHidden(canonical(path))
+		) {
+			continue;
+		}
+		const link = isBelow(path, named) ? firstLink(path, named) : null;
+		if (link === null) {
+			readable.add(path);
+			continue;
+		}
+		const target = canonical(link);
+		if (
+			overlapsHidden(target) ||
+			realCheckouts.some(
+				(checkout) => target === checkout || isBelow(target, checkout),
+			)
+		) {
+			continue;
+		}
+		// Seatbelt follows the link by name; on Linux it's recreated instead.
+		readable.add(link);
+		readable.add(target);
+		links.set(link, target);
+	}
+	return {
+		readable: [...readable],
+		links: [...links].map(([link, target]) => ({ link, target })),
+	};
+}
+
+/** The first symlink on the way from `home` to `path`, inclusive. */
+function firstLink(path: string, home: string): string | null {
+	let current = home;
+	for (const part of relative(home, path).split(sep)) {
+		current = join(current, part);
+		if (lstatSync(current, { throwIfNoEntry: false })?.isSymbolicLink()) {
+			return current;
+		}
+	}
+	return null;
+}
+
+/**
+ * On Linux your home folder is an empty tmpfs inside the sandbox, and
+ * sandbox-runtime never restores a name there that leads elsewhere, so the
+ * command first recreates each link. A link reads no more than its target,
+ * which was checked like any other read path.
+ */
+function linkCommands(links: HomeLink[]): string[] {
+	if (process.platform !== 'linux') return [];
+	return links.map(({ link, target }) => {
+		const name = shellQuote(link);
+		return `[ -e ${name} ] || [ -L ${name} ] || { mkdir -p ${shellQuote(dirname(link))} && ln -s ${shellQuote(target)} ${name}; } 2>/dev/null`;
 	});
 }
 
