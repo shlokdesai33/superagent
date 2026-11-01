@@ -1,4 +1,5 @@
-import type { FunctionTool, JsonObject, ToolCall } from '../particle/types.ts';
+import type { FunctionTool, ToolCall } from '../particle/types.ts';
+import { ingest } from './ingest.ts';
 import {
 	type Daemon,
 	MESSAGE_COLUMNS,
@@ -6,9 +7,26 @@ import {
 	type Params,
 	cut,
 } from './state.ts';
+import { taskByHandle } from './task-feed.ts';
+import { createTask, endTask, reopenTask } from './tasks.ts';
+import {
+	type Args,
+	ToolError,
+	integer,
+	limitedString,
+	optionalInteger,
+	optionalString,
+	optionalStrings,
+	parseArgs,
+	requiredInteger,
+	requiredString,
+	string,
+	tool,
+} from './tool-args.ts';
 
 const CHAT_CHANNELS = new Set(['console', 'slack']);
 const CHAT_WORD_LIMIT = 100;
+const TITLE_CHARS = 80;
 const TRIGGER_PAGE_CHARS = 8_000;
 const THREAD_MESSAGES = 30;
 const THREAD_MESSAGE_CHARS = 2_000;
@@ -21,27 +39,6 @@ const TASK_STATES = new Set([
 	'failed',
 	'stopped',
 ]);
-const TASKS_NOT_AVAILABLE =
-	"error: not available: tasks aren't built in this version of the agent yet";
-
-const string = (description: string) => ({ type: 'string', description });
-const integer = (description: string) => ({ type: 'integer', description });
-
-function tool(
-	name: string,
-	description: string,
-	properties: Record<string, JsonObject>,
-	required: string[],
-): FunctionTool {
-	return {
-		type: 'function',
-		function: {
-			name,
-			description,
-			parameters: { type: 'object', properties, required },
-		},
-	};
-}
 
 export const ROUTER_TOOLS: FunctionTool[] = [
 	tool(
@@ -58,14 +55,18 @@ export const ROUTER_TOOLS: FunctionTool[] = [
 		'start_task',
 		'Start a task: a Worker that does the work, with its own working folder.',
 		{
-			title: string('At most 80 characters'),
+			title: string(`At most ${TITLE_CHARS} characters`),
 			instructions: string('Everything the Worker needs to know'),
 			threads: {
 				type: 'array',
 				items: { type: 'string' },
-				description: 'IDs of the threads the task takes over',
+				description:
+					'IDs of the threads the task takes over; the console stays with you',
 			},
 			repo: string('Repository name, required when several are configured'),
+			event: integer(
+				'The event the task comes from, 42 for #42; default: the latest in this batch',
+			),
 		},
 		['title', 'instructions', 'threads'],
 	),
@@ -125,15 +126,9 @@ export type ToolOutcome = {
 	result: string;
 	/** Messages to publish once the transaction commits. */
 	messages: MessageRow[];
-	/** For the batch summary: `replied in console`. */
+	/** For the batch summary: `replied in console`, `started a9k3`. */
 	action: string | null;
 };
-
-class ToolError extends Error {
-	override name = 'ToolError';
-}
-
-type Args = Record<string, unknown>;
 
 /** Runs one Router tool call. Synchronous: call it inside the transaction that stores its result. */
 export function runRouterTool(
@@ -142,32 +137,17 @@ export function runRouterTool(
 	call: ToolCall,
 ): ToolOutcome {
 	const none = { messages: [], action: null };
-	let args: Args;
 	try {
-		const parsed: unknown = JSON.parse(call.function.arguments || '{}');
-		if (
-			typeof parsed !== 'object' ||
-			parsed === null ||
-			Array.isArray(parsed)
-		) {
-			throw new ToolError('arguments must be a JSON object');
-		}
-		args = { ...parsed };
-	} catch (error) {
-		return {
-			result: `error: ${error instanceof ToolError ? error.message : "arguments aren't valid JSON"}`,
-			...none,
-		};
-	}
-
-	try {
+		const args = parseArgs(call.function.arguments);
 		switch (call.function.name) {
 			case 'reply':
 				return reply(daemon, batchId, args);
 			case 'start_task':
+				return startTask(daemon, batchId, args);
 			case 'send_to_task':
+				return sendToTask(daemon, args);
 			case 'stop_task':
-				return { result: TASKS_NOT_AVAILABLE, ...none };
+				return stopTask(daemon, args);
 			case 'read_trigger':
 				return { result: readTrigger(daemon, args), ...none };
 			case 'read_thread':
@@ -177,15 +157,130 @@ export function runRouterTool(
 			case 'list_tasks':
 				return { result: listTasks(daemon, args), ...none };
 			default:
-				return {
-					result: `error: no tool ${JSON.stringify(call.function.name)}; use one of ${ROUTER_TOOLS.map((t) => t.function.name).join(', ')}`,
-					...none,
-				};
+				throw new ToolError(
+					`no tool ${JSON.stringify(call.function.name)}; use one of ${ROUTER_TOOLS.map((t) => t.function.name).join(', ')}`,
+				);
 		}
 	} catch (error) {
 		if (!(error instanceof ToolError)) throw error;
 		return { result: `error: ${error.message}`, ...none };
 	}
+}
+
+function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
+	const { db } = daemon;
+	const title = limitedString(args, 'title', TITLE_CHARS);
+	const instructions = requiredString(args, 'instructions').trim();
+	const repo = optionalString(args, 'repo');
+	const notes: string[] = [];
+
+	const threads: string[] = [];
+	for (const id of optionalStrings(args, 'threads')) {
+		const thread = db
+			.query<{ ownable: number; owner: string | null }, [string]>(
+				`SELECT th.ownable, t.handle AS owner FROM threads th
+				LEFT JOIN tasks t ON t.id = th.owner_task_id WHERE th.id = ?`,
+			)
+			.get(id);
+		if (!thread) throw new ToolError(`no thread ${JSON.stringify(id)}`);
+		if (thread.ownable === 0) {
+			notes.push(`${id} stays with you`);
+			continue;
+		}
+		if (thread.owner !== null) {
+			throw new ToolError(
+				`thread ${id} is owned by task ${thread.owner}; use send_to_task ${thread.owner} instead`,
+			);
+		}
+		threads.push(id);
+	}
+
+	const event = optionalInteger(args, 'event');
+	let originEventId: number | null;
+	if (event !== null) {
+		if (
+			!db
+				.query<unknown, [number]>('SELECT 1 FROM events WHERE id = ?')
+				.get(event)
+		) {
+			throw new ToolError(`no event #${event}`);
+		}
+		originEventId = event;
+	} else {
+		// The newest message from people in this batch, else its newest event.
+		originEventId =
+			db
+				.query<{ id: number }, [number]>(
+					`SELECT id FROM events WHERE batch_id = ?
+					ORDER BY channel = 'internal', id DESC LIMIT 1`,
+				)
+				.get(batchId)?.id ?? null;
+	}
+	if (repo !== null) {
+		notes.push(
+			"repositories aren't supported yet, so it works in a scratch folder",
+		);
+	}
+
+	const { handle } = createTask(daemon, {
+		title,
+		instructions,
+		threads,
+		originEventId,
+	});
+	return {
+		result: `started ${handle}${notes.length > 0 ? ` (${notes.join('; ')})` : ''}`,
+		messages: [],
+		action: `started ${handle}`,
+	};
+}
+
+function sendToTask(daemon: Daemon, args: Args): ToolOutcome {
+	const handle = requiredString(args, 'handle');
+	const text = requiredString(args, 'text').trim();
+	const task = taskByHandle(daemon.db, handle);
+	if (!task) throw new ToolError(`no task ${JSON.stringify(handle)}`);
+	const ended = task.state !== 'active' && task.state !== 'needs_you';
+	ingest(daemon, {
+		channel: 'internal',
+		externalId: null,
+		thread: null,
+		kind: 'note',
+		author: { name: 'the Router', id: null, isBot: false, isSelf: false },
+		text,
+		mentionsAgent: false,
+		taskId: task.id,
+	});
+	if (ended) reopenTask(daemon, task.id);
+	return {
+		result: ended
+			? `sent; ${task.handle} had ${task.state === 'done' ? 'finished' : task.state} and is reopened`
+			: `sent; ${task.handle} reads it after its current step`,
+		messages: [],
+		action: `sent a note to ${task.handle}`,
+	};
+}
+
+function stopTask(daemon: Daemon, args: Args): ToolOutcome {
+	const handle = requiredString(args, 'handle');
+	const reason = requiredString(args, 'reason').trim();
+	const task = taskByHandle(daemon.db, handle);
+	if (!task) throw new ToolError(`no task ${JSON.stringify(handle)}`);
+	if (
+		!endTask(daemon, task.id, {
+			state: 'stopped',
+			result: cut(`stopped by the agent: ${reason}`, TITLE_CHARS),
+			dismiss: false,
+			tellRouter: false,
+		})
+	) {
+		throw new ToolError(`${task.handle} already ended (${task.state})`);
+	}
+	return {
+		result: `stopped ${task.handle}; its commands are being ended`,
+		messages: [],
+		action: `stopped ${task.handle}`,
+	};
 }
 
 function reply(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
@@ -464,44 +559,4 @@ function listTasks(daemon: Daemon, args: Args): string {
 				`${task.handle}  ${task.state.padEnd(9)}  ${task.title}${task.threads ? `  follows ${task.threads}` : ''}`,
 		)
 		.join('\n');
-}
-
-function requiredString(args: Args, name: string): string {
-	const value = args[name];
-	if (typeof value !== 'string' || value.trim() === '') {
-		throw new ToolError(`${name} must be a non-empty string`);
-	}
-	return value;
-}
-
-function optionalString(args: Args, name: string): string | null {
-	const value = args[name];
-	if (value === undefined || value === null || value === '') return null;
-	if (typeof value !== 'string')
-		throw new ToolError(`${name} must be a string`);
-	return value;
-}
-
-// Models often send numbers as strings, or event numbers as `#42`.
-function optionalInteger(args: Args, name: string): number | null {
-	const value = args[name];
-	if (value === undefined || value === null || value === '') return null;
-	const number =
-		typeof value === 'string' && /^#?\d+$/.test(value.trim())
-			? Number(value.trim().replace('#', ''))
-			: value;
-	if (
-		typeof number !== 'number' ||
-		!Number.isSafeInteger(number) ||
-		number < 0
-	) {
-		throw new ToolError(`${name} must be a whole number`);
-	}
-	return number;
-}
-
-function requiredInteger(args: Args, name: string): number {
-	const value = optionalInteger(args, name);
-	if (value === null) throw new ToolError(`${name} is required`);
-	return value;
 }

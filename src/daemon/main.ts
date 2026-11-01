@@ -8,6 +8,7 @@ import { createFeed } from './feed.ts';
 import { createLog } from './log.ts';
 import { NO_API_KEY, createModelClient } from './model.ts';
 import { type RouterLoop, recoverRouter, startRouter } from './router.ts';
+import { recoverCommands, captureLoginPath } from './commands.ts';
 import { listen } from './server.ts';
 import {
 	createDataFolder,
@@ -17,7 +18,10 @@ import {
 	releaseLock,
 	takeLock,
 } from './setup.ts';
-import { type Daemon, buildSnapshot } from './state.ts';
+import { buildSnapshot } from './snapshot.ts';
+import type { Daemon } from './state.ts';
+import { startActivityTimer } from './task-feed.ts';
+import { installWorkers, startWorkers, stopWorkers } from './worker.ts';
 
 /**
  * Runs the agent until SIGINT or SIGTERM. Setup problems throw `StartupError`
@@ -34,11 +38,18 @@ export async function runDaemon(): Promise<void> {
 	let db: Database | null = null;
 	let daemon: Daemon | null = null;
 	let router: RouterLoop | null = null;
+	let stopActivity: (() => void) | null = null;
 	const teardown = async () => {
+		if (daemon) daemon.stopping = true;
 		await router?.stop();
+		// Workers may still store their last tool result, so the database stays
+		// open until they and their commands have ended.
+		if (daemon) await stopWorkers(daemon);
+		stopActivity?.();
 		if (daemon) {
 			daemon.feed.close();
 			if (daemon.usageTimer) clearTimeout(daemon.usageTimer);
+			if (daemon.taskUpdates.timer) clearTimeout(daemon.taskUpdates.timer);
 		}
 		await server?.stop(true);
 		db?.close();
@@ -60,6 +71,13 @@ export async function runDaemon(): Promise<void> {
 		const token = loadToken(paths.token);
 		const agentId = loadAgentId(db);
 		const machine = gatherMachineFacts();
+		const loginPath = captureLoginPath();
+		if (loginPath === null) {
+			log(
+				'warn',
+				"couldn't read your login shell's PATH; commands get the agent's own",
+			);
+		}
 
 		const channels = new Map<string, number | null>([['console', null]]);
 		for (const row of db
@@ -94,8 +112,22 @@ export async function runDaemon(): Promise<void> {
 					? { state: 'paused', detail: NO_API_KEY, since: startedAt }
 					: { state: 'ok', detail: null, since: null },
 			router: { batch: null, wake: () => {} },
+			paths,
+			loginPath: loginPath ?? Bun.env.PATH ?? '/usr/bin:/bin',
+			workers: new Map(),
+			commands: new Map(),
+			runWorker: () => {},
+			slotQueue: [],
+			calls: { workers: 0, waiters: new Set() },
+			taskUpdates: { pending: new Set(), timer: null },
+			stopping: false,
 		};
+		installWorkers(context);
 		recoverRouter(context);
+		const interrupted = recoverCommands(context);
+		if (interrupted > 0) {
+			log('info', 'recovered commands', { interrupted });
+		}
 		daemon = context;
 	} catch (error) {
 		await teardown();
@@ -111,6 +143,8 @@ export async function runDaemon(): Promise<void> {
 	});
 	if (daemon.particle === null) log('warn', NO_API_KEY);
 	router = startRouter(daemon);
+	startWorkers(daemon);
+	stopActivity = startActivityTimer(daemon);
 
 	const signal = await new Promise<NodeJS.Signals>((resolve) => {
 		process.once('SIGINT', resolve);

@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import type { DataPaths } from '../home.ts';
 import { MODEL, type ParticleClient } from '../particle/client.ts';
 import type {
 	ActionResult,
@@ -36,6 +37,23 @@ export type Daemon = {
 	particle: ParticleClient | null;
 	model: Omit<Health['model'], 'name'>;
 	router: RouterLive;
+	paths: DataPaths;
+	/** Your login shell's PATH, for Worker commands. */
+	loginPath: string;
+	/** Worker loops of active tasks, by task ID. */
+	workers: Map<number, WorkerLive>;
+	/** Commands still running, by step ID. */
+	commands: Map<number, RunningCommand>;
+	/** Starts the task's Worker loop if it's active, or wakes it. */
+	runWorker: (taskId: number) => void;
+	/** Tasks waiting for a working slot, first come first served. */
+	slotQueue: Array<{ wake: () => void }>;
+	/** Worker model calls in flight, and those waiting for one. */
+	calls: { workers: number; waiters: Set<() => void> };
+	/** Task summaries to publish, merged within 100 ms. */
+	taskUpdates: { pending: Set<number>; timer: Timer | null };
+	/** Set once shutdown starts, so ended loops aren't restarted. */
+	stopping: boolean;
 };
 
 /** What the Router loop is doing right now; the rest of its state is in SQLite. */
@@ -46,24 +64,34 @@ export type RouterLive = {
 	wake: () => void;
 };
 
-export function buildSnapshot(daemon: Daemon): Snapshot {
-	const now = Date.now();
-	const start = dayStart(now);
-	return {
-		now,
-		agent: daemon.agent,
-		day: {
-			start,
-			timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-		},
-		tasks: [],
-		console: consoleMessages(daemon.db),
-		router: routerState(daemon),
-		usage: usageSince(daemon.db, start),
-		health: health(daemon),
-		observed: [],
-	};
-}
+/** A Worker loop's live state; everything durable is in SQLite. */
+export type WorkerLive = {
+	taskId: number;
+	handle: string;
+	/** Aborted when the task stops or fails, and on shutdown. */
+	controller: AbortController;
+	wake: () => void;
+	/** When its model call started, while one is running. */
+	callSince: number | null;
+	/** Holds a working slot for the current turn. */
+	turn: boolean;
+	/** Why it can't go on: `a free worker slot`, `Particle (out of credits)`. */
+	blockedOn: string | null;
+	/** Resolves when the loop has exited. */
+	loop: Promise<void>;
+};
+
+export type RunningCommand = {
+	stepId: number;
+	taskId: number;
+	pgid: number;
+	/** Set once `run` stops waiting; its end then arrives as `command_done`. */
+	background: boolean;
+	/** Why it was ended early, if it was. */
+	stopReason: 'stopped' | 'timed out' | null;
+	/** Resolves with the tool result once the command has ended and its step is stored. */
+	finished: Promise<string>;
+};
 
 /** Named parameters; `strict` mode binds `$name` placeholders from `name` keys. */
 export type Params = [Record<string, string | number | null>];
@@ -84,8 +112,11 @@ export const MESSAGE_COLUMNS = `m.id, m.at, m.channel, m.thread_id AS threadId,
 	t.handle AS taskHandle, m.direction, m.author, m.text, m.delivery
 	FROM messages m LEFT JOIN tasks t ON t.id = m.task_id`;
 
-export function toMessage(row: MessageRow): Message {
-	const text = cut(row.text, FEED_MESSAGE_CHARS);
+export function toMessage(
+	row: MessageRow,
+	limit: number = FEED_MESSAGE_CHARS,
+): Message {
+	const text = cut(row.text, limit);
 	return {
 		id: row.id,
 		at: row.at,
@@ -100,14 +131,14 @@ export function toMessage(row: MessageRow): Message {
 	};
 }
 
-function consoleMessages(db: Database): Message[] {
+export function consoleMessages(db: Database): Message[] {
 	return db
 		.query<MessageRow, [number]>(
 			`SELECT ${MESSAGE_COLUMNS} WHERE m.thread_id = 'console' ORDER BY m.id DESC LIMIT ?`,
 		)
 		.all(CONSOLE_SNAPSHOT_MESSAGES)
 		.toReversed()
-		.map(toMessage);
+		.map((row) => toMessage(row));
 }
 
 export function routerState(daemon: Daemon): RouterState {
@@ -161,7 +192,7 @@ export function setModelHealth(
 	daemon.feed.publish({ type: 'health', health: health(daemon) });
 }
 
-function usageSince(db: Database, since: number): Usage {
+export function usageSince(db: Database, since: number): Usage {
 	// An aggregate without GROUP BY always returns exactly one row.
 	const totals = db
 		.query<Usage, [number]>(
@@ -216,7 +247,7 @@ export function health(daemon: Daemon): Health {
 	};
 }
 
-function dayStart(now: number): number {
+export function dayStart(now: number): number {
 	const day = new Date(now);
 	day.setHours(0, 0, 0, 0);
 	return day.getTime();

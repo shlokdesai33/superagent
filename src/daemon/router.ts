@@ -26,6 +26,7 @@ import {
 	routerChanged,
 	toMessage,
 } from './state.ts';
+import { TASK_COLUMNS, type TaskRow, taskSummary } from './task-feed.ts';
 
 const EFFORT = 'high';
 // Reasoning counts against this cap, and the Router thinks at `high`.
@@ -39,6 +40,7 @@ const EVENT_TEXT_CHARS = 2_000;
 const CONTEXT_MESSAGES = 2;
 const CONTEXT_CHARS = 200;
 const OPEN_TASKS_SHOWN = 30;
+const REPORT_CHARS = 500;
 
 const CUT_OFF_NUDGE =
 	'Your last response was cut off at the output limit. Finish deciding: call the tools you need, or end without tool calls to stay silent.';
@@ -53,6 +55,7 @@ Each user message lists new events (#42 is event 42), oldest first, followed by 
 - Chat replies, including the console, are short (at most 100 words) and say what happens next: who is doing what, or what you need.
 - Answer quick questions directly with reply when no work is needed.
 - Workers' questions for console tasks are already shown to the operator; don't repeat them.
+- Tasks report back as events (finished, failed, reported). Tell the people who asked when there's something they'd want to know, briefly.
 - Old context isn't in front of you. Look it up with read_trigger, read_thread, read_task and list_tasks instead of guessing.
 - Several events may arrive together, and more may arrive while you decide. Handle each one, and don't answer the same thing twice.
 - When you're done, end your turn without tool calls.`;
@@ -123,13 +126,13 @@ export function startRouter(daemon: Daemon): RouterLoop {
 		const opened = openBatch(daemon);
 		const { id: batchId } = opened;
 		const actions: string[] = [];
-		let pending: Item[] = [userItem(render(daemon.db, opened.events, true))];
+		let pending: Item[] = [userItem(render(daemon, opened.events, true))];
 		try {
 			for (let call = 1; call <= MAX_CALLS_PER_BATCH; call++) {
 				if (call > 1) {
 					const drained = takeEvents(daemon.db, batchId, BATCH_EVENTS);
 					if (drained.length > 0) {
-						pending.push(userItem(render(daemon.db, drained, false)));
+						pending.push(userItem(render(daemon, drained, false)));
 						if (daemon.router.batch) {
 							daemon.router.batch.size += drained.length;
 						}
@@ -336,13 +339,14 @@ type EventRow = {
 	author: string;
 	text: string;
 	task: string | null;
+	data: string | null;
 	/** The interrupted batch that took it before, if any. */
 	batchId: number | null;
 };
 
 const EVENT_COLUMNS = `e.id, e.received_at AS at, e.channel, e.thread_id AS threadId,
 	th.title AS threadTitle, th.ownable, o.handle AS owner, e.kind, e.author, e.text,
-	t.handle AS task, e.batch_id AS batchId
+	t.handle AS task, e.data, e.batch_id AS batchId
 	FROM events e
 	LEFT JOIN threads th ON th.id = e.thread_id
 	LEFT JOIN tasks o ON o.id = th.owner_task_id
@@ -389,7 +393,12 @@ function takeEvents(db: Database, batchId: number, limit: number): EventRow[] {
 }
 
 /** The batch message (§5.4): the events, then the open tasks on the first one. */
-function render(db: Database, events: EventRow[], withTasks: boolean): string {
+function render(
+	daemon: Daemon,
+	events: EventRow[],
+	withTasks: boolean,
+): string {
+	const { db } = daemon;
 	const lines: string[] = [];
 	const interrupted = [
 		...new Set(
@@ -424,6 +433,10 @@ function render(db: Database, events: EventRow[], withTasks: boolean): string {
 		'',
 	);
 	for (const event of events) {
+		if (event.channel === 'internal' && event.task !== null) {
+			lines.push(...taskEvent(event, event.task), '');
+			continue;
+		}
 		lines.push(eventHeader(event));
 		const text = cut(event.text, EVENT_TEXT_CHARS);
 		const spill =
@@ -436,7 +449,7 @@ function render(db: Database, events: EventRow[], withTasks: boolean): string {
 		lines.push('');
 	}
 
-	if (withTasks) lines.push(...openTasks(db));
+	if (withTasks) lines.push(...openTasks(daemon));
 	return lines.join('\n').trimEnd();
 }
 
@@ -485,34 +498,90 @@ function earlierMessages(db: Database, event: EventRow): string | null {
 		.join(' · ');
 }
 
-function openTasks(db: Database): string[] {
-	const tasks = db
-		.query<
-			{ handle: string; state: string; title: string; threads: string | null },
-			[number]
-		>(
-			`SELECT t.handle, t.state, t.title,
-				(SELECT GROUP_CONCAT(id, ', ') FROM threads WHERE owner_task_id = t.id) AS threads
-			FROM tasks t WHERE t.state IN ('active', 'needs_you') ORDER BY t.id LIMIT ?`,
+function openTasks(daemon: Daemon): string[] {
+	const tasks = daemon.db
+		.query<TaskRow, [number]>(
+			`SELECT ${TASK_COLUMNS} WHERE t.state IN ('active', 'needs_you') ORDER BY t.id LIMIT ?`,
 		)
 		.all(OPEN_TASKS_SHOWN + 1);
 	if (tasks.length === 0) return ['Open tasks: none'];
 	const total =
-		db
+		daemon.db
 			.query<{ count: number }, []>(
 				"SELECT COUNT(*) AS count FROM tasks WHERE state IN ('active', 'needs_you')",
 			)
 			.get()?.count ?? tasks.length;
 	const lines = [`Open tasks (${total}):`];
-	for (const task of tasks.slice(0, OPEN_TASKS_SHOWN)) {
+	for (const row of tasks.slice(0, OPEN_TASKS_SHOWN)) {
+		const task = taskSummary(daemon, row);
+		const status =
+			task.status === 'waiting' && task.waitingOn
+				? `waiting on ${task.waitingOn}`
+				: task.status.replace('_', ' ');
+		const follows =
+			task.threads.length > 0
+				? `follows ${task.threads.map((thread) => thread.id).join(', ')}`
+				: task.origin.channel;
 		lines.push(
-			`  ${task.handle}  ${task.state.replace('_', ' ').padEnd(9)}  ${task.title}${task.threads ? `  follows ${task.threads}` : ''}`,
+			`  ${task.handle}  ${status.padEnd(9)}  ${task.title}  ${follows}`,
 		);
 	}
 	if (total > OPEN_TASKS_SHOWN) {
 		lines.push(`  … and ${total - OPEN_TASKS_SHOWN} more [list_tasks]`);
 	}
 	return lines;
+}
+
+/** Worker reports are cut at 500 characters, with a pointer to the rest. */
+function withPointer(text: string, pointer: string): string {
+	const shown = cut(text, REPORT_CHARS);
+	return shown.length < text.length
+		? `${shown} [${text.length.toLocaleString('en-US')} characters; ${pointer}]`
+		: shown;
+}
+
+/** A Worker's report to the Router: finished, failed, asked, reported. */
+function taskEvent(event: EventRow, handle: string): string[] {
+	const head = (what: string) =>
+		`#${event.id} · task ${handle} ${what} · ${clock(event.at)}`;
+	const data: unknown = event.data === null ? null : JSON.parse(event.data);
+	const report =
+		typeof data === 'object' &&
+		data !== null &&
+		'report' in data &&
+		typeof data.report === 'string'
+			? data.report
+			: null;
+	switch (event.kind) {
+		case 'task_finished':
+			return [
+				head('finished'),
+				indent(`result: ${cut(event.text.split('\n')[0] ?? '', 200)}`),
+				...(report
+					? [indent(`report: ${withPointer(report, `read_task ${handle}`)}`)]
+					: []),
+			];
+		case 'task_failed':
+			return [head('failed'), indent(event.text)];
+		case 'task_stopped':
+			return [head('was stopped by the operator'), indent(event.text)];
+		case 'task_question':
+			return [head('asked'), indent(event.text)];
+		case 'task_report':
+			return [
+				head('reported'),
+				indent(withPointer(event.text, `read_trigger ${event.id}`)),
+			];
+		case 'thread_released':
+			return [head(`released ${event.text}`)];
+		case 'question_answered':
+			return [head('had its question answered'), indent(event.text)];
+		default:
+			return [
+				head(event.kind),
+				indent(withPointer(event.text, `read_trigger ${event.id}`)),
+			];
+	}
 }
 
 function indent(text: string): string {
