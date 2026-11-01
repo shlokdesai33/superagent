@@ -9,10 +9,6 @@ import { runAction } from './actions.ts';
 import type { Daemon } from './state.ts';
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
-// Twice the feed's ping interval; any line sent resets it. Bun's default of
-// 10 s would cut the feed between pings, and on Bun 1.4.4 `server.timeout(req,
-// 0)` doesn't lift it on a Unix socket (it does on TCP).
-const IDLE_TIMEOUT_S = 30;
 
 /**
  * Listens on the Unix socket. `daemon` is read per request, so the server can
@@ -22,7 +18,7 @@ export function listen(
 	socket: string,
 	daemon: () => Daemon,
 ): Server<undefined> {
-	const options: Bun.Serve.Options<undefined, never> = {
+	return Bun.serve({
 		unix: socket,
 		maxRequestBodySize: MAX_REQUEST_BYTES,
 		async fetch(request) {
@@ -62,11 +58,7 @@ export function listen(
 			});
 			return error(500, 'internal', 'The agent hit an unexpected error');
 		},
-	};
-	// Bun's types allow `idleTimeout` only on TCP servers, but Bun applies it to
-	// Unix sockets too.
-	Reflect.set(options, 'idleTimeout', IDLE_TIMEOUT_S);
-	return Bun.serve(options);
+	});
 }
 
 function checkHeaders(request: Request, token: string): Response | null {

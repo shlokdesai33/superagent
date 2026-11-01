@@ -1,7 +1,8 @@
 import type { FeedLine, FeedUpdate, Snapshot } from '../protocol.ts';
 import type { Log } from './log.ts';
 
-const PING_INTERVAL_MS = 15_000;
+// Under Bun's 10 s idle timeout: Bun 1.4.4 ignores per-request timeouts on Unix-socket servers.
+const PING_INTERVAL_MS = 5_000;
 // A client this far behind isn't reading; dropping it makes it reconnect to a
 // fresh snapshot instead of the daemon buffering forever.
 const MAX_QUEUED_LINES = 10_000;
