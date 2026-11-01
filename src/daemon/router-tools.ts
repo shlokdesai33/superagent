@@ -8,6 +8,7 @@ import {
 	cut,
 } from './state.ts';
 import { taskByHandle } from './task-feed.ts';
+import { taskBranch } from './git.ts';
 import { createTask, endTask, reopenTask } from './tasks.ts';
 import {
 	type Args,
@@ -63,7 +64,9 @@ export const ROUTER_TOOLS: FunctionTool[] = [
 				description:
 					'IDs of the threads the task takes over; the console stays with you',
 			},
-			repo: string('Repository name, required when several are configured'),
+			repo: string(
+				'A repository from the batch message, for code work; "none" for a scratch folder. Omitted: the only repository, if exactly one is configured',
+			),
 			event: integer(
 				'The event the task comes from, 42 for #42; default: the latest in this batch',
 			),
@@ -216,10 +219,23 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 				)
 				.get(batchId)?.id ?? null;
 	}
-	if (repo !== null) {
-		notes.push(
-			"repositories aren't supported yet, so it works in a scratch folder",
+	const repos = daemon.config.repos.map((entry) => entry.name);
+	let chosen: string | null;
+	if (repo === 'none') {
+		chosen = null;
+	} else if (repo !== null) {
+		if (!repos.includes(repo)) {
+			throw new ToolError(
+				`no repository ${JSON.stringify(repo)}; use one of ${[...repos, 'none'].join(', ')}`,
+			);
+		}
+		chosen = repo;
+	} else if (repos.length > 1) {
+		throw new ToolError(
+			`several repositories are configured; pass repo: one of ${[...repos, 'none'].join(', ')}`,
 		);
+	} else {
+		chosen = repos[0] ?? null;
 	}
 
 	const { handle } = createTask(daemon, {
@@ -227,7 +243,9 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 		instructions,
 		threads,
 		originEventId,
+		repo: chosen,
 	});
+	if (chosen !== null) notes.push(`in ${chosen} on ${taskBranch(handle)}`);
 	return {
 		result: `started ${handle}${notes.length > 0 ? ` (${notes.join('; ')})` : ''}`,
 		messages: [],

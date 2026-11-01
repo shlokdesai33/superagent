@@ -180,6 +180,21 @@ export function repairTranscript(
 	return missing.length;
 }
 
+/** The prompt size of the session's last successful call; 0 after a compaction. */
+export function lastPromptTokens(
+	db: Database,
+	sessionId: number,
+	purpose: 'router' | 'worker',
+): number {
+	const last = db
+		.query<{ purpose: string; tokens: number | null }, [number]>(
+			`SELECT purpose, prompt_tokens AS tokens FROM model_calls
+			WHERE session_id = ? AND error IS NULL ORDER BY id DESC LIMIT 1`,
+		)
+		.get(sessionId);
+	return last?.purpose === purpose ? (last.tokens ?? 0) : 0;
+}
+
 /**
  * Folds the older part of the transcript into the summary, keeping the newest
  * items back to about 40,000 tokens. The cut never separates a tool call from
@@ -205,7 +220,7 @@ export async function compact(
 
 	let kept = all.length;
 	let chars = 0;
-	while (kept > 0 && chars < KEEP_CHARS) {
+	while (kept > 0 && chars + (all[kept - 1]?.size ?? 0) <= KEEP_CHARS) {
 		kept -= 1;
 		chars += all[kept]?.size ?? 0;
 	}

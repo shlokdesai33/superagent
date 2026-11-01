@@ -5,6 +5,7 @@ import packageJson from '../../package.json' with { type: 'json' };
 import { dataPaths } from '../home.ts';
 import { loadAgentId, openDatabase } from './db.ts';
 import { createFeed } from './feed.ts';
+import { repositoryName, repositoryRoot, startCleanup } from './git.ts';
 import { createLog } from './log.ts';
 import { NO_API_KEY, createModelClient } from './model.ts';
 import { type RouterLoop, recoverRouter, startRouter } from './router.ts';
@@ -16,6 +17,7 @@ import {
 	loadConfig,
 	loadToken,
 	releaseLock,
+	saveRepos,
 	takeLock,
 } from './setup.ts';
 import { buildSnapshot } from './snapshot.ts';
@@ -39,6 +41,7 @@ export async function runDaemon(): Promise<void> {
 	let daemon: Daemon | null = null;
 	let router: RouterLoop | null = null;
 	let stopActivity: (() => void) | null = null;
+	let stopCleanup: (() => Promise<void>) | null = null;
 	const teardown = async () => {
 		if (daemon) daemon.stopping = true;
 		await router?.stop();
@@ -46,6 +49,7 @@ export async function runDaemon(): Promise<void> {
 		// open until they and their commands have ended.
 		if (daemon) await stopWorkers(daemon);
 		stopActivity?.();
+		await stopCleanup?.();
 		if (daemon) {
 			daemon.feed.close();
 			if (daemon.usageTimer) clearTimeout(daemon.usageTimer);
@@ -68,6 +72,18 @@ export async function runDaemon(): Promise<void> {
 		});
 		db = openDatabase(paths.db);
 		const config = loadConfig(paths.config);
+		// First run inside a repository: use it.
+		if (config.repos.length === 0) {
+			const top = repositoryRoot(process.cwd());
+			if (top !== null) {
+				config.repos = [{ name: repositoryName(top), path: top }];
+				saveRepos(paths.config, config.repos);
+				log('info', 'added the current repository to config.json', {
+					repo: config.repos[0]?.name,
+					path: top,
+				});
+			}
+		}
 		const token = loadToken(paths.token);
 		const agentId = loadAgentId(db);
 		const machine = gatherMachineFacts();
@@ -145,6 +161,7 @@ export async function runDaemon(): Promise<void> {
 	router = startRouter(daemon);
 	startWorkers(daemon);
 	stopActivity = startActivityTimer(daemon);
+	stopCleanup = startCleanup(daemon);
 
 	const signal = await new Promise<NodeJS.Signals>((resolve) => {
 		process.once('SIGINT', resolve);

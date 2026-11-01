@@ -12,6 +12,7 @@ import {
 	type Item,
 	appendItems,
 	compact,
+	lastPromptTokens,
 	promptMessages,
 	repairTranscript,
 	repairTranscripts,
@@ -102,7 +103,7 @@ export function startRouter(daemon: Daemon): RouterLoop {
 	const sessionId = routerSessionId(daemon.db);
 	const cacheKey = `router-${daemon.agent.id}`;
 	let needsCompaction =
-		lastPromptTokens(daemon.db, sessionId) > COMPACT_AT_PROMPT_TOKENS;
+		lastPromptTokens(daemon.db, sessionId, 'router') > COMPACT_AT_PROMPT_TOKENS;
 	let woken: (() => void) | null = null;
 	daemon.router.wake = () => {
 		woken?.();
@@ -279,17 +280,6 @@ export function startRouter(daemon: Daemon): RouterLoop {
 	};
 }
 
-/** The prompt size of the session's last successful call; 0 after a compaction. */
-function lastPromptTokens(db: Database, sessionId: number): number {
-	const last = db
-		.query<{ purpose: string; tokens: number | null }, [number]>(
-			`SELECT purpose, prompt_tokens AS tokens FROM model_calls
-			WHERE session_id = ? AND error IS NULL ORDER BY id DESC LIMIT 1`,
-		)
-		.get(sessionId);
-	return last?.purpose === 'router' ? (last.tokens ?? 0) : 0;
-}
-
 function mailboxSize(db: Database): number {
 	return (
 		db
@@ -449,7 +439,7 @@ function render(
 		lines.push('');
 	}
 
-	if (withTasks) lines.push(...openTasks(daemon));
+	if (withTasks) lines.push(...openTasks(daemon), repositories(daemon));
 	return lines.join('\n').trimEnd();
 }
 
@@ -530,6 +520,13 @@ function openTasks(daemon: Daemon): string[] {
 		lines.push(`  … and ${total - OPEN_TASKS_SHOWN} more [list_tasks]`);
 	}
 	return lines;
+}
+
+/** Where code tasks can work; `start_task` takes one as `repo`. */
+function repositories(daemon: Daemon): string {
+	const { repos } = daemon.config;
+	if (repos.length === 0) return 'Repositories: none configured';
+	return `Repositories: ${repos.map((repo) => `${repo.name} (${repo.path})`).join(', ')}${repos.length === 1 ? '; start_task uses it unless you pass repo: "none"' : '; start_task needs repo'}`;
 }
 
 /** Worker reports are cut at 500 characters, with a pointer to the rest. */

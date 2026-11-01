@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { stopTaskCommands, taskFolder } from './commands.ts';
+import { taskBranch, worktreePath } from './git.ts';
 import { ingest } from './ingest.ts';
 import type { Daemon, Params } from './state.ts';
 import { publishTask, taskRow } from './task-feed.ts';
@@ -37,6 +38,8 @@ export function createTask(
 		instructions: string;
 		threads: string[];
 		originEventId: number | null;
+		/** A configured repository's name, or `null` for a scratch folder. */
+		repo: string | null;
 	},
 ): { id: number; handle: string } {
 	const { db } = daemon;
@@ -53,16 +56,23 @@ export function createTask(
 		const id = Number(
 			db
 				.query<unknown, Params>(
-					`INSERT INTO tasks (handle, title, instructions, state, origin_event_id, work_dir,
-						created_at, updated_at)
-					VALUES ($handle, $title, $instructions, 'active', $origin, $workDir, $at, $at)`,
+					`INSERT INTO tasks (handle, title, instructions, state, origin_event_id, repo,
+						work_dir, branch, created_at, updated_at)
+					VALUES ($handle, $title, $instructions, 'active', $origin, $repo,
+						$workDir, $branch, $at, $at)`,
 				)
 				.run({
 					handle,
 					title: input.title,
 					instructions: input.instructions,
 					origin: input.originEventId,
-					workDir: join(taskFolder(daemon, handle), 'work'),
+					repo: input.repo,
+					// The Worker creates a worktree before its first model call.
+					workDir:
+						input.repo === null
+							? join(taskFolder(daemon, handle), 'work')
+							: worktreePath(daemon, input.repo, handle),
+					branch: input.repo === null ? null : taskBranch(handle),
 					at,
 				}).lastInsertRowid,
 		);
@@ -80,13 +90,14 @@ export function createTask(
 		return { id, handle };
 	})();
 	const folder = taskFolder(daemon, created.handle);
-	mkdirSync(join(folder, 'work'), { recursive: true });
+	if (input.repo === null) mkdirSync(join(folder, 'work'), { recursive: true });
 	mkdirSync(join(folder, 'tmp'), { recursive: true });
 	publishTask(daemon, created.id);
 	daemon.log('info', 'task started', {
 		task: created.handle,
 		title: input.title,
 		origin: input.originEventId,
+		repo: input.repo,
 	});
 	daemon.runWorker(created.id);
 	return created;
