@@ -1,0 +1,85 @@
+import type { Step, TaskDetail, TaskSummary } from '../protocol.ts';
+import type { Seg } from './cells.ts';
+import type { Section } from './model.ts';
+import type { Theme } from './theme.ts';
+
+export type Screen =
+	| { name: 'home' }
+	| { name: 'task'; handle: string }
+	| { name: 'health' }
+	| { name: 'keys'; back: Exclude<Screen, { name: 'keys' }> };
+
+export type Typing = {
+	mode: 'free' | 'answer';
+	/** For answers: the task and its question. */
+	handle: string | null;
+	questionId: number | null;
+	text: string;
+};
+
+export type Toast = {
+	glyph: '✓' | '✗' | '·';
+	subject: string;
+	detail: string | null;
+	at: number;
+	ms: number;
+};
+
+/** An event that went straight to a task, for its row's highlight. */
+export type Arrival = { at: number; handle: string };
+
+/** A row fading out of the section it left. */
+export type Leaving = {
+	task: TaskSummary;
+	section: Section;
+	index: number;
+	at: number;
+};
+
+/** The header's status phrase, and when it last changed, for the cross-fade. */
+export type StatusPhraseChange = {
+	key: string;
+	changedAt: number;
+	previous: Seg[] | null;
+};
+
+export type DetailState = {
+	state: 'loading' | 'ready' | 'missing';
+	detail: TaskDetail | null;
+	/** Diffs of edit steps, by step id. */
+	diffs: Map<number, string | null>;
+};
+
+export type Ui = {
+	theme: Theme;
+	screen: Screen;
+	/** The selected home item's key, kept across updates. */
+	selected: string | null;
+	selectedIndex: number;
+	/** First body row shown, per screen. */
+	scroll: { home: number; page: number };
+	typing: Typing | null;
+	confirmStop: string | null;
+	toast: Toast | null;
+	arrivals: Arrival[];
+	leaving: Leaving[];
+	/** When each NEEDS YOU item appeared, for its fade-in. */
+	appeared: Map<string, number>;
+	status: StatusPhraseChange;
+	details: Map<string, DetailState>;
+};
+
+export const FADE_MS = 320;
+
+/** The steps a task view shows: the detail's, updated by newer feed lines. */
+export function mergedSteps(
+	detail: TaskDetail | null,
+	feed: Map<number, { step: Step; seq: number }> | undefined,
+): Step[] {
+	const byId = new Map<number, Step>();
+	for (const step of detail?.steps ?? []) byId.set(step.id, step);
+	for (const { step, seq } of feed?.values() ?? []) {
+		if (detail === null || seq > detail.seq) byId.set(step.id, step);
+	}
+	return [...byId.values()].toSorted((a, b) => a.id - b.id);
+}

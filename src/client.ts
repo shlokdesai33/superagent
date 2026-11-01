@@ -1,8 +1,12 @@
 import { dataPaths } from './home.ts';
 import {
+	type Action,
+	type ActionResult,
+	type FeedLine,
 	PROTOCOL_HEADER,
 	PROTOCOL_VERSION,
 	type Snapshot,
+	type TaskDetail,
 } from './protocol.ts';
 
 /**
@@ -12,10 +16,17 @@ import {
 export class DaemonUnreachable extends Error {
 	override name = 'DaemonUnreachable';
 	readonly kind: 'not_running' | 'rejected';
+	/** The underlying failure, for people: `nothing listening on …/agent.sock (ENOENT)`. */
+	readonly detail: string;
 
-	constructor(kind: 'not_running' | 'rejected', message: string) {
+	constructor(
+		kind: 'not_running' | 'rejected',
+		message: string,
+		detail: string,
+	) {
 		super(message);
 		this.kind = kind;
+		this.detail = detail;
 	}
 }
 
@@ -29,8 +40,12 @@ export async function daemonFetch(
 	let token: string;
 	try {
 		token = (await Bun.file(paths.token).text()).trim();
-	} catch {
-		throw new DaemonUnreachable('not_running', notRunning);
+	} catch (error) {
+		throw new DaemonUnreachable(
+			'not_running',
+			notRunning,
+			`no token at ${paths.token} (${errorName(error)})`,
+		);
 	}
 
 	const headers = new Headers(init.headers);
@@ -43,14 +58,20 @@ export async function daemonFetch(
 			headers,
 			unix: paths.socket,
 		});
-	} catch {
-		throw new DaemonUnreachable('not_running', notRunning);
+	} catch (error) {
+		if (init.signal?.aborted) throw error;
+		throw new DaemonUnreachable(
+			'not_running',
+			notRunning,
+			`nothing listening on ${paths.socket} (${errorName(error)})`,
+		);
 	}
 
 	if (response.status === 401) {
 		throw new DaemonUnreachable(
 			'rejected',
 			`The agent rejected the token in ${paths.token}`,
+			`HTTP 401 ${errorCode(await response.text()) ?? 'bad_token'}`,
 		);
 	}
 	if (response.status === 400) {
@@ -59,6 +80,7 @@ export async function daemonFetch(
 			throw new DaemonUnreachable(
 				'rejected',
 				'The agent and this terminal are different versions',
+				`HTTP 400 unsupported_protocol; this terminal speaks ${PROTOCOL_HEADER}: ${PROTOCOL_VERSION}`,
 			);
 		}
 		return new Response(text, {
@@ -71,7 +93,26 @@ export async function daemonFetch(
 
 /** Opens the feed, reads its first line and closes it. */
 export async function readSnapshot(): Promise<Snapshot> {
-	const response = await daemonFetch('/v1/feed');
+	for await (const line of openFeed()) {
+		if (line.type !== 'snapshot') {
+			throw new Error('The feed did not start with a snapshot');
+		}
+		return line.snapshot;
+	}
+	throw new Error('The feed ended before its snapshot');
+}
+
+/**
+ * The feed's lines as they arrive, until it ends or `signal` aborts. The first
+ * is always a snapshot.
+ */
+export async function* openFeed(
+	signal?: AbortSignal,
+): AsyncGenerator<FeedLine> {
+	const response = await daemonFetch(
+		'/v1/feed',
+		signal ? { signal } : undefined,
+	);
 	if (!response.ok || response.body === null) {
 		throw new Error(`The agent answered HTTP ${response.status}`);
 	}
@@ -80,40 +121,114 @@ export async function readSnapshot(): Promise<Snapshot> {
 	let buffered = '';
 	try {
 		for (;;) {
-			// The snapshot arrives in chunks; each read waits for the next one.
+			// Lines arrive one chunk at a time; each read waits for the next one.
 			// oxlint-disable-next-line eslint/no-await-in-loop
 			const { done, value } = await reader.read();
-			if (done) throw new Error('The feed ended before its snapshot');
+			if (done) return;
 			buffered += decoder.decode(value, { stream: true });
-			const end = buffered.indexOf('\n');
-			if (end === -1) continue;
-			const line: unknown = JSON.parse(buffered.slice(0, end));
-			if (!isSnapshotLine(line)) {
-				throw new Error('The feed did not start with a snapshot');
+			let end = buffered.indexOf('\n');
+			while (end !== -1) {
+				const text = buffered.slice(0, end);
+				buffered = buffered.slice(end + 1);
+				end = buffered.indexOf('\n');
+				if (text.trim() === '') continue;
+				const line: unknown = JSON.parse(text);
+				if (!isFeedLine(line)) {
+					throw new Error('The feed sent a line without a type');
+				}
+				yield line;
 			}
-			return line.snapshot;
 		}
 	} finally {
-		await reader.cancel();
+		await reader.cancel().catch(() => {});
 	}
 }
 
+/** Runs one action. Failures the user should see come back as `ok: false`. */
+export async function postAction(action: Action): Promise<ActionResult> {
+	const response = await daemonFetch('/v1/actions', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify({ requestId: crypto.randomUUID(), action }),
+	});
+	const text = await response.text();
+	if (!response.ok) {
+		return {
+			ok: false,
+			code: errorCode(text) ?? `http_${response.status}`,
+			subject: 'The agent refused this',
+			detail: errorMessage(text) ?? `HTTP ${response.status}`,
+		};
+	}
+	const result: unknown = JSON.parse(text);
+	if (!isActionResult(result)) {
+		throw new Error('The agent sent an action result without ok');
+	}
+	return result;
+}
+
+/** One task's detail, or `null` when the agent has none for it. */
+export async function fetchTaskDetail(
+	handle: string,
+): Promise<TaskDetail | null> {
+	const response = await daemonFetch(`/v1/tasks/${encodeURIComponent(handle)}`);
+	if (!response.ok) return null;
+	const detail: unknown = await response.json();
+	return isTaskDetail(detail) ? detail : null;
+}
+
+/** The unified diff of one edit step, or `null` when there is none. */
+export async function fetchStepDiff(
+	handle: string,
+	stepId: number,
+): Promise<string | null> {
+	const response = await daemonFetch(
+		`/v1/tasks/${encodeURIComponent(handle)}/steps/${stepId}/diff`,
+	);
+	return response.ok ? response.text() : null;
+}
+
 // The daemon is trusted to send the shape the protocol version promises.
-function isSnapshotLine(
-	line: unknown,
-): line is { type: 'snapshot'; snapshot: Snapshot } {
+function isFeedLine(line: unknown): line is FeedLine {
 	return (
 		typeof line === 'object' &&
 		line !== null &&
 		'type' in line &&
-		line.type === 'snapshot' &&
-		'snapshot' in line &&
-		typeof line.snapshot === 'object' &&
-		line.snapshot !== null
+		typeof line.type === 'string'
 	);
 }
 
-function errorCode(text: string): string | null {
+function isActionResult(value: unknown): value is ActionResult {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'ok' in value &&
+		typeof value.ok === 'boolean' &&
+		'subject' in value &&
+		typeof value.subject === 'string'
+	);
+}
+
+function isTaskDetail(value: unknown): value is TaskDetail {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'task' in value &&
+		'steps' in value &&
+		Array.isArray(value.steps) &&
+		'conversation' in value &&
+		Array.isArray(value.conversation)
+	);
+}
+
+function errorName(error: unknown): string {
+	if (typeof error === 'object' && error !== null && 'code' in error) {
+		return String(error.code);
+	}
+	return error instanceof Error ? error.message : String(error);
+}
+
+function errorBody(text: string): { code: unknown; message: unknown } | null {
 	let body: unknown;
 	try {
 		body = JSON.parse(text);
@@ -124,9 +239,20 @@ function errorCode(text: string): string | null {
 		body !== null &&
 		'error' in body &&
 		typeof body.error === 'object' &&
-		body.error !== null &&
-		'code' in body.error &&
-		typeof body.error.code === 'string'
-		? body.error.code
+		body.error !== null
+		? {
+				code: 'code' in body.error ? body.error.code : null,
+				message: 'message' in body.error ? body.error.message : null,
+			}
 		: null;
+}
+
+function errorCode(text: string): string | null {
+	const code = errorBody(text)?.code;
+	return typeof code === 'string' ? code : null;
+}
+
+function errorMessage(text: string): string | null {
+	const message = errorBody(text)?.message;
+	return typeof message === 'string' ? message : null;
 }
