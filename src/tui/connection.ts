@@ -51,7 +51,6 @@ export function connect(handlers: Handlers): () => void {
 			) {
 				handlers.connection({
 					state: 'rejected',
-					reason: error.detail.startsWith('HTTP 400') ? 'version' : 'token',
 					message: error.message,
 					detail: error.detail,
 				});

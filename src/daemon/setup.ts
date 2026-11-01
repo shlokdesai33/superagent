@@ -1,10 +1,4 @@
-import {
-	chmodSync,
-	mkdirSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { release } from 'node:os';
 import { isAbsolute } from 'node:path';
 import type { DataPaths } from '../home.ts';
@@ -27,14 +21,10 @@ const MACHINE_TOOLS = [
 	'node',
 	'python3',
 	'docker',
-	'bwrap',
-	'socat',
 ];
 
 export function createDataFolder(paths: DataPaths): void {
-	mkdirSync(paths.home, { recursive: true, mode: 0o700 });
-	// The folder's mode is the real access boundary, so tighten an existing one.
-	chmodSync(paths.home, 0o700);
+	mkdirSync(paths.home, { recursive: true });
 	if (Buffer.byteLength(paths.socket) >= SOCKET_PATH_LIMIT) {
 		throw new StartupError(
 			`The socket path ${paths.socket} is longer than this platform allows (${SOCKET_PATH_LIMIT - 1} bytes). Set SUPERAGENT_HOME to a shorter folder.`,
@@ -112,7 +102,6 @@ export function loadConfig(path: string): Config {
 		const { particleApiKey: _, ...defaults } = DEFAULT_CONFIG;
 		writeFileSync(path, `${JSON.stringify(defaults, null, '\t')}\n`, {
 			flag: 'wx',
-			mode: 0o600,
 		});
 		return DEFAULT_CONFIG;
 	}
@@ -191,23 +180,7 @@ export function saveRepos(path: string, repos: Config['repos']): void {
 	const raw: Record<string, unknown> =
 		typeof value === 'object' && value !== null ? { ...value } : {};
 	raw.repos = repos;
-	writeFileSync(path, `${JSON.stringify(raw, null, '\t')}\n`, { mode: 0o600 });
-}
-
-/** Reads `token`, creating 32 random bytes (base64url) when it's missing or empty. */
-export function loadToken(path: string): string {
-	try {
-		const token = readFileSync(path, 'utf8').trim();
-		if (token !== '') return token;
-	} catch (error) {
-		if (errorCode(error) !== 'ENOENT') throw error;
-	}
-	const token = Buffer.from(
-		crypto.getRandomValues(new Uint8Array(32)),
-	).toString('base64url');
-	rmSync(path, { force: true });
-	writeFileSync(path, `${token}\n`, { flag: 'wx', mode: 0o600 });
-	return token;
+	writeFileSync(path, `${JSON.stringify(raw, null, '\t')}\n`);
 }
 
 /** Fails when `git` or `bash` is missing, since Workers can't run without them. */

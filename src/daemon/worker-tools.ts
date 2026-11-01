@@ -1,12 +1,5 @@
-import {
-	existsSync,
-	lstatSync,
-	mkdirSync,
-	readFileSync,
-	realpathSync,
-	writeFileSync,
-} from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import type { FunctionTool, ToolCall } from '../particle/types.ts';
 import { readOutput, runCommand, stopCommand, taskFolder } from './commands.ts';
 import { editDiff } from './git.ts';
@@ -180,11 +173,7 @@ export async function runWorkerTool(
 			case 'read_file':
 				return done(readFile(task, args));
 			case 'write_file': {
-				const target = resolvePath(
-					task.workDir,
-					requiredString(args, 'path'),
-					true,
-				);
+				const target = resolvePath(task.workDir, requiredString(args, 'path'));
 				const content = args.content;
 				if (typeof content !== 'string') {
 					throw new ToolError('content must be a string');
@@ -277,39 +266,17 @@ function isFsError(error: unknown): error is Error & { code: string } {
 	);
 }
 
-/**
- * Resolves `path` against the working folder; after resolving symlinks it must
- * stay inside. The model's arguments never choose the working folder.
- */
+/** Resolves `path` against the working folder. */
 function resolvePath(
 	workDir: string,
 	path: string,
-	write: boolean,
 ): { absolute: string; relative: string } {
-	const root = realpathSync(workDir);
-	const target = resolve(root, path);
-	let existing = target;
-	while (!lstatSync(existing, { throwIfNoEntry: false })) {
-		existing = dirname(existing);
-	}
-	let real: string;
-	try {
-		real = join(realpathSync(existing), relative(existing, target));
-	} catch {
-		throw new ToolError(`${path} is a broken symlink`);
-	}
-	const inside = relative(root, real);
-	if (inside.startsWith('..') || isAbsolute(inside)) {
-		throw new ToolError(`${path} is outside your working folder`);
-	}
-	if (write && inside.split(sep).includes('.git')) {
-		throw new ToolError("writing inside .git isn't allowed");
-	}
-	return { absolute: real, relative: inside || '.' };
+	const absolute = resolve(workDir, path);
+	return { absolute, relative: relative(workDir, absolute) || '.' };
 }
 
 function readFile(task: WorkerTask, args: Args): string {
-	const target = resolvePath(task.workDir, requiredString(args, 'path'), false);
+	const target = resolvePath(task.workDir, requiredString(args, 'path'));
 	if (!existsSync(target.absolute)) {
 		throw new ToolError(`${target.relative} doesn't exist`);
 	}
@@ -345,7 +312,7 @@ async function editFile(
 	task: WorkerTask,
 	args: Args,
 ): Promise<string> {
-	const target = resolvePath(task.workDir, requiredString(args, 'path'), true);
+	const target = resolvePath(task.workDir, requiredString(args, 'path'));
 	const old = requiredString(args, 'old');
 	const replacement = args.new;
 	if (typeof replacement !== 'string') {

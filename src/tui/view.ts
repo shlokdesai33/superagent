@@ -275,24 +275,19 @@ function bodyLines(
 	const prose = (segs: Seg[]): Line[] =>
 		wrap(segs, measure).map((line) => ({ segs: line }));
 	if (connection.state === 'rejected') {
-		const version = connection.reason === 'version';
 		return {
 			lines: [
 				{ segs: [] },
 				...prose([
 					{
-						t: version
-							? 'The agent and this terminal are different versions'
-							: "The agent rejected this terminal's credentials",
+						t: 'The agent and this terminal are different versions',
 						fg: 'fg',
 						b: true,
 					},
 				]),
 				...prose([
 					{
-						t: version
-							? 'Run the same superagent for both; this screen reconnects by itself.'
-							: `It's probably a different agent with its own data folder. This terminal uses ${model.home}.`,
+						t: 'Run the same superagent for both; this screen reconnects by itself.',
 						fg: 'faint',
 					},
 				]),

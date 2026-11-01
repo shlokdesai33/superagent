@@ -39,7 +39,6 @@ export type Connection =
 	| { state: 'offline'; detail: string; since: number }
 	| {
 			state: 'rejected';
-			reason: 'token' | 'version';
 			message: string;
 			detail: string;
 	  };
@@ -47,8 +46,6 @@ export type Connection =
 export type Model = {
 	connection: Connection;
 	live: Live | null;
-	/** The data folder, for the rejected screen. */
-	home: string;
 };
 
 /** What a line changed, for motion. */

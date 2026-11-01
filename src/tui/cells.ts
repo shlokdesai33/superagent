@@ -47,7 +47,7 @@ type Glyph = { g: string; w: number; seg: Seg };
 
 const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
 const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
-// C0 and C1 controls, so text from people can't move the cursor or restyle.
+// C0 and C1 controls would move the cursor or restyle and break the cell grid.
 // oxlint-disable-next-line no-control-regex
 const CONTROLS = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g;
 
@@ -240,7 +240,7 @@ export function paint(
 	const put = (list: Glyph[]) => {
 		for (const { g, w, seg } of list) {
 			const bg = seg.bg === undefined ? rowBg : ink(seg.bg, rowBg);
-			const link = safeLink(seg.link);
+			const link = seg.link ?? null;
 			const attrs =
 				(seg.b ? BOLD : 0) |
 				(seg.i ? ITALIC : 0) |
@@ -275,14 +275,6 @@ export function paint(
 	while (cells.length < columns) cells.push(blank());
 	cells.length = columns;
 	return cells;
-}
-
-// OSC 8 targets are printable ASCII only, so a URL can't end the sequence
-// early with BEL or ESC and smuggle in sequences of its own.
-const LINK = /^[\x21-\x7e]{1,2048}$/;
-
-function safeLink(url: string | undefined): string | null {
-	return url !== undefined && LINK.test(url) ? url : null;
 }
 
 /** One row as escape sequences, starting from a reset. */

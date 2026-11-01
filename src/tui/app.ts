@@ -4,7 +4,6 @@ import {
 	fetchTaskDetail,
 	postAction,
 } from '../client.ts';
-import { dataPaths } from '../home.ts';
 import type {
 	Action,
 	ActionResult,
@@ -58,7 +57,6 @@ export class App {
 	private lastPhrase = statusPhrase({
 		connection: { state: 'connecting' },
 		live: null,
-		home: '',
 	}).segs;
 	private stop: () => void = () => {};
 	private finish: () => void = () => {};
@@ -69,7 +67,6 @@ export class App {
 		this.model = {
 			connection: { state: 'connecting' },
 			live: null,
-			home: dataPaths().home,
 		};
 		const now = Date.now();
 		this.ui = {

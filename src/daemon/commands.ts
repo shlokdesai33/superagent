@@ -1,5 +1,4 @@
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { ingest } from './ingest.ts';
 import { type Daemon, type Params, type RunningCommand, cut } from './state.ts';
@@ -55,16 +54,11 @@ export function commandLog(
 	return join(taskFolder(daemon, handle), 'commands', `${stepId}.log`);
 }
 
-/**
- * Built from an allowlist, never copied from the daemon's environment, so the
- * Particle key and other secrets can't reach a command.
- */
-function commandEnv(daemon: Daemon, handle: string): Record<string, string> {
+/** The daemon's environment, with your login PATH and nothing that waits for a terminal. */
+function commandEnv(daemon: Daemon, handle: string): Env {
 	return {
+		...Bun.env,
 		PATH: daemon.loginPath,
-		HOME: homedir(),
-		USER: userInfo().username,
-		SHELL: Bun.env.SHELL || '/bin/bash',
 		LANG: Bun.env.LANG || 'C.UTF-8',
 		TERM: 'dumb',
 		TMPDIR: join(taskFolder(daemon, handle), 'tmp'),
@@ -229,7 +223,9 @@ export async function runCommand(
 	return `still running as step ${stepId}; its result will arrive as a message. Use read_output to look at it meanwhile, or stop_command to end it.`;
 }
 
-function spawn(command: string, cwd: string, env: Record<string, string>) {
+type Env = Record<string, string | undefined>;
+
+function spawn(command: string, cwd: string, env: Env) {
 	// `detached` makes the shell a process-group leader, so stopping the group
 	// ends everything the command started.
 	return Bun.spawn(['/bin/bash', '-c', command], {

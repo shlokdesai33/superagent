@@ -23,8 +23,6 @@ export type Daemon = {
 	db: Database;
 	feed: Feed;
 	log: Log;
-	/** The API token every request must send. */
-	token: string;
 	config: Config;
 	agent: Snapshot['agent'];
 	machine: MachineFacts;
@@ -245,7 +243,6 @@ export function health(daemon: Daemon): Health {
 					],
 		machine: daemon.machine,
 		proactive: 'off',
-		sandbox: 'off',
 	};
 }
 

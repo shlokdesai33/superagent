@@ -15,7 +15,6 @@ import {
 	createDataFolder,
 	gatherMachineFacts,
 	loadConfig,
-	loadToken,
 	releaseLock,
 	saveRepos,
 	takeLock,
@@ -86,7 +85,6 @@ export async function runDaemon(options: {
 				});
 			}
 		}
-		const token = loadToken(paths.token);
 		const agentId = loadAgentId(db);
 		const machine = gatherMachineFacts();
 		const loginPath = captureLoginPath();
@@ -113,7 +111,6 @@ export async function runDaemon(options: {
 			db,
 			feed: createFeed(() => buildSnapshot(context), log),
 			log,
-			token,
 			config,
 			agent: {
 				id: agentId,

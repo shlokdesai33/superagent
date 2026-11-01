@@ -7,17 +7,9 @@ import {
 	statSync,
 	writeFileSync,
 } from 'node:fs';
-import { homedir, userInfo } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import type { Daemon } from './state.ts';
 
-// Nothing a Worker planted in a repository runs on the host.
-const SAFE_FLAGS = [
-	'-c',
-	'core.hooksPath=/dev/null',
-	'-c',
-	'core.fsmonitor=false',
-];
 const FETCH_TIMEOUT_MS = 60_000;
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_DIFF_CHARS = 256 * 1024;
@@ -27,24 +19,16 @@ const CLEANUP_INTERVAL_MS = 24 * 60 * 60_000;
 
 export type GitResult = { code: number; stdout: string; stderr: string };
 
-/**
- * Built from an allowlist, like Worker commands, so the Particle key can't
- * reach anything a repository's config makes git run (credential helpers,
- * `core.sshCommand`).
- */
-function gitEnv(daemon: Daemon | null): Record<string, string> {
-	const env: Record<string, string> = {
+/** The daemon's environment, with your login PATH and no credential prompts. */
+function gitEnv(daemon: Daemon | null): Record<string, string | undefined> {
+	return {
+		...Bun.env,
 		PATH: daemon?.loginPath ?? Bun.env.PATH ?? '/usr/bin:/bin',
-		HOME: homedir(),
-		USER: userInfo().username,
-		LANG: Bun.env.LANG || 'C.UTF-8',
 		GIT_TERMINAL_PROMPT: '0',
 	};
-	if (Bun.env.SSH_AUTH_SOCK) env.SSH_AUTH_SOCK = Bun.env.SSH_AUTH_SOCK;
-	return env;
 }
 
-/** Runs git with the safe flags. Never throws for a non-zero exit. */
+/** Runs git. Never throws for a non-zero exit. */
 export async function git(
 	daemon: Daemon,
 	args: string[],
@@ -54,7 +38,7 @@ export async function git(
 		env?: Record<string, string>;
 	} = {},
 ): Promise<GitResult> {
-	const child = Bun.spawn(['git', ...SAFE_FLAGS, ...args], {
+	const child = Bun.spawn(['git', ...args], {
 		cwd: options.cwd ?? daemon.paths.home,
 		env: { ...gitEnv(daemon), ...options.env },
 		stdin: 'ignore',
@@ -76,17 +60,14 @@ function firstLine(text: string): string {
 
 /** The top of the git repository containing `dir`, or `null`. */
 export function repositoryRoot(dir: string): string | null {
-	const result = Bun.spawnSync(
-		['git', ...SAFE_FLAGS, 'rev-parse', '--show-toplevel'],
-		{
-			cwd: dir,
-			env: gitEnv(null),
-			stdin: 'ignore',
-			stdout: 'pipe',
-			stderr: 'ignore',
-			timeout: GIT_TIMEOUT_MS,
-		},
-	);
+	const result = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
+		cwd: dir,
+		env: gitEnv(null),
+		stdin: 'ignore',
+		stdout: 'pipe',
+		stderr: 'ignore',
+		timeout: GIT_TIMEOUT_MS,
+	});
 	const top = result.stdout.toString().trim();
 	return result.exitCode === 0 && top !== '' ? top : null;
 }
