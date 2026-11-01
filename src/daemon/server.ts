@@ -8,6 +8,7 @@ import {
 } from '../protocol.ts';
 import { runAction } from './actions.ts';
 import { readOutput } from './commands.ts';
+import { scriptEvent } from './script-channel.ts';
 import {
 	type Daemon,
 	MESSAGE_COLUMNS,
@@ -64,6 +65,36 @@ export function listen(
 						? Response.json(outcome.result)
 						: error(400, outcome.code, outcome.message);
 				}
+				case '/v1/events': {
+					if (!daemon().scriptChannel) {
+						return error(
+							404,
+							'not_found',
+							'The script channel is off; start the agent with --script-channel',
+						);
+					}
+					if (request.method !== 'POST') return methodNotAllowed('POST');
+					let body: unknown;
+					try {
+						body = await request.json();
+					} catch {
+						return error(400, 'bad_request', 'The body must be JSON');
+					}
+					const outcome = scriptEvent(daemon(), body);
+					return outcome.ok
+						? Response.json({ seq: outcome.seq, duplicate: outcome.duplicate })
+						: error(400, 'bad_request', outcome.message);
+				}
+			}
+
+			const thread = pathname.match(/^\/v1\/threads\/(.+)$/);
+			if (thread) {
+				if (request.method !== 'GET') return methodNotAllowed('GET');
+				const id = decodeURIComponent(thread[1] ?? '');
+				const detail = threadDetail(daemon(), id);
+				return detail === null
+					? error(404, 'unknown_thread', `No thread ${id}`)
+					: Response.json(detail);
 			}
 
 			const task = pathname.match(
@@ -128,6 +159,48 @@ function taskDetail(daemon: Daemon, task: TaskRow): TaskDetail {
 		report: task.report,
 		workDir: task.workDir,
 		branch: task.branch,
+	};
+}
+
+/** `GET /v1/threads/:id`, for tests and debugging: a thread and its last 500 messages. */
+function threadDetail(daemon: Daemon, id: string) {
+	const { db } = daemon;
+	const thread = db
+		.query<
+			{
+				id: string;
+				channel: string;
+				title: string;
+				url: string | null;
+				owner: string | null;
+			},
+			[string]
+		>(
+			`SELECT th.id, th.channel, th.title, th.url, t.handle AS owner
+			FROM threads th LEFT JOIN tasks t ON t.id = th.owner_task_id WHERE th.id = ?`,
+		)
+		.get(id);
+	if (!thread) return null;
+	return {
+		seq: daemon.feed.seq,
+		thread: {
+			...thread,
+			followedBy: db
+				.query<{ handle: string }, [string]>(
+					`SELECT t.handle FROM task_threads tt JOIN tasks t ON t.id = tt.task_id
+					WHERE tt.thread_id = ? ORDER BY tt.since`,
+				)
+				.all(id)
+				.map((task) => task.handle),
+		},
+		messages: db
+			.query<MessageRow, [string, number]>(
+				`SELECT * FROM (
+					SELECT ${MESSAGE_COLUMNS} WHERE m.thread_id = ?1 ORDER BY m.id DESC LIMIT ?2
+				) ORDER BY id`,
+			)
+			.all(id, CONVERSATION_MESSAGES)
+			.map((row) => toMessage(row, DETAIL_MESSAGE_CHARS)),
 	};
 }
 
