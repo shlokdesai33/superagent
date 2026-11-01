@@ -150,6 +150,16 @@ export class App {
 			const place = before ? placeOf(live, before) : null;
 			const applied = apply(live, line, now);
 			if (applied.kind === 'task') {
+				// The report and the full steps arrive only with the detail, and a
+				// task writes its report as it ends.
+				const { screen } = this.ui;
+				if (
+					screen.name === 'task' &&
+					screen.handle === applied.after.handle &&
+					applied.before?.status !== applied.after.status
+				) {
+					this.loadDetail(applied.after.handle);
+				}
 				const after = sectionOf(applied.after, live.day.start);
 				if (place && place.section !== after) {
 					this.ui.leaving.push({
