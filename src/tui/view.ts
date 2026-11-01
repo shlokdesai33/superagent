@@ -569,7 +569,7 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 		pairs.push(['a/x', 'act or ignore']);
 	pairs.push(['/', 'write']);
 	if (selected?.kind === 'task' && stoppable(selected.task))
-		pairs.push(['s s', 'stop']);
+		pairs.push(['s s', selected.task.status === 'failed' ? 'dismiss' : 'stop']);
 	pairs.push(['h', 'health'], ['?', 'keys'], ['q', 'quit']);
 	return fitHint(pairs, content, ['q', 's s', 'h', 'j/k']);
 }
