@@ -21,9 +21,7 @@ export type Line = {
 	right?: Seg[];
 	/** A tint across the whole row. */
 	bg?: Color;
-	/** On the home screen, the gutter carries the river. */
-	river?: boolean;
-	/** The item this row belongs to, for selection and drops. */
+	/** The item this row belongs to, for selection and arrival highlights. */
 	key?: string;
 	/** 0 to 1; text blends toward the row's background below 1. */
 	fade?: number;
@@ -42,8 +40,6 @@ export const BOLD = 1;
 export const ITALIC = 2;
 export const UNDERLINE = 4;
 
-/** Columns before the content: ` ┊ `. */
-export const GUTTER = 3;
 /** Columns after the content. */
 export const MARGIN = 1;
 
@@ -221,12 +217,11 @@ export function wrap(
 	return kept;
 }
 
-/** Lays a line out to exactly `columns` cells, gutter and margin included. */
+/** Lays a line out to exactly `columns` cells, margin included. */
 export function paint(
 	line: Line,
 	theme: Theme,
 	columns: number,
-	gutter: { ch: string; fg: Rgb } | null,
 	rowBg: Rgb,
 ): Cell[] {
 	const fade = line.fade ?? 1;
@@ -245,31 +240,24 @@ export function paint(
 	const put = (list: Glyph[]) => {
 		for (const { g, w, seg } of list) {
 			const bg = seg.bg === undefined ? rowBg : ink(seg.bg, rowBg);
+			const link = safeLink(seg.link);
 			const attrs =
 				(seg.b ? BOLD : 0) |
 				(seg.i ? ITALIC : 0) |
-				(seg.u || seg.link ? UNDERLINE : 0);
+				(seg.u || link ? UNDERLINE : 0);
 			const cell: Cell = {
 				ch: g,
 				fg: ink(seg.fg ?? 'fg', bg),
 				bg,
 				attrs,
-				link: seg.link ?? null,
+				link,
 			};
 			cells.push(cell);
 			if (w === 2) cells.push({ ...cell, ch: '' });
 		}
 	};
 
-	const content = Math.max(0, columns - GUTTER - MARGIN);
-	for (let c = 0; c < Math.min(GUTTER, columns); c += 1) cells.push(blank());
-	if (gutter && columns > 1) {
-		const cell = cells[1];
-		if (cell) {
-			cell.ch = gutter.ch;
-			cell.fg = gutter.fg;
-		}
-	}
+	const content = Math.max(0, columns - MARGIN);
 
 	const right = line.right && line.right.length > 0 ? line.right : null;
 	const rightWidth = right ? Math.min(width(right), content) : 0;
@@ -287,6 +275,14 @@ export function paint(
 	while (cells.length < columns) cells.push(blank());
 	cells.length = columns;
 	return cells;
+}
+
+// OSC 8 targets are printable ASCII only, so a URL can't end the sequence
+// early with BEL or ESC and smuggle in sequences of its own.
+const LINK = /^[\x21-\x7e]{1,2048}$/;
+
+function safeLink(url: string | undefined): string | null {
+	return url !== undefined && LINK.test(url) ? url : null;
 }
 
 /** One row as escape sequences, starting from a reset. */

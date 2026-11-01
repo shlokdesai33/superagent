@@ -14,7 +14,7 @@ import {
 	wrap,
 } from '../cells.ts';
 import { age, ago } from '../format.ts';
-import { type Live, type Section, sections, workingCount } from '../model.ts';
+import { type Live, type Section, sections } from '../model.ts';
 import {
 	BARS,
 	MEASURE,
@@ -32,7 +32,7 @@ const CONSOLE_SHOWN = 4;
 
 type Context = {
 	ui: Ui;
-	/** Content columns: the terminal width less the gutter and margin. */
+	/** Content columns: the terminal width less the margin. */
 	content: number;
 	/** The terminal is 100 columns or wider. */
 	wide: boolean;
@@ -111,7 +111,7 @@ export function homeBody(
 
 	if (all.working.length > 0 || leaving('working').length > 0) {
 		section(() => {
-			lines.push(label('WORKING', workingCount(live)));
+			lines.push(label('WORKING', all.working.length));
 			lines.push(
 				...withGhosts('working', all.working, (task, fade, ghost) => [
 					workingRow(task, ctx, fade, ghost),
@@ -157,7 +157,7 @@ export function homeBody(
 
 	if (lines.length === 0) {
 		lines.push(
-			{ segs: [{ t: 'Nothing is happening yet.', fg: 'fg' }], river: true },
+			{ segs: [{ t: 'Nothing is happening yet.', fg: 'fg' }] },
 			{
 				segs: [
 					{
@@ -165,7 +165,6 @@ export function homeBody(
 						fg: 'faint',
 					},
 				],
-				river: true,
 			},
 		);
 	}
@@ -200,7 +199,6 @@ function row(
 		...(selected ? { bg: 'surface' } : {}),
 		...(fade === undefined ? {} : { fade }),
 		...(ghost ? {} : { key }),
-		river: true,
 	};
 }
 
@@ -465,6 +463,5 @@ function consoleRows(message: Message, ctx: Context): Line[] {
 				: { t: ' '.repeat(7) },
 			...segs,
 		],
-		river: true,
 	}));
 }

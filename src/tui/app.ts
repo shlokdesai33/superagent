@@ -5,7 +5,13 @@ import {
 	postAction,
 } from '../client.ts';
 import { dataPaths } from '../home.ts';
-import type { Action, ActionResult, FeedLine, Step } from '../protocol.ts';
+import type {
+	Action,
+	ActionResult,
+	FeedLine,
+	Step,
+	TaskDetail,
+} from '../protocol.ts';
 import { connect } from './connection.ts';
 import type { InputEvent } from './input.ts';
 import {
@@ -27,7 +33,7 @@ import { statusPhrase, view } from './view.ts';
 const IDLE_MS = 500;
 const TOAST_MS = 5_000;
 const ERROR_TOAST_MS = 8_000;
-const DROP_KEPT_MS = 3_000;
+const ARRIVAL_KEPT_MS = 1_000;
 /** How long a toast waits for the feed to catch up with its action. */
 const TOAST_WAIT_MS = 2_000;
 const PAGE = 5;
@@ -47,6 +53,7 @@ export class App {
 	private timer: Timer | null = null;
 	private soon = false;
 	private closed = false;
+	private readonly detailRequests = new Map<string, number>();
 	/** The phrase on screen now, to fade out when it changes. */
 	private lastPhrase = statusPhrase({
 		connection: { state: 'connecting' },
@@ -74,7 +81,7 @@ export class App {
 			typing: null,
 			confirmStop: null,
 			toast: null,
-			drops: [],
+			arrivals: [],
 			leaving: [],
 			appeared: new Map(),
 			status: {
@@ -117,7 +124,7 @@ export class App {
 			connection.state === 'offline' && previous.state === 'offline'
 				? { ...connection, since: previous.since }
 				: connection;
-		this.ui.drops = [];
+		this.ui.arrivals = [];
 		this.statusChanged();
 		this.render();
 	}
@@ -126,6 +133,11 @@ export class App {
 		const now = Date.now();
 		if (line.type === 'snapshot') {
 			this.model.live = fromSnapshot(line.snapshot, line.seq, now);
+			// Sequences restart with each connection: every new feed line is
+			// newer than a detail read before it.
+			for (const state of this.ui.details.values()) {
+				if (state.detail) state.detail = { ...state.detail, seq: -1 };
+			}
 			this.ui.leaving = [];
 			this.ui.appeared.clear();
 			const { screen } = this.ui;
@@ -149,8 +161,15 @@ export class App {
 				if (after === 'needs' && place?.section !== 'needs') {
 					this.ui.appeared.set(`task:${applied.after.handle}`, now);
 				}
-			} else if (applied.kind === 'routed' && this.ui.screen.name === 'home') {
-				this.ui.drops.push({ at: now, destination: applied.event.destination });
+			} else if (
+				applied.kind === 'routed' &&
+				applied.event.destination.kind === 'task' &&
+				this.ui.screen.name === 'home'
+			) {
+				this.ui.arrivals.push({
+					at: now,
+					handle: applied.event.destination.handle,
+				});
 			}
 			if (line.type === 'health') {
 				for (const problem of live.health.problems) {
@@ -186,34 +205,40 @@ export class App {
 		void this.fetchDetail(handle);
 	}
 
+	/**
+	 * Only the latest request for a handle writes its result, and a failure
+	 * keeps a detail already on screen.
+	 */
 	private async fetchDetail(handle: string): Promise<void> {
-		const diffs =
-			this.ui.details.get(handle)?.diffs ?? new Map<number, string | null>();
+		const request = (this.detailRequests.get(handle) ?? 0) + 1;
+		this.detailRequests.set(handle, request);
+		const previous = this.ui.details.get(handle);
+		const diffs = previous?.diffs ?? new Map<number, string | null>();
 		this.ui.details.set(handle, {
 			state: 'loading',
-			detail: this.ui.details.get(handle)?.detail ?? null,
+			detail: previous?.detail ?? null,
 			diffs,
 		});
-		let detail = null;
+		let detail: TaskDetail | null = null;
 		try {
 			detail = await fetchTaskDetail(handle);
 		} catch {
-			// Shown as missing; the feed's steps and messages still fill the view.
+			// The feed's steps and messages still fill the view.
 		}
+		if (this.detailRequests.get(handle) !== request) return;
+		const shown = detail ?? this.ui.details.get(handle)?.detail ?? null;
 		this.ui.details.set(handle, {
-			state: detail ? 'ready' : 'missing',
-			detail,
+			state: shown ? 'ready' : 'missing',
+			detail: shown,
 			diffs,
 		});
-		for (const step of mergedSteps(
-			detail,
-			this.model.live?.steps.get(handle),
-		)) {
+		for (const step of mergedSteps(shown, this.model.live?.steps.get(handle))) {
 			this.maybeLoadDiff(handle, step);
 		}
 		this.render();
 	}
 
+	/** `diffs` holds a step's diff, or `null` while it loads. */
 	private maybeLoadDiff(handle: string, step: Step): void {
 		const { screen } = this.ui;
 		if (screen.name !== 'task' || screen.handle !== handle) return;
@@ -224,17 +249,21 @@ export class App {
 		void this.fetchDiff(state.diffs, handle, step.id);
 	}
 
+	/** A failed or empty fetch is forgotten, so the next detail load retries it. */
 	private async fetchDiff(
 		diffs: Map<number, string | null>,
 		handle: string,
 		stepId: number,
 	): Promise<void> {
+		let diff: string | null = null;
 		try {
-			diffs.set(stepId, await fetchStepDiff(handle, stepId));
-			this.render();
+			diff = await fetchStepDiff(handle, stepId);
 		} catch {
-			// The step shows without its diff.
+			// Retried with the next detail load.
 		}
+		if (diff === null) diffs.delete(stepId);
+		else diffs.set(stepId, diff);
+		this.render();
 	}
 
 	// ---- actions and toasts ----
@@ -574,8 +603,8 @@ export class App {
 	}
 
 	private prune(now: number): void {
-		this.ui.drops = this.ui.drops.filter(
-			(drop) => now - drop.at < DROP_KEPT_MS,
+		this.ui.arrivals = this.ui.arrivals.filter(
+			(arrival) => now - arrival.at < ARRIVAL_KEPT_MS,
 		);
 		this.ui.leaving = this.ui.leaving.filter(
 			(entry) => now - entry.at < FADE_MS,

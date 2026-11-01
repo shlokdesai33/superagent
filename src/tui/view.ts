@@ -1,6 +1,5 @@
 import {
 	type Cell,
-	GUTTER,
 	type Line,
 	MARGIN,
 	type Seg,
@@ -21,16 +20,7 @@ import {
 	stoppable,
 	workingCount,
 } from './model.ts';
-import {
-	FRAME_MS,
-	MEASURE,
-	chip,
-	figure,
-	hint,
-	rule,
-	sep,
-	spinner,
-} from './parts.ts';
+import { MEASURE, chip, figure, hint, rule, sep, spinner } from './parts.ts';
 import { healthBody } from './screens/health.ts';
 import { homeBody } from './screens/home.ts';
 import { keysBody } from './screens/keys.ts';
@@ -72,14 +62,14 @@ export function view(
 		};
 		return {
 			rows: Array.from({ length: rows }, (_, y) =>
-				paint(y === 0 ? message : { segs: [] }, theme, columns, null, theme.bg),
+				paint(y === 0 ? message : { segs: [] }, theme, columns, theme.bg),
 			),
 			animating: false,
 			scroll: 0,
 		};
 	}
 
-	const content = columns - GUTTER - MARGIN;
+	const content = columns - MARGIN;
 	const { connection } = model;
 	const live = connection.state === 'rejected' ? null : model.live;
 	const stale = live !== null && connection.state !== 'live';
@@ -114,58 +104,24 @@ export function view(
 	const visible = body.lines.slice(scroll, scroll + bodyHeight);
 
 	const screen: Line[] = [header, rule(content), ...visible];
-	while (screen.length < 2 + bodyHeight) screen.push({ segs: [], river: true });
+	while (screen.length < 2 + bodyHeight) screen.push({ segs: [] });
 	screen.push(...footer);
 
 	const top = 2;
 	const routerRow = top + bodyHeight + 1;
-	const gutters = new Map<number, { ch: string; fg: Rgb }>();
+	// A task's rows fade from `flash` when an event goes straight to it.
 	const flashes = new Map<number, number>();
 	if (home && !stale) {
-		for (let y = top; y < top + bodyHeight; y += 1)
-			gutters.set(y, { ch: '┊', fg: theme.ghost });
-		gutters.set(routerRow, { ch: '┊', fg: theme.ghost });
-		for (const drop of ui.drops) {
-			const elapsed = now - drop.at;
-			const to = drop.destination;
-			const targetKey = to.kind === 'task' ? `task:${to.handle}` : null;
-			const targetRows =
-				targetKey === null
-					? []
-					: screen.flatMap((line, y) =>
-							line.key === targetKey && y >= top && y < top + bodyHeight
-								? [y]
-								: [],
-						);
-			const target =
-				to.kind === 'router'
-					? routerRow
-					: to.kind === 'filtered'
-						? top + 3
-						: (targetRows[0] ?? top + bodyHeight - 1);
-			const distance = Math.max(0, target - top);
-			const frames =
-				to.kind === 'filtered'
-					? 12
-					: Math.max(12, Math.min(20, Math.round(10 + distance * 0.6)));
-			const travel = frames * FRAME_MS;
-			if (elapsed < travel) {
-				const progress = elapsed / travel;
-				const y = top + Math.round(easeOut(progress) * distance);
-				const fg =
-					to.kind === 'router'
-						? theme.accent
-						: to.kind === 'filtered'
-							? blend(theme.ghost, theme.bg, progress)
-							: theme.fg;
-				gutters.set(y, { ch: '●', fg });
-				animating = true;
-			} else if (elapsed < travel + FLASH_MS && to.kind !== 'filtered') {
-				const fade = (elapsed - travel) / FLASH_MS;
-				const hit = to.kind === 'router' ? [routerRow] : targetRows;
-				for (const y of hit) flashes.set(y, fade);
-				animating = true;
-			}
+		for (const arrival of ui.arrivals) {
+			const elapsed = now - arrival.at;
+			if (elapsed >= FLASH_MS) continue;
+			const key = `task:${arrival.handle}`;
+			screen.forEach((line, y) => {
+				if (line.key === key && y >= top && y < top + bodyHeight) {
+					flashes.set(y, elapsed / FLASH_MS);
+				}
+			});
+			animating = true;
 		}
 	}
 
@@ -173,17 +129,13 @@ export function view(
 		const base = line.bg === undefined ? theme.bg : resolve(theme, line.bg);
 		const flash = flashes.get(y);
 		const rowBg = flash === undefined ? base : blend(theme.flash, base, flash);
-		const cells = paint(line, theme, columns, gutters.get(y) ?? null, rowBg);
+		const cells = paint(line, theme, columns, rowBg);
 		const inBody = y >= top && y < top + bodyHeight;
-		return stale && (inBody || y === routerRow)
+		return stale && (inBody || (home && y === routerRow))
 			? cells.map((cell) => mute(cell, ui))
 			: cells;
 	});
 	return { rows: painted, animating, scroll };
-}
-
-function easeOut(progress: number): number {
-	return 1 - (1 - progress) ** 3;
 }
 
 /** Stale data: every word in `faint`, the lines left as they are. */
@@ -447,7 +399,7 @@ function routerLine(live: Live, now: number, theme: Theme): Line {
 			);
 		}
 	}
-	return { segs, river: true, key: 'router' };
+	return { segs };
 }
 
 /** A 3-cell band, `dim` to `fg` and back, across the word for 1 s every 3 s. */

@@ -54,7 +54,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 			fg: 'faint',
 		},
 	];
-	const lines: Line[] = [{ segs: summary }, blank(false)];
+	const lines: Line[] = [{ segs: summary }, blank()];
 
 	if (problems > 0) {
 		lines.push(label('PROBLEMS'));
@@ -82,7 +82,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 				),
 			});
 		}
-		lines.push(blank(false));
+		lines.push(blank());
 	}
 
 	lines.push(label('CHANNELS'));
@@ -110,7 +110,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 			],
 		});
 	}
-	lines.push(blank(false));
+	lines.push(blank());
 
 	const { model } = health;
 	lines.push(label('MODEL'));
@@ -129,7 +129,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 				: []),
 		],
 	});
-	lines.push(blank(false));
+	lines.push(blank());
 
 	const peak = Math.max(usage.inputTokens, usage.outputTokens);
 	const cachedShare =
@@ -166,7 +166,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 			...figure(`$${usage.costUsd.toFixed(2)}`, 'estimated'),
 		],
 	});
-	lines.push(blank(false));
+	lines.push(blank());
 
 	const tools = Object.entries(health.machine.tools);
 	const found = tools.filter(([, present]) => present).map(([tool]) => tool);
@@ -190,7 +190,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 		{ t: SANDBOX[health.sandbox], fg: 'faint' },
 	];
 	for (const segs of wrap(machine, measure)) lines.push({ segs });
-	lines.push(blank(false));
+	lines.push(blank());
 
 	lines.push(label('PROACTIVE WORK'));
 	lines.push({

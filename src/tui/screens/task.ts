@@ -42,7 +42,7 @@ export function taskBody(
 	}
 	const measure = Math.min(MEASURE, content);
 	const steps = mergedSteps(detail, live.steps.get(handle));
-	const lines: Line[] = [statusLine(task, now), blank(false)];
+	const lines: Line[] = [statusLine(task, now), blank()];
 	let animating = task.status === 'working';
 
 	if (task.status === 'needs_you' && task.question) {
@@ -68,12 +68,12 @@ export function taskBody(
 			});
 		}
 		if (task.question.context) {
-			lines.push(blank(false));
+			lines.push(blank());
 			for (const line of markdown(task.question.context, measure - 4)) {
 				lines.push({ ...line, segs: [{ t: '    ' }, ...line.segs] });
 			}
 		}
-		lines.push(blank(false));
+		lines.push(blank());
 	}
 
 	if (task.status === 'working' && task.now) {
@@ -87,7 +87,7 @@ export function taskBody(
 			],
 			right: [{ t: duration(now - task.now.startedAt), fg: 'faint' }],
 		});
-		lines.push(blank(false));
+		lines.push(blank());
 	} else if (task.status === 'waiting') {
 		lines.push(label('NOW'));
 		lines.push({
@@ -96,7 +96,7 @@ export function taskBody(
 				{ t: `waiting on ${task.waitingOn ?? 'a message'}`, fg: 'fg' },
 			],
 		});
-		lines.push(blank(false));
+		lines.push(blank());
 	}
 
 	if (steps.length > 0) {
@@ -107,13 +107,13 @@ export function taskBody(
 			const diff = step.hasDiff ? state?.diffs.get(step.id) : undefined;
 			if (typeof diff === 'string') lines.push(...diffLines(diff, content));
 		}
-		lines.push(blank(false));
+		lines.push(blank());
 	}
 
 	if (detail?.report) {
 		lines.push(label('REPORT'));
 		lines.push(...markdown(detail.report, measure));
-		lines.push(blank(false));
+		lines.push(blank());
 	}
 
 	const conversation = mergedConversation(

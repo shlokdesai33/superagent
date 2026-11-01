@@ -1,9 +1,4 @@
-import type {
-	RoutedEvent,
-	Step,
-	TaskDetail,
-	TaskSummary,
-} from '../protocol.ts';
+import type { Step, TaskDetail, TaskSummary } from '../protocol.ts';
 import type { Seg } from './cells.ts';
 import type { Section } from './model.ts';
 import type { Theme } from './theme.ts';
@@ -30,8 +25,8 @@ export type Toast = {
 	ms: number;
 };
 
-/** An event falling down the river. */
-export type Drop = { at: number; destination: RoutedEvent['destination'] };
+/** An event that went straight to a task, for its row's highlight. */
+export type Arrival = { at: number; handle: string };
 
 /** A row fading out of the section it left. */
 export type Leaving = {
@@ -66,7 +61,7 @@ export type Ui = {
 	typing: Typing | null;
 	confirmStop: string | null;
 	toast: Toast | null;
-	drops: Drop[];
+	arrivals: Arrival[];
 	leaving: Leaving[];
 	/** When each NEEDS YOU item appeared, for its fade-in. */
 	appeared: Map<string, number>;

@@ -13,8 +13,8 @@ export function spinner(now: number): string {
 
 export const sep: Seg = { t: ' · ', fg: 'ghost' };
 
-export function blank(river = true): Line {
-	return { segs: [], river };
+export function blank(): Line {
+	return { segs: [] };
 }
 
 export function rule(columns: number): Line {
@@ -26,7 +26,7 @@ export function label(name: string, count?: number, note?: string): Line {
 	const segs: Seg[] = [{ t: name, fg: 'faint' }];
 	if (count !== undefined) segs.push({ t: `  ${count}`, fg: 'dim' });
 	if (note) segs.push({ t: `   ${note}`, fg: 'faint' });
-	return { segs, river: true };
+	return { segs };
 }
 
 /** `j/k move · enter open`: keys bold `dim`, words `faint`. */
