@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import type { ParticleClient } from '../particle/client.ts';
 import type {
 	ActionResult,
 	Health,
@@ -31,6 +32,18 @@ export type Daemon = {
 	/** Action results by `requestId`, kept 10 minutes. */
 	actionResults: Map<string, { at: number; result: ActionResult }>;
 	usageTimer: Timer | null;
+	/** `null` when there's no API key; the model stays paused. */
+	particle: ParticleClient | null;
+	model: Health['model'];
+	router: RouterLive;
+};
+
+/** What the Router loop is doing right now; the rest of its state is in SQLite. */
+export type RouterLive = {
+	/** The open batch, while the Router is deciding. */
+	batch: { id: number; since: number; size: number } | null;
+	/** Tells the Router loop the mailbox may have changed. */
+	wake: () => void;
 };
 
 export function buildSnapshot(daemon: Daemon): Snapshot {
@@ -45,7 +58,7 @@ export function buildSnapshot(daemon: Daemon): Snapshot {
 		},
 		tasks: [],
 		console: consoleMessages(daemon.db),
-		router: routerState(daemon.db),
+		router: routerState(daemon),
 		usage: usageSince(daemon.db, start),
 		health: health(daemon),
 		observed: [],
@@ -97,7 +110,8 @@ function consoleMessages(db: Database): Message[] {
 		.map(toMessage);
 }
 
-export function routerState(db: Database): RouterState {
+export function routerState(daemon: Daemon): RouterState {
+	const { db } = daemon;
 	const waiting =
 		db
 			.query<{ count: number }, []>(
@@ -111,13 +125,40 @@ export function routerState(db: Database): RouterState {
 			ORDER BY id DESC LIMIT 1`,
 		)
 		.get();
+	const { batch } = daemon.router;
 	return {
-		deciding: false,
-		decidingSince: null,
-		batchSize: 0,
+		deciding: batch !== null,
+		decidingSince: batch?.since ?? null,
+		batchSize: batch?.size ?? 0,
 		waiting,
 		last: last ?? null,
 	};
+}
+
+/** Publishes the Router's state. Call after its transaction commits. */
+export function routerChanged(daemon: Daemon): number {
+	return daemon.feed.publish({ type: 'router', router: routerState(daemon) });
+}
+
+/** Sets the model's health, publishing it when it changed. */
+export function setModelHealth(
+	daemon: Daemon,
+	state: Health['model']['state'],
+	detail: string | null,
+): void {
+	const current = daemon.model;
+	if (current.state === state && current.detail === detail) return;
+	daemon.model = {
+		state,
+		detail,
+		since:
+			state === 'ok'
+				? null
+				: current.state === state
+					? current.since
+					: Date.now(),
+	};
+	daemon.feed.publish({ type: 'health', health: health(daemon) });
 }
 
 function usageSince(db: Database, since: number): Usage {
@@ -157,8 +198,18 @@ export function health(daemon: Daemon): Health {
 			lastEventAt,
 			detail: null,
 		})),
-		model: { state: 'ok', detail: null, since: null },
-		problems: [],
+		model: daemon.model,
+		problems:
+			daemon.model.state === 'ok'
+				? []
+				: [
+						{
+							id: 'model',
+							kind: 'model',
+							text: daemon.model.detail ?? 'Particle is unavailable',
+							since: daemon.model.since ?? Date.now(),
+						},
+					],
 		machine: daemon.machine,
 		proactive: 'off',
 		sandbox: 'off',

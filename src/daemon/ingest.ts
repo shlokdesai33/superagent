@@ -6,7 +6,7 @@ import {
 	type Params,
 	cut,
 	health,
-	routerState,
+	routerChanged,
 	toMessage,
 } from './state.ts';
 
@@ -169,8 +169,14 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 		...(decision.route === 'filtered' ? { reason: decision.reason } : {}),
 	});
 
+	if (decision.route === 'router') daemon.router.wake();
+
 	// The river shows only what arrives from outside.
-	if (event.channel === 'internal') return daemon.feed.seq;
+	if (event.channel === 'internal') {
+		return decision.route === 'router'
+			? routerChanged(daemon)
+			: daemon.feed.seq;
+	}
 
 	const { feed } = daemon;
 	const destination: RoutedEvent['destination'] =
@@ -192,9 +198,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 		},
 	});
 	if (message) feed.publish({ type: 'message', message: toMessage(message) });
-	if (decision.route === 'router') {
-		feed.publish({ type: 'router', router: routerState(db) });
-	}
+	if (decision.route === 'router') routerChanged(daemon);
 	daemon.channels.set(event.channel, at);
 	return feed.publish({ type: 'health', health: health(daemon) });
 }
