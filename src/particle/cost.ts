@@ -1,18 +1,10 @@
-import type { ChatModel, Usage } from './types.ts';
+import type { Usage } from './types.ts';
 
-/** Default peak prices in USD per million tokens; accounts may have overrides. */
-export const PRICES_USD_PER_MILLION: Record<
-	ChatModel,
-	{ input: number; cachedInput: number; output: number }
-> = {
-	'particle-1': { input: 0.25, cachedInput: 0.03, output: 1 },
-	'deepseek-ai/deepseek-v41-flash-1017': {
-		input: 0.25,
-		cachedInput: 0.03,
-		output: 1,
-	},
-	'glm-5.3-flash': { input: 0.12, cachedInput: 0.03, output: 0.4 },
-};
+// particle-1's default peak prices in USD per million tokens; accounts may
+// have overrides.
+const INPUT_USD_PER_MILLION = 0.25;
+const CACHED_INPUT_USD_PER_MILLION = 0.03;
+const OUTPUT_USD_PER_MILLION = 1;
 
 /** Per successful hosted web search, with no Flex discount. */
 export const WEB_SEARCH_PRICE_USD = 0.0025;
@@ -39,20 +31,18 @@ export function isOffPeak(at: Date): boolean {
  * the boundaries; the settled charge is in Particle's usage records.
  */
 export function estimateCostUsd(input: {
-	model: ChatModel;
 	usage: Usage;
 	/** The tier that actually ran, from the result. */
 	serviceTier: string | null;
 	at: Date;
 	webSearches?: number;
 }): number {
-	const prices = PRICES_USD_PER_MILLION[input.model];
 	const cached = input.usage.prompt_tokens_details.cached_tokens;
 	const uncached = input.usage.prompt_tokens - cached;
 	const tokens =
-		uncached * prices.input +
-		cached * prices.cachedInput +
-		input.usage.completion_tokens * prices.output;
+		uncached * INPUT_USD_PER_MILLION +
+		cached * CACHED_INPUT_USD_PER_MILLION +
+		input.usage.completion_tokens * OUTPUT_USD_PER_MILLION;
 	const discount =
 		(isOffPeak(input.at) ? 0.5 : 1) * (input.serviceTier === 'flex' ? 0.5 : 1);
 	return (

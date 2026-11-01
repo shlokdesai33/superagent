@@ -27,7 +27,6 @@ import {
 	toMessage,
 } from './state.ts';
 
-const MODEL = 'particle-1';
 const EFFORT = 'high';
 // Reasoning counts against this cap, and the Router thinks at `high`.
 const MAX_COMPLETION_TOKENS = 16_000;
@@ -158,7 +157,6 @@ export function startRouter(daemon: Daemon): RouterLoop {
 				}
 
 				const request: ChatRequest = {
-					model: MODEL,
 					reasoning_effort: EFFORT,
 					max_completion_tokens: MAX_COMPLETION_TOKENS,
 					prompt_cache_key: cacheKey,

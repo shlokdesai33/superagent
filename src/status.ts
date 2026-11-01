@@ -49,7 +49,7 @@ export function formatStatus(snapshot: Snapshot, home: string): string {
 					`${channel.name} ${channel.state}${channel.lastEventAt === null ? '' : ` (last event ${clock(channel.lastEventAt)})`}`,
 			)
 			.join(', ')}`,
-		`Model: ${health.model.state}${health.model.detail ? ` · ${health.model.detail}` : ''}`,
+		`Model: ${health.model.name} · ${health.model.state}${health.model.detail ? ` · ${health.model.detail}` : ''}`,
 	);
 	for (const problem of health.problems) lines.push(`Problem: ${problem.text}`);
 

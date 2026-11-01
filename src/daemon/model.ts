@@ -101,7 +101,6 @@ function record(
 	const costUsd =
 		result && usage
 			? estimateCostUsd({
-					model: call.request.model,
 					usage,
 					serviceTier: result.serviceTier,
 					at: new Date(startedAt),
@@ -109,10 +108,10 @@ function record(
 			: null;
 	daemon.db
 		.query<unknown, Params>(
-			`INSERT INTO model_calls (session_id, task_id, purpose, model, effort, started_at,
+			`INSERT INTO model_calls (session_id, task_id, purpose, effort, started_at,
 				ended_at, prompt_tokens, cached_tokens, completion_tokens, reasoning_tokens,
 				service_tier, cost_usd, request_id, error)
-			VALUES ($sessionId, $taskId, $purpose, $model, $effort, $startedAt,
+			VALUES ($sessionId, $taskId, $purpose, $effort, $startedAt,
 				$endedAt, $promptTokens, $cachedTokens, $completionTokens, $reasoningTokens,
 				$serviceTier, $costUsd, $requestId, $error)`,
 		)
@@ -120,7 +119,6 @@ function record(
 			sessionId: call.sessionId,
 			taskId: call.taskId,
 			purpose: call.purpose,
-			model: call.request.model,
 			effort: call.request.reasoning_effort,
 			startedAt,
 			endedAt,

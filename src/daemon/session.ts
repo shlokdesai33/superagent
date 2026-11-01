@@ -220,7 +220,6 @@ export async function compact(
 		purpose: 'compaction',
 		signal: options.signal,
 		request: {
-			model: 'particle-1',
 			reasoning_effort: 'low',
 			max_completion_tokens: COMPACTION_MAX_TOKENS,
 			prompt_cache_key: options.cacheKey,

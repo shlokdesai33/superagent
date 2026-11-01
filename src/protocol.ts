@@ -151,6 +151,8 @@ export type Health = {
 		detail: string | null;
 	}>;
 	model: {
+		/** The only model the agent will ever support. */
+		name: 'particle-1';
 		state: 'ok' | 'paused' | 'error';
 		detail: string | null;
 		since: number | null;

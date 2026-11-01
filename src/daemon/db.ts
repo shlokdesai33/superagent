@@ -163,6 +163,7 @@ CREATE TABLE model_calls (
 );
 CREATE INDEX model_calls_by_time ON model_calls (started_at);
 `,
+	'ALTER TABLE model_calls DROP COLUMN model;',
 ];
 
 // Letters and digits without look-alikes (no i, l, o, 0 or 1).

@@ -13,6 +13,8 @@ import type {
 	WireUsage,
 } from './types.ts';
 
+/** The only model the agent will ever support; every request sends it. */
+export const MODEL = 'particle-1';
 export const API_KEY_ENV = 'PARTICLE_API_KEY';
 export const DEFAULT_BASE_URL = 'https://api.particle.ai/v1';
 
@@ -24,7 +26,7 @@ const DEFAULT_TIMEOUT_MS = 1_860_000;
 const STREAM_IDLE_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_RETRIES = 3;
 const BACKOFF_MS = { base: 1_000, cap: 30_000 };
-// Particle asks for minutes of backoff when a model has no healthy servers.
+// Particle asks for minutes of backoff when particle-1 has no healthy servers.
 const UNAVAILABLE_BACKOFF_MS = { base: 60_000, cap: 300_000 };
 const MAX_RETRY_AFTER_MS = 300_000;
 
@@ -61,8 +63,6 @@ export type ChatOptions = {
 export type ChatResult = {
 	requestId: string | null;
 	id: string;
-	/** Particle's long ID, such as `particle-ai/particle-1`, not the requested alias. */
-	model: string;
 	/** Ready to append to `messages`. */
 	message: AssistantMessage;
 	reasoning: string;
@@ -145,8 +145,13 @@ export function createParticleClient(
 		const callerSignal = chatOptions.signal;
 		const body = JSON.stringify(
 			stream
-				? { ...request, stream: true, stream_options: { include_usage: true } }
-				: { ...request, stream: false },
+				? {
+						...request,
+						model: MODEL,
+						stream: true,
+						stream_options: { include_usage: true },
+					}
+				: { ...request, model: MODEL, stream: false },
 		);
 
 		for (let attempt = 0; ; attempt++) {
@@ -231,7 +236,6 @@ async function readStream(
 	}
 	const events = readSseData(response.body);
 	let id = '';
-	let model = '';
 	let serviceTier: string | null = null;
 	let content = '';
 	let reasoning = '';
@@ -259,7 +263,6 @@ async function readStream(
 			if (isErrorBody(chunk)) throw errorFrame(chunk, requestId);
 			if (!isChunk(chunk)) throw malformed(requestId);
 			id ||= chunk.id;
-			model ||= chunk.model;
 			serviceTier = chunk.service_tier ?? serviceTier;
 			if (chunk.usage) usage = toUsage(chunk.usage);
 
@@ -309,7 +312,6 @@ async function readStream(
 	return {
 		requestId,
 		id,
-		model,
 		message: assistantMessage(content || null, calls),
 		reasoning,
 		finishReason,
@@ -345,7 +347,6 @@ async function readCompletion(
 	return {
 		requestId,
 		id: completion.id,
-		model: completion.model,
 		message: assistantMessage(
 			choice.message.content,
 			choice.message.tool_calls ?? [],
