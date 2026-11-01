@@ -13,9 +13,12 @@ bun run typecheck      # tsc (TypeScript 7)
 bun run lint           # oxlint, with type-aware rules
 bun run format         # oxfmt --write; check:format only checks
 bun src/cli.ts --help  # run the CLI from source
+bun run e2e            # drive a real daemon end to end against a fake Particle server
 ```
 
 Run `bun run check` before opening a PR, and list its results in the PR description.
+
+There are no unit tests. `e2e/` drives the real daemon the way the TUI does: `e2e/harness.ts` starts `superagent daemon --script-channel` on a fresh `/tmp/sa-…` data folder and talks to it over its socket, and `e2e/fake-particle.ts` is a Particle server whose answers each scenario scripts, told apart by `prompt_cache_key`. `e2e/threads.ts` covers thread ownership, filtering, release and reopen, and questions answered on a thread; it prints one line per check and exits non-zero if any fails. Set `E2E_VERBOSE=1` to see the daemon's log and `E2E_KEEP=1` to keep its data folder.
 
 ## Running
 
@@ -35,6 +38,18 @@ curl -N --unix-socket ~/.superagent/agent.sock \
   -H "Authorization: Bearer $(cat ~/.superagent/token)" -H 'Superagent-Protocol: 1' \
   http://superagent/v1/feed
 ```
+
+## The script channel
+
+`superagent daemon --script-channel` turns on `POST /v1/events`, which injects a message on a test channel, `script`, the same way GitHub and Slack will arrive. It's for tests and development:
+
+```sh
+curl --unix-socket ~/.superagent/agent.sock -H "Authorization: Bearer $(cat ~/.superagent/token)" -H 'Superagent-Protocol: 1' \
+  http://superagent/v1/events -d '{"externalId":"evt-17","thread":{"key":"support/77","title":"#support","url":null},
+  "author":{"id":"u-bob","name":"bob","isBot":false},"text":"@superagent export is broken","mentionsAgent":true}'
+```
+
+The thread becomes `script:support/77`. A message on a thread a task owns goes straight to that task's Worker, and answers its open question if it has one. Otherwise bots' messages and messages that don't mention the agent are filtered, and the rest go to the Router. `GET /v1/threads/:id` shows a thread, its owner and its messages.
 
 ## Configuration
 

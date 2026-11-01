@@ -52,6 +52,19 @@ export const ROUTER_KINDS = new Set([
 ]);
 
 /**
+ * The Fast Path (§4.4): plain-code rules for events no task owns. The console
+ * has none, since everything the operator types is a request; the script
+ * channel uses the rules GitHub and Slack will start from. Returns the reason
+ * to drop the event, or `null`.
+ */
+function fastPathFilter(event: InboundEvent): string | null {
+	if (event.channel !== 'script') return null;
+	if (event.author.isBot) return 'bot message';
+	if (!event.mentionsAgent) return 'not addressed to the agent';
+	return null;
+}
+
+/**
  * Stores an event and decides where it goes in one transaction, then publishes
  * it. Returns the `seq` of the last feed update, or `null` when the event was
  * already stored.
@@ -89,8 +102,8 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 					})?.owner ?? null)
 			: null;
 
-		// Worker reports skip the table. The Fast Path filter (rule 4) arrives
-		// with the script channel; the console has none.
+		// Worker reports skip the table (§4.2).
+		const filtered = fastPathFilter(event);
 		const decision: Decision =
 			event.channel === 'internal' && ROUTER_KINDS.has(event.kind)
 				? { route: 'router' }
@@ -100,7 +113,9 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 						? { route: 'task', taskId: event.taskId }
 						: owner !== null
 							? { route: 'task', taskId: owner }
-							: { route: 'router' };
+							: filtered !== null
+								? { route: 'filtered', reason: filtered }
+								: { route: 'router' };
 		// For reports to the Router, the reporting task.
 		const taskId =
 			decision.route === 'task' ? decision.taskId : (event.taskId ?? null);

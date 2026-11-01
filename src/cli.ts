@@ -15,7 +15,8 @@ Commands:
   status         Print the agent's status and exit
 
 Options:
-  --json         With status: print the raw snapshot JSON
+  --json             With status: print the raw snapshot JSON
+  --script-channel   With daemon: accept test events on POST /v1/events
   -h, --help     Show this help
   -v, --version  Show the version
 
@@ -38,10 +39,12 @@ switch (command) {
 		if (rest.length > 0) fail(`Unexpected argument: ${rest[0]}`);
 		else console.log(packageJson.version);
 		break;
-	case 'daemon':
-		if (rest.length > 0) fail(`Unexpected argument: ${rest[0]}`);
-		else await daemon();
+	case 'daemon': {
+		const unexpected = rest.find((arg) => arg !== '--script-channel');
+		if (unexpected !== undefined) fail(`Unexpected argument: ${unexpected}`);
+		else await daemon(rest.includes('--script-channel'));
 		break;
+	}
 	case 'status': {
 		const unexpected = rest.find((arg) => arg !== '--json');
 		if (unexpected !== undefined) fail(`Unexpected argument: ${unexpected}`);
@@ -52,9 +55,9 @@ switch (command) {
 		fail(`Unknown command: ${command}`);
 }
 
-async function daemon(): Promise<void> {
+async function daemon(scriptChannel: boolean): Promise<void> {
 	try {
-		await runDaemon();
+		await runDaemon({ scriptChannel });
 	} catch (error) {
 		if (!(error instanceof StartupError)) throw error;
 		console.error(error.message);

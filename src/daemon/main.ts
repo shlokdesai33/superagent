@@ -29,7 +29,9 @@ import { installWorkers, startWorkers, stopWorkers } from './worker.ts';
  * Runs the agent until SIGINT or SIGTERM. Setup problems throw `StartupError`
  * before anything can connect.
  */
-export async function runDaemon(): Promise<void> {
+export async function runDaemon(options: {
+	scriptChannel: boolean;
+}): Promise<void> {
 	const startedAt = Date.now();
 	const paths = dataPaths();
 	createDataFolder(paths);
@@ -96,13 +98,14 @@ export async function runDaemon(): Promise<void> {
 		}
 
 		const channels = new Map<string, number | null>([['console', null]]);
+		if (options.scriptChannel) channels.set('script', null);
 		for (const row of db
 			.query<{ channel: string; at: number }, []>(
 				`SELECT channel, MAX(received_at) AS at FROM events
 				WHERE channel != 'internal' GROUP BY channel`,
 			)
 			.all()) {
-			channels.set(row.channel, row.at);
+			if (channels.has(row.channel)) channels.set(row.channel, row.at);
 		}
 
 		const particle = createModelClient(config);
@@ -120,6 +123,7 @@ export async function runDaemon(): Promise<void> {
 			},
 			machine,
 			channels,
+			scriptChannel: options.scriptChannel,
 			actionResults: new Map(),
 			usageTimer: null,
 			particle,

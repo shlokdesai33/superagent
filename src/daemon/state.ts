@@ -30,6 +30,8 @@ export type Daemon = {
 	machine: MachineFacts;
 	/** The last event time of each channel, for health. */
 	channels: Map<string, number | null>;
+	/** `POST /v1/events` is on (`--script-channel`), for tests. */
+	scriptChannel: boolean;
 	/** Action results by `requestId`, kept 10 minutes. */
 	actionResults: Map<string, { at: number; result: ActionResult }>;
 	usageTimer: Timer | null;
