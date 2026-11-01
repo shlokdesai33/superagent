@@ -39,6 +39,8 @@ const RETRYABLE_CODES = new Set([
 ]);
 
 export type ParticleClientOptions = {
+	/** Defaults to `PARTICLE_API_KEY`. */
+	apiKey?: string;
 	baseUrl?: string;
 	/** Retries after the first attempt, for failures before a response. */
 	maxRetries?: number;
@@ -125,11 +127,11 @@ export class ParticleError extends Error {
 	}
 }
 
-/** Reads the API key from `PARTICLE_API_KEY`. */
+/** Reads the API key from `PARTICLE_API_KEY` unless given one. */
 export function createParticleClient(
 	options: ParticleClientOptions = {},
 ): ParticleClient {
-	const apiKey = Bun.env[API_KEY_ENV];
+	const apiKey = options.apiKey ?? Bun.env[API_KEY_ENV];
 	if (!apiKey) throw new Error(`${API_KEY_ENV} is not set`);
 	const url = `${(options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')}/chat/completions`;
 	const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;

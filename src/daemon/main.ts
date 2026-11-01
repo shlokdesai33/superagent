@@ -6,6 +6,8 @@ import { dataPaths } from '../home.ts';
 import { loadAgentId, openDatabase } from './db.ts';
 import { createFeed } from './feed.ts';
 import { createLog } from './log.ts';
+import { NO_API_KEY, createModelClient } from './model.ts';
+import { type RouterLoop, recoverRouter, startRouter } from './router.ts';
 import { listen } from './server.ts';
 import {
 	createDataFolder,
@@ -31,7 +33,9 @@ export async function runDaemon(): Promise<void> {
 	let server: Server<undefined> | null = null;
 	let db: Database | null = null;
 	let daemon: Daemon | null = null;
+	let router: RouterLoop | null = null;
 	const teardown = async () => {
+		await router?.stop();
 		if (daemon) {
 			daemon.feed.close();
 			if (daemon.usageTimer) clearTimeout(daemon.usageTimer);
@@ -67,6 +71,7 @@ export async function runDaemon(): Promise<void> {
 			channels.set(row.channel, row.at);
 		}
 
+		const particle = createModelClient(config);
 		const context: Daemon = {
 			db,
 			feed: createFeed(() => buildSnapshot(context), log),
@@ -83,7 +88,14 @@ export async function runDaemon(): Promise<void> {
 			channels,
 			actionResults: new Map(),
 			usageTimer: null,
+			particle,
+			model:
+				particle === null
+					? { state: 'paused', detail: NO_API_KEY, since: startedAt }
+					: { state: 'ok', detail: null, since: null },
+			router: { batch: null, wake: () => {} },
 		};
+		recoverRouter(context);
 		daemon = context;
 	} catch (error) {
 		await teardown();
@@ -97,6 +109,8 @@ export async function runDaemon(): Promise<void> {
 		socket: paths.socket,
 		os: daemon.machine.os,
 	});
+	if (daemon.particle === null) log('warn', NO_API_KEY);
+	router = startRouter(daemon);
 
 	const signal = await new Promise<NodeJS.Signals>((resolve) => {
 		process.once('SIGINT', resolve);

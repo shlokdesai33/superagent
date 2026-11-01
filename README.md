@@ -35,4 +35,8 @@ curl -N --unix-socket ~/.superagent/agent.sock \
 
 ## Configuration
 
-The model client reads its API key from `PARTICLE_API_KEY` (Bun also loads it from a `.env` file). It talks to `https://api.particle.ai/v1` unless given another `baseUrl`, such as the US-only `https://us.api.particle.ai/v1`.
+The daemon reads its Particle API key from `PARTICLE_API_KEY` (Bun also loads it from a `.env` file), or else from `particleApiKey` in `config.json`. Without a key it still runs, but the model shows as paused and console messages wait in the Router's mailbox. It talks to `https://api.particle.ai/v1` unless `PARTICLE_BASE_URL` names another endpoint, such as the US-only `https://us.api.particle.ai/v1` or a local fake server for testing.
+
+## The Router
+
+Console messages go to the Router, one persistent model session that decides what to do and answers through a `reply` tool (at most 100 words in the console). Messages that arrive while it's deciding join the same batch. Its state is on the feed as `router` lines, every model call is recorded in `model_calls` with usage and an estimated cost, and Particle errors show in the model's health: account errors pause the Router (retried every 2 minutes), other errors back off from 30 seconds to 10 minutes. Starting and running tasks arrives in the next build step; until then the task tools answer "not available".
