@@ -5,6 +5,8 @@ import type { Live } from '../model.ts';
 import { MEASURE, blank, figure, label, oneLine, sep } from '../parts.ts';
 
 const BAR = 32;
+/** The one model the agent uses; shown, never chosen. */
+const MODEL = 'particle-1';
 
 const PROACTIVE: Record<Health['proactive'], string> = {
 	off: 'only messages for the agent are handled',
@@ -102,7 +104,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 		lines.push({
 			segs: [
 				dot,
-				{ t: fit(channel.name, 10), fg: 'fg' },
+				{ t: fit(channel.name, 12), fg: 'fg' },
 				{ t: words, fg: 'faint' },
 				...(channel.detail
 					? [sep, { t: oneLine(channel.detail), fg: 'faint' } satisfies Seg]
@@ -119,7 +121,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 			model.state === 'ok'
 				? { t: '● ', fg: 'ok' }
 				: { t: '● ', fg: model.state === 'paused' ? 'warn' : 'err' },
-			{ t: fit('particle', 10), fg: 'fg' },
+			{ t: fit(MODEL, 12), fg: 'fg' },
 			{ t: model.state === 'ok' ? 'ready' : model.state, fg: 'faint' },
 			...(model.detail
 				? [sep, { t: oneLine(model.detail), fg: 'faint' } satisfies Seg]
