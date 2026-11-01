@@ -6,6 +6,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import { release } from 'node:os';
+import { isAbsolute } from 'node:path';
 import type { DataPaths } from '../home.ts';
 import type { MachineFacts } from '../protocol.ts';
 
@@ -149,6 +150,26 @@ export function loadConfig(path: string): Config {
 	) {
 		throw invalid('repos must be a list of { "name", "path" } objects');
 	}
+	const parsedRepos = repos.map((repo: { name: string; path: string }) => ({
+		name: repo.name,
+		path: repo.path,
+	}));
+	const names = new Set<string>();
+	for (const repo of parsedRepos) {
+		// The name becomes a folder under worktrees/.
+		if (!/^[A-Za-z0-9._-]+$/.test(repo.name) || /^\.\.?$/.test(repo.name)) {
+			throw invalid(
+				`repository name ${JSON.stringify(repo.name)} may use only letters, digits, ".", "_" and "-"`,
+			);
+		}
+		if (names.has(repo.name)) {
+			throw invalid(`repository name ${repo.name} is used twice`);
+		}
+		names.add(repo.name);
+		if (!isAbsolute(repo.path)) {
+			throw invalid(`the path of ${repo.name} must be absolute`);
+		}
+	}
 	const maxWorkingTasks = raw.maxWorkingTasks ?? DEFAULT_CONFIG.maxWorkingTasks;
 	if (
 		typeof maxWorkingTasks !== 'number' ||
@@ -159,12 +180,18 @@ export function loadConfig(path: string): Config {
 	}
 	return {
 		particleApiKey,
-		repos: repos.map((repo: { name: string; path: string }) => ({
-			name: repo.name,
-			path: repo.path,
-		})),
+		repos: parsedRepos,
 		maxWorkingTasks,
 	};
+}
+
+/** Rewrites `repos` in `config.json`, keeping everything else in the file. */
+export function saveRepos(path: string, repos: Config['repos']): void {
+	const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
+	const raw: Record<string, unknown> =
+		typeof value === 'object' && value !== null ? { ...value } : {};
+	raw.repos = repos;
+	writeFileSync(path, `${JSON.stringify(raw, null, '\t')}\n`, { mode: 0o600 });
 }
 
 /** Reads `token`, creating 32 random bytes (base64url) when it's missing or empty. */

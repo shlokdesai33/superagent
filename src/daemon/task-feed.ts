@@ -14,6 +14,7 @@ export type TaskRow = {
 	state: 'active' | 'needs_you' | 'done' | 'failed' | 'stopped';
 	waitingOn: string | null;
 	workDir: string;
+	repo: string | null;
 	branch: string | null;
 	report: string | null;
 	originChannel: string | null;
@@ -30,7 +31,7 @@ export type TaskRow = {
 };
 
 export const TASK_COLUMNS = `t.id, t.handle, t.title, t.state, t.waiting_on AS waitingOn,
-	t.work_dir AS workDir, t.branch, t.report, e.channel AS originChannel,
+	t.work_dir AS workDir, t.repo, t.branch, t.report, e.channel AS originChannel,
 	th.title AS originThreadTitle, th.ownable AS originOwnable, e.author AS originAuthor,
 	t.result, t.failure, t.dismissed, t.model_calls AS modelCalls, t.created_at AS createdAt,
 	t.started_at AS startedAt, t.ended_at AS endedAt

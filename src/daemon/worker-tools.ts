@@ -8,7 +8,8 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { FunctionTool, ToolCall } from '../particle/types.ts';
-import { readOutput, runCommand, stopCommand } from './commands.ts';
+import { readOutput, runCommand, stopCommand, taskFolder } from './commands.ts';
+import { editDiff } from './git.ts';
 import { type Daemon, type Params, cut } from './state.ts';
 import { openQuestion, publishStep, taskChanged } from './task-feed.ts';
 import { askQuestion, endTask, toRouter } from './tasks.ts';
@@ -188,15 +189,18 @@ export async function runWorkerTool(
 				if (typeof content !== 'string') {
 					throw new ToolError('content must be a string');
 				}
+				const before = existsSync(target.absolute)
+					? readFileSync(target.absolute, 'utf8')
+					: null;
 				mkdirSync(dirname(target.absolute), { recursive: true });
 				writeFileSync(target.absolute, content);
-				editStep(daemon, task, target.relative);
+				await editStep(daemon, task, target.relative, before, content);
 				return done(
 					`wrote ${target.relative} (${content.split('\n').length} lines)`,
 				);
 			}
 			case 'edit_file':
-				return done(editFile(daemon, task, args));
+				return done(await editFile(daemon, task, args));
 			case 'ask': {
 				const open = openQuestion(daemon.db, task.id);
 				if (open) {
@@ -336,7 +340,11 @@ function readFile(task: WorkerTask, args: Args): string {
 		: `${target.relative} is empty`;
 }
 
-function editFile(daemon: Daemon, task: WorkerTask, args: Args): string {
+async function editFile(
+	daemon: Daemon,
+	task: WorkerTask,
+	args: Args,
+): Promise<string> {
 	const target = resolvePath(task.workDir, requiredString(args, 'path'), true);
 	const old = requiredString(args, 'old');
 	const replacement = args.new;
@@ -355,27 +363,41 @@ function editFile(daemon: Daemon, task: WorkerTask, args: Args): string {
 			`old text appears ${count} times in ${target.relative}; include more context so it's unique`,
 		);
 	}
-	writeFileSync(
-		target.absolute,
-		text.replace(old, () => replacement),
-	);
-	editStep(daemon, task, target.relative);
+	const after = text.replace(old, () => replacement);
+	writeFileSync(target.absolute, after);
+	await editStep(daemon, task, target.relative, text, after);
 	return `edited ${target.relative}`;
 }
 
-// Line counts and diffs arrive with git worktrees (build step 4).
-function editStep(daemon: Daemon, task: WorkerTask, path: string): void {
+/** An edit step with its unified diff and line counts. */
+async function editStep(
+	daemon: Daemon,
+	task: WorkerTask,
+	path: string,
+	before: string | null,
+	after: string,
+): Promise<void> {
 	const at = Date.now();
+	const change = await editDiff(
+		daemon,
+		join(taskFolder(daemon, task.handle), 'tmp'),
+		path,
+		before,
+		after,
+	);
 	const id = Number(
 		daemon.db
 			.query<unknown, Params>(
-				`INSERT INTO steps (task_id, kind, text, status, started_at, ended_at)
-				VALUES ($taskId, 'edit', $text, 'ok', $at, $at)`,
+				`INSERT INTO steps (task_id, kind, text, status, started_at, ended_at, additions,
+					deletions, diff)
+				VALUES ($taskId, 'edit', $text, 'ok', $at, $endedAt, $additions, $deletions, $diff)`,
 			)
 			.run({
 				taskId: task.id,
 				text: cut(`Edited ${path}`, STEP_TEXT_CHARS),
 				at,
+				endedAt: Date.now(),
+				...change,
 			}).lastInsertRowid,
 	);
 	daemon.db

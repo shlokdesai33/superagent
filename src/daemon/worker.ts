@@ -1,13 +1,17 @@
 // A Worker's calls and tools run one after another by design.
 /* oxlint-disable eslint/no-await-in-loop */
 import type { Database } from 'bun:sqlite';
+import { existsSync, mkdirSync } from 'node:fs';
 import type { ChatResult } from '../particle/client.ts';
 import type { AssistantMessage, ToolCall } from '../particle/types.ts';
 import { stopCommand } from './commands.ts';
+import { prepareWorktree } from './git.ts';
 import { ModelError, callModel, pausedOn } from './model.ts';
 import {
 	type Item,
 	appendItems,
+	compact,
+	lastPromptTokens,
 	promptMessages,
 	repairTranscript,
 	userItem,
@@ -26,6 +30,7 @@ import { WORKER_TOOLS, runWorkerTool } from './worker-tools.ts';
 
 const EFFORT = 'high';
 const MAX_COMPLETION_TOKENS = 32_000;
+const COMPACT_AT_PROMPT_TOKENS = 300_000;
 // A crude guard until the Watchdog exists.
 const STEP_LIMIT = 500;
 const ACCOUNT_RETRY_MS = 2 * 60_000;
@@ -145,6 +150,8 @@ async function workerLoop(
 	const cacheKey = `task-${live.handle}`;
 	let nudge = false;
 	let nudged = false;
+	let needsCompaction =
+		lastPromptTokens(db, sessionId, 'worker') > COMPACT_AT_PROMPT_TOKENS;
 
 	while (!signal.aborted) {
 		const task = taskRow(db, live.taskId);
@@ -171,11 +178,40 @@ async function workerLoop(
 			});
 			return;
 		}
+		let worktreeNote: string | null = null;
+		if (!existsSync(task.workDir)) {
+			if (task.repo === null) {
+				mkdirSync(task.workDir, { recursive: true });
+			} else {
+				// New, or removed by cleanup while the task was ended.
+				setBlocked(daemon, live, 'its git worktree');
+				try {
+					worktreeNote = await prepareWorktree(daemon, {
+						handle: task.handle,
+						repo: task.repo,
+						workDir: task.workDir,
+					});
+				} catch (error) {
+					endTask(daemon, live.taskId, {
+						state: 'failed',
+						failure: `couldn't create its git worktree: ${error instanceof Error ? error.message : String(error)}`,
+					});
+					return;
+				}
+				setBlocked(daemon, live, null);
+				daemon.log('info', 'worktree ready', {
+					task: task.handle,
+					path: task.workDir,
+					note: worktreeNote,
+				});
+				if (signal.aborted) return;
+			}
+		}
 		if (!(await takeSlot(daemon, live))) return;
 
 		try {
 			const input = [
-				first ? brief(daemon, task) : null,
+				first ? brief(daemon, task, worktreeNote) : worktreeNote,
 				inbox.length > 0 ? renderInbox(inbox) : null,
 				nudge ? NUDGE : null,
 			].filter((part) => part !== null);
@@ -187,6 +223,15 @@ async function workerLoop(
 			let result: ChatResult | null = null;
 			let failure: unknown = null;
 			try {
+				if (needsCompaction) {
+					await compact(daemon, {
+						sessionId,
+						taskId: live.taskId,
+						cacheKey,
+						signal,
+					});
+					needsCompaction = false;
+				}
 				result = await callModel(daemon, {
 					sessionId,
 					taskId: live.taskId,
@@ -227,6 +272,8 @@ async function workerLoop(
 				return;
 			}
 			setBlocked(daemon, live, null);
+			needsCompaction =
+				(result.usage?.prompt_tokens ?? 0) > COMPACT_AT_PROMPT_TOKENS;
 
 			const calls = result.message.tool_calls ?? [];
 			const callNumber = task.modelCalls + 1;
@@ -492,7 +539,11 @@ function renderInbox(events: InboxEvent[]): string {
 }
 
 /** The Worker's first message: the task, where it came from, and where it works. */
-function brief(daemon: Daemon, task: TaskRow): string {
+function brief(
+	daemon: Daemon,
+	task: TaskRow,
+	worktreeNote: string | null,
+): string {
 	const { db } = daemon;
 	const details = db
 		.query<
@@ -530,7 +581,9 @@ function brief(daemon: Daemon, task: TaskRow): string {
 		threads.length > 0
 			? `Threads you follow: ${threads.map((thread) => `${thread.id} (${thread.title})`).join(', ')}. Their new messages come to you.`
 			: 'You follow no threads; the Router speaks to people for you.',
-		`Working folder: ${task.workDir}. It's a scratch folder for this task, not a repository.`,
+		task.repo === null
+			? `Working folder: ${task.workDir}. It's a scratch folder for this task, not a repository.`
+			: `Working folder: ${task.workDir}. It's a git worktree of the ${task.repo} repository (${daemon.config.repos.find((repo) => repo.name === task.repo)?.path ?? 'no longer in config.json'}) on your own branch, ${task.branch ?? ''}; commit your work there.${worktreeNote ? ` ${worktreeNote}` : ''}`,
 		`Machine: ${daemon.machine.os} · ${daemon.machine.arch} · on PATH: ${tools
 			.filter(([, found]) => found)
 			.map(([name]) => name)
