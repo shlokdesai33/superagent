@@ -103,7 +103,7 @@ export async function runCommand(
 ): Promise<string> {
 	const { db, sandbox } = daemon;
 	if (sandbox.state !== 'on') {
-		return `error: commands can't run: ${sandbox.text}. The operator has to fix that and restart the agent; the file tools still work.`;
+		return `error: ${sandbox.text}. The operator has to fix that and restart the agent; the file tools still work.`;
 	}
 	const startedAt = Date.now();
 	mkdirSync(join(taskFolder(daemon, task.handle), 'commands'), {

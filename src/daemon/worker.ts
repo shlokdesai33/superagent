@@ -595,7 +595,7 @@ function brief(
 			: `Working folder: ${task.workDir}. It's a git worktree of the ${task.repo} repository (${daemon.config.repos.find((repo) => repo.name === task.repo)?.path ?? 'no longer in config.json'}) on your own branch, ${task.branch ?? ''}; commit your work with the commit tool.${worktreeNote ? ` ${worktreeNote}` : ''}`,
 		daemon.sandbox.state === 'on'
 			? `Sandbox: commands write only in ${task.workDir} and $TMPDIR (${join(taskFolder(daemon, task.handle), 'tmp')}), and reach ${[...REGISTRY_HOSTS, ...grantedHosts(db, task.id)].join(', ')}.`
-			: `Sandbox: unavailable, so run refuses commands until the operator fixes it (${daemon.sandbox.text}).`,
+			: `Sandbox: unavailable. ${daemon.sandbox.text}, and run refuses them until the operator fixes it.`,
 		`Machine: ${daemon.machine.os} · ${daemon.machine.arch} · on PATH: ${tools
 			.filter(([, found]) => found)
 			.map(([name]) => name)

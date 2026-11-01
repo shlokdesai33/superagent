@@ -263,18 +263,23 @@ function diagnoseLinuxProbe(stderr: string): {
 	if (
 		sysctl('/proc/sys/kernel/apparmor_restrict_unprivileged_userns') === '1'
 	) {
-		if (stderr.includes('apply-seccomp')) {
+		// The profile Claude Code documents: it lets bwrap itself create user
+		// namespaces, and leaves the commands it runs to the sandbox.
+		const profile =
+			"printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n  include if exists <local/bwrap>\\n}\\n' | sudo tee /etc/apparmor.d/bwrap >/dev/null && sudo apparmor_parser -r /etc/apparmor.d/bwrap";
+		const restrict = '/etc/apparmor.d/bwrap-userns-restrict';
+		if (stderr.includes('apply-seccomp') && existsSync(restrict)) {
 			// Ubuntu's bwrap-userns-restrict profile strips capabilities from
 			// everything bwrap starts, and the seccomp helper needs a nested user
-			// namespace. This reopens nested namespaces for every bwrap user.
+			// namespace, so it has to give way to the profile above.
 			return {
 				text: "AppArmor's bwrap-userns-restrict profile stops the sandbox's seccomp helper",
-				fix: "echo 'priority=1 capability sys_admin,' | sudo tee /etc/apparmor.d/local/unpriv_bwrap && sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict, then restart the agent",
+				fix: `sudo apparmor_parser -R ${restrict} && sudo ln -sf ${restrict} /etc/apparmor.d/disable/ && ${profile}, then restart the agent`,
 			};
 		}
 		return {
 			text: "AppArmor doesn't let bubblewrap create user namespaces (Ubuntu 23.10 and later)",
-			fix: "printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n  include if exists <local/bwrap>\\n}\\n' | sudo tee /etc/apparmor.d/bwrap && sudo apparmor_parser -r /etc/apparmor.d/bwrap, then restart the agent",
+			fix: `${profile}, then restart the agent`,
 		};
 	}
 	if (sysctl('/proc/sys/kernel/unprivileged_userns_clone') === '0') {
@@ -433,7 +438,8 @@ export async function sandboxCommand(
 				denyRead: [home, daemon.paths.home, ...repoPaths, ...credentials],
 				allowRead: readable,
 				allowWrite: [task.workDir, tmpDir],
-				denyWrite: [join(task.workDir, '.git')],
+				// A worktree's `.git` file points git at the repository's own folder.
+				denyWrite: task.repo === null ? [] : [join(task.workDir, '.git')],
 			},
 		},
 		undefined,
