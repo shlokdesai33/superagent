@@ -35,7 +35,7 @@ curl -N --unix-socket ~/.superagent/agent.sock \
 
 ## Configuration
 
-The daemon reads its Particle API key from `PARTICLE_API_KEY` (Bun also loads it from a `.env` file), or else from `particleApiKey` in `config.json`. Without a key it still runs, but the model shows as paused and console messages wait in the Router's mailbox. It talks to `https://api.particle.ai/v1` unless `PARTICLE_BASE_URL` names another endpoint, such as the US-only `https://us.api.particle.ai/v1` or a local fake server for testing.
+The agent runs on Particle's `particle-1` model, the only model it will ever support; there is nothing to choose. The daemon reads its Particle API key from `PARTICLE_API_KEY` (Bun also loads it from a `.env` file), or else from `particleApiKey` in `config.json`. Without a key it still runs, but the model shows as paused and console messages wait in the Router's mailbox. It talks to `https://api.particle.ai/v1` unless `PARTICLE_BASE_URL` names another endpoint, such as the US-only `https://us.api.particle.ai/v1` or a local fake server for testing.
 
 ## The Router
 

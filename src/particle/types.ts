@@ -1,7 +1,7 @@
-// Wire types for Particle's Chat Completions API, limited to the fields
-// Particle documents as supported. Fields it rejects or doesn't qualify (`n`,
-// `max_tokens` next to `max_completion_tokens`, logprobs, `cache_salt`) are
-// left out on purpose.
+// Wire types for Particle's Chat Completions API with `particle-1`, limited to
+// the fields Particle documents as supported. Fields it rejects or doesn't
+// qualify (`n`, `max_tokens` next to `max_completion_tokens`, logprobs,
+// `cache_salt`) are left out on purpose.
 
 export type JsonValue =
 	| string
@@ -13,36 +13,12 @@ export type JsonValue =
 
 export type JsonObject = { [key: string]: JsonValue };
 
-export type ChatModel =
-	| 'particle-1'
-	| 'deepseek-ai/deepseek-v41-flash-1017'
-	| 'glm-5.3-flash';
-
 /**
- * Particle maps these onto three levels: `minimal` and `low` to low, `medium`
- * and `high` to high, `max` and `ultra` to max. `xhigh` is high on
- * `particle-1` and DeepSeek, max on GLM. `none` turns thinking off.
+ * `particle-1`'s distinct levels; `none` turns thinking off. Particle's other
+ * names are aliases: `minimal` is low, `medium` and `xhigh` are high, `ultra`
+ * is max.
  */
-export type ReasoningEffort =
-	| 'none'
-	| 'minimal'
-	| 'low'
-	| 'medium'
-	| 'high'
-	| 'xhigh'
-	| 'max'
-	| 'ultra';
-
-// GLM always thinks and has no ultra level; Particle rejects both with a 400.
-type ModelAndEffort =
-	| {
-			model: 'particle-1' | 'deepseek-ai/deepseek-v41-flash-1017';
-			reasoning_effort: ReasoningEffort;
-	  }
-	| {
-			model: 'glm-5.3-flash';
-			reasoning_effort: Exclude<ReasoningEffort, 'none' | 'ultra'>;
-	  };
+export type ReasoningEffort = 'none' | 'low' | 'high' | 'max';
 
 export type TextPart = { type: 'text'; text: string };
 
@@ -113,10 +89,11 @@ export type ResponseFormat =
 
 export type ServiceTier = 'default' | 'flex';
 
-/** `stream` and `stream_options` are set by the client. */
-export type ChatRequest = ModelAndEffort & {
+/** `model`, `stream` and `stream_options` are set by the client. */
+export type ChatRequest = {
 	messages: Message[];
-	/** Includes reasoning tokens. Particle lowers values above 131,072. */
+	reasoning_effort: ReasoningEffort;
+	/** Includes reasoning tokens. `particle-1` allows 131,072; Particle lowers higher values. */
 	max_completion_tokens: number;
 	/** Sending any of `top_p`, `top_k` or `min_p` turns off Particle's default `top_p` of 0.85. */
 	temperature?: number;
@@ -137,7 +114,7 @@ export type ChatRequest = ModelAndEffort & {
 	service_tier?: ServiceTier;
 	/** Up to 256 bytes; one per conversation. */
 	prompt_cache_key?: string;
-	/** Raw settings passed to the model's chat template. */
+	/** Raw settings passed to `particle-1`'s chat template. */
 	chat_template_kwargs?: JsonObject;
 };
 
@@ -170,7 +147,6 @@ export type ToolCallDelta = {
 
 export type ChatCompletionChunk = {
 	id: string;
-	model: string;
 	service_tier?: string | null;
 	choices: {
 		index: number;
@@ -187,7 +163,6 @@ export type ChatCompletionChunk = {
 
 export type ChatCompletion = {
 	id: string;
-	model: string;
 	service_tier?: string | null;
 	choices: {
 		index: number;

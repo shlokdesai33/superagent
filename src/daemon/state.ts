@@ -1,5 +1,5 @@
 import type { Database } from 'bun:sqlite';
-import type { ParticleClient } from '../particle/client.ts';
+import { MODEL, type ParticleClient } from '../particle/client.ts';
 import type {
 	ActionResult,
 	Health,
@@ -34,7 +34,7 @@ export type Daemon = {
 	usageTimer: Timer | null;
 	/** `null` when there's no API key; the model stays paused. */
 	particle: ParticleClient | null;
-	model: Health['model'];
+	model: Omit<Health['model'], 'name'>;
 	router: RouterLive;
 };
 
@@ -198,7 +198,7 @@ export function health(daemon: Daemon): Health {
 			lastEventAt,
 			detail: null,
 		})),
-		model: daemon.model,
+		model: { name: MODEL, ...daemon.model },
 		problems:
 			daemon.model.state === 'ok'
 				? []
