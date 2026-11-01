@@ -137,44 +137,47 @@ function isItem(value: unknown): value is Item {
 	);
 }
 
-/**
- * After a restart: a transcript that ends in tool calls without results gets
- * `not run: the agent restarted` for each, so it stays valid.
- */
+/** After a restart, `repairTranscript` for every session. */
 export function repairTranscripts(db: Database): number {
 	let repaired = 0;
 	for (const { id } of db
 		.query<{ id: number }, []>('SELECT id FROM sessions')
 		.all()) {
-		const last = db
-			.query<{ seq: number; item: string }, [number]>(
-				`SELECT seq, item FROM session_items
-				WHERE session_id = ? AND json_extract(item, '$.role') = 'assistant'
-				ORDER BY seq DESC LIMIT 1`,
-			)
-			.get(id);
-		if (!last) continue;
-		const assistant = parseItem(last.item);
-		const calls =
-			assistant.role === 'assistant' ? (assistant.tool_calls ?? []) : [];
-		const answered = new Set(
-			loadItems(db, id, last.seq).map(({ item }) =>
-				item.role === 'tool' ? item.tool_call_id : null,
-			),
-		);
-		const missing: ToolMessage[] = calls
-			.filter((call) => !answered.has(call.id))
-			.map((call) => ({
-				role: 'tool',
-				tool_call_id: call.id,
-				content: 'not run: the agent restarted',
-			}));
-		if (missing.length > 0) {
-			appendItems(db, id, missing);
-			repaired += missing.length;
-		}
+		repaired += repairTranscript(db, id, 'not run: the agent restarted');
 	}
 	return repaired;
+}
+
+/**
+ * A transcript that ends in tool calls without results gets `content` as the
+ * result of each, so the next call is valid. Returns how many it added.
+ */
+export function repairTranscript(
+	db: Database,
+	sessionId: number,
+	content: string,
+): number {
+	const last = db
+		.query<{ seq: number; item: string }, [number]>(
+			`SELECT seq, item FROM session_items
+			WHERE session_id = ? AND json_extract(item, '$.role') = 'assistant'
+			ORDER BY seq DESC LIMIT 1`,
+		)
+		.get(sessionId);
+	if (!last) return 0;
+	const assistant = parseItem(last.item);
+	const calls =
+		assistant.role === 'assistant' ? (assistant.tool_calls ?? []) : [];
+	const answered = new Set(
+		loadItems(db, sessionId, last.seq).map(({ item }) =>
+			item.role === 'tool' ? item.tool_call_id : null,
+		),
+	);
+	const missing: ToolMessage[] = calls
+		.filter((call) => !answered.has(call.id))
+		.map((call) => ({ role: 'tool', tool_call_id: call.id, content }));
+	if (missing.length > 0) appendItems(db, sessionId, missing);
+	return missing.length;
 }
 
 /**

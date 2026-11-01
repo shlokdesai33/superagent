@@ -13,6 +13,7 @@ import {
 	appendItems,
 	compact,
 	promptMessages,
+	repairTranscript,
 	repairTranscripts,
 	routerSessionId,
 	userItem,
@@ -139,6 +140,17 @@ export function startRouter(daemon: Daemon): RouterLoop {
 							events: drained.map((event) => event.id),
 						});
 					}
+				}
+				// A tool that threw left its call, and any after it, without results.
+				const repaired = repairTranscript(
+					daemon.db,
+					sessionId,
+					'not run: the agent hit an error',
+				);
+				if (repaired > 0) {
+					daemon.log('info', 'repaired the router transcript', {
+						toolResults: repaired,
+					});
 				}
 				if (needsCompaction) {
 					await compact(daemon, { sessionId, taskId: null, cacheKey, signal });
