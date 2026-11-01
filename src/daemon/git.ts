@@ -48,11 +48,15 @@ function gitEnv(daemon: Daemon | null): Record<string, string> {
 export async function git(
 	daemon: Daemon,
 	args: string[],
-	options: { cwd?: string; timeoutMs?: number } = {},
+	options: {
+		cwd?: string;
+		timeoutMs?: number;
+		env?: Record<string, string>;
+	} = {},
 ): Promise<GitResult> {
 	const child = Bun.spawn(['git', ...SAFE_FLAGS, ...args], {
 		cwd: options.cwd ?? daemon.paths.home,
-		env: gitEnv(daemon),
+		env: { ...gitEnv(daemon), ...options.env },
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
@@ -130,7 +134,17 @@ export function prepareWorktree(
 	daemon: Daemon,
 	task: { handle: string; repo: string; workDir: string },
 ): Promise<string | null> {
-	const path = repoPath(daemon, task.repo);
+	const found = daemon.config.repos.find((entry) => entry.name === task.repo);
+	if (!found) {
+		// Cleanup keeps worktrees of repositories it doesn't know, so there's no
+		// removal to wait for.
+		return existsSync(task.workDir)
+			? Promise.resolve(null)
+			: Promise.reject(
+					new Error(`repository ${task.repo} isn't in config.json`),
+				);
+	}
+	const path = found.path;
 	return withRepoLock(path, async () => {
 		const run = (args: string[], timeoutMs?: number) =>
 			git(daemon, ['-C', path, ...args], timeoutMs ? { timeoutMs } : {});
@@ -359,8 +373,8 @@ function stillOld(
 }
 
 /**
- * Removes one old worktree. Uncommitted changes are first committed to the
- * task's branch, so removing needs no `--force` and loses nothing.
+ * Removes one old worktree, after saving everything in it onto its task's
+ * branch. A worktree whose save didn't land on that branch is kept.
  */
 async function removeOldWorktree(
 	daemon: Daemon,
@@ -371,44 +385,38 @@ async function removeOldWorktree(
 	let workDir = stillOld(daemon, taskId, cutoff);
 	if (workDir === null) return;
 	const handle = basename(workDir);
-	const status = await git(daemon, ['-C', workDir, 'status', '--porcelain']);
-	if (status.code === 0 && status.stdout.trim() !== '') {
-		const added = await git(daemon, ['-C', workDir, 'add', '-A']);
-		const committed =
-			added.code === 0
-				? await git(daemon, [
-						'-C',
-						workDir,
-						'-c',
-						'user.name=superagent',
-						'-c',
-						'user.email=superagent@localhost',
-						'commit',
-						'--no-verify',
-						'-q',
-						'-m',
-						'superagent: save uncommitted work before removing the worktree',
-					])
-				: added;
-		daemon.log(
-			committed.code === 0 ? 'info' : 'warn',
-			'uncommitted work saved',
-			{
-				task: handle,
-				...(committed.code === 0 ? {} : { error: firstLine(committed.stderr) }),
-			},
-		);
+	const saved = await saveToBranch(daemon, workDir, handle);
+	if (!saved.ok) {
+		daemon.log('warn', 'worktree kept', {
+			task: handle,
+			path: workDir,
+			reason: saved.reason,
+		});
+		return;
 	}
-	// Reopened while the commit ran: keep it.
+	if (saved.commit !== null) {
+		daemon.log('info', 'uncommitted work saved', {
+			task: handle,
+			branch: taskBranch(handle),
+			commit: saved.commit.slice(0, 7),
+		});
+	}
+	// Reopened while the save ran: keep it.
 	workDir = stillOld(daemon, taskId, cutoff);
 	if (workDir === null) return;
-	const removed = await git(daemon, [
-		'-C',
-		repo,
-		'worktree',
-		'remove',
-		workDir,
-	]);
+	let removed = await git(daemon, ['-C', repo, 'worktree', 'remove', workDir]);
+	// Its branch now holds everything in it, so forcing past a HEAD or index
+	// that differs loses nothing.
+	if (removed.code !== 0) {
+		removed = await git(daemon, [
+			'-C',
+			repo,
+			'worktree',
+			'remove',
+			'--force',
+			workDir,
+		]);
+	}
 	daemon.log(
 		removed.code === 0 ? 'info' : 'warn',
 		removed.code === 0 ? 'worktree removed' : 'worktree kept',
@@ -418,6 +426,106 @@ async function removeOldWorktree(
 			...(removed.code === 0 ? {} : { error: firstLine(removed.stderr) }),
 		},
 	);
+}
+
+/**
+ * Commits a snapshot of the worktree onto `refs/heads/superagent/<handle>`,
+ * whatever the worktree has checked out, without touching its own index.
+ * Succeeds only when the branch's tree then equals the snapshot; `commit` is
+ * `null` when the branch already held it.
+ */
+async function saveToBranch(
+	daemon: Daemon,
+	workDir: string,
+	handle: string,
+): Promise<
+	{ ok: true; commit: string | null } | { ok: false; reason: string }
+> {
+	const ref = `refs/heads/${taskBranch(handle)}`;
+	const run = (args: string[], env?: Record<string, string>) =>
+		git(daemon, ['-C', workDir, ...args], env ? { env } : {});
+	const tip = await run([
+		'rev-parse',
+		'--verify',
+		'--quiet',
+		`${ref}^{commit}`,
+	]);
+	if (tip.code !== 0) return { ok: false, reason: `${ref} doesn't exist` };
+	const parent = tip.stdout.trim();
+
+	const tmp = join(daemon.paths.home, 'tasks', handle, 'tmp');
+	mkdirSync(tmp, { recursive: true });
+	const scratch = mkdtempSync(join(tmp, 'save-'));
+	try {
+		// A temporary index from the checkout, so files tracked despite
+		// .gitignore stay in the snapshot.
+		const env = { GIT_INDEX_FILE: join(scratch, 'index') };
+		for (const args of [
+			['read-tree', 'HEAD'],
+			['add', '-A'],
+		]) {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			const step = await run(args, env);
+			if (step.code !== 0) {
+				return {
+					ok: false,
+					reason: `git ${args[0]}: ${firstLine(step.stderr)}`,
+				};
+			}
+		}
+		const tree = await run(['write-tree'], env);
+		if (tree.code !== 0) {
+			return { ok: false, reason: `git write-tree: ${firstLine(tree.stderr)}` };
+		}
+		const snapshot = tree.stdout.trim();
+		const branchTree = async () =>
+			(await run(['rev-parse', `${ref}^{tree}`])).stdout.trim();
+		if ((await branchTree()) === snapshot) return { ok: true, commit: null };
+
+		const commit = await run([
+			// A signing requirement in the user's config would fail the save.
+			'-c',
+			'commit.gpgsign=false',
+			'-c',
+			'user.name=superagent',
+			'-c',
+			'user.email=superagent@localhost',
+			'commit-tree',
+			'--no-gpg-sign',
+			'-p',
+			parent,
+			'-m',
+			'superagent: save uncommitted work before removing the worktree',
+			snapshot,
+		]);
+		if (commit.code !== 0) {
+			return {
+				ok: false,
+				reason: `git commit-tree: ${firstLine(commit.stderr)}`,
+			};
+		}
+		const sha = commit.stdout.trim();
+		const moved = await run([
+			'update-ref',
+			'-m',
+			'superagent: save before removing the worktree',
+			ref,
+			sha,
+			parent,
+		]);
+		if (moved.code !== 0) {
+			return {
+				ok: false,
+				reason: `git update-ref: ${firstLine(moved.stderr)}`,
+			};
+		}
+		if ((await branchTree()) !== snapshot) {
+			return { ok: false, reason: `${ref} doesn't hold the saved snapshot` };
+		}
+		return { ok: true, commit: sha };
+	} finally {
+		rmSync(scratch, { recursive: true, force: true });
+	}
 }
 
 /** Cleans up now and then daily. The returned function stops it and waits for a run in progress. */
