@@ -1,0 +1,78 @@
+.*
+!.gitignore
+!.dockerignore
+!.env.example
+!.oxlintrc.json
+!.oxfmtrc.json
+!.bun-version
+
+# node.js dependencies
+node_modules/
+
+# IDEs and editors
+*.launch
+*.vsix
+
+# compressed and packaged files
+*.7z
+*.dmg
+*.gz
+*.iso
+*.jar
+*.rar
+*.tar
+*.zip
+*.tgz
+
+# logs and databases
+*.log
+*.trace
+*.prof
+*.sqlite
+
+# generated files and folders
+*.swp
+*.swo
+*.bak
+*.tmp
+*~
+tmp/
+temp/
+cache/
+*.pid
+*.seed
+*.state
+*.orig
+
+# dump files
+*.stackdump
+
+# folder config files
+[Dd]esktop.ini
+
+# windows
+ehthumbs.db
+Thumbs.db
+Thumbs.db:encryptable
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# macOS
+Network Trash Folder/
+Temporary Items/
+
+# build outputs
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# keys and certificates
+*.pem
+*.crt
+*.key

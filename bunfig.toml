@@ -1,0 +1,3 @@
+[run]
+# run package binaries (tsc, oxlint, oxfmt) on Bun, not on whatever Node is installed
+bun = true
