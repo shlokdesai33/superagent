@@ -1,5 +1,5 @@
 import type { Health } from '../../protocol.ts';
-import { type Line, type Seg, fit, wrap } from '../cells.ts';
+import { type Line, type Seg, fit, truncate, wrap } from '../cells.ts';
 import { ago, clock, plural, tokens } from '../format.ts';
 import type { Live } from '../model.ts';
 import { MEASURE, blank, figure, label, oneLine, sep } from '../parts.ts';
@@ -58,7 +58,9 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 
 	if (problems > 0) {
 		lines.push(label('PROBLEMS'));
-		for (const problem of health.problems) {
+		for (const problem of health.problems.toSorted(
+			(a, b) => a.since - b.since,
+		)) {
 			lines.push({
 				segs: [
 					{ t: '! ', fg: 'warn', b: true },
@@ -74,7 +76,10 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 					{ t: fit(task.handle, 6), fg: 'dim' },
 					{ t: oneLine(task.title), fg: 'fg' },
 				],
-				right: [{ t: oneLine(task.result ?? 'failed'), fg: 'faint' }],
+				right: truncate(
+					[{ t: oneLine(task.result ?? 'failed'), fg: 'faint' }],
+					Math.floor(content / 2),
+				),
 			});
 		}
 		lines.push(blank(false));
