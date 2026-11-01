@@ -1,0 +1,215 @@
+// The wire contract between the daemon and its clients (the TUI, `status`).
+// All times are epoch milliseconds.
+
+export const PROTOCOL_VERSION = '1';
+export const PROTOCOL_HEADER = 'Superagent-Protocol';
+
+export type FeedLine =
+	| { type: 'snapshot'; seq: number; snapshot: Snapshot }
+	| { type: 'task'; seq: number; task: TaskSummary }
+	| { type: 'step'; seq: number; taskHandle: string; step: Step }
+	| { type: 'message'; seq: number; message: Message }
+	| { type: 'routed'; seq: number; event: RoutedEvent }
+	| { type: 'router'; seq: number; router: RouterState }
+	| { type: 'usage'; seq: number; usage: Usage }
+	| { type: 'health'; seq: number; health: Health }
+	/** Reserved; never sent in this version. */
+	| { type: 'observed'; seq: number; observed: Observed }
+	| { type: 'ping'; now: number };
+
+export type FeedUpdate = Exclude<
+	FeedLine,
+	{ type: 'snapshot' } | { type: 'ping' }
+>;
+
+export type Snapshot = {
+	now: number;
+	agent: { id: string; version: string; pid: number; startedAt: number };
+	/** Local midnight, and the IANA zone it's in. */
+	day: { start: number; timeZone: string };
+	tasks: TaskSummary[];
+	/** The last 50, oldest first. */
+	console: Message[];
+	router: RouterState;
+	usage: Usage;
+	health: Health;
+	/** Always empty in this version. */
+	observed: Observed[];
+};
+
+export type TaskSummary = {
+	handle: string;
+	title: string;
+	status: 'working' | 'waiting' | 'needs_you' | 'done' | 'failed' | 'stopped';
+	/** Set when status is `waiting`. */
+	waitingOn: string | null;
+	/** Set when status is `working`. */
+	now: { text: string; command: string | null; startedAt: number } | null;
+	/** `{ 'console', null, null }` or `{ 'github', '#142', 'alice' }`. */
+	origin: { channel: string; place: string | null; author: string | null };
+	threads: Array<{
+		id: string;
+		channel: string;
+		title: string;
+		url: string | null;
+	}>;
+	/** Set when status is `needs_you`. */
+	question: Question | null;
+	/** done: the result; failed: the failure; stopped: `stopped by you`. */
+	result: string | null;
+	dismissed: boolean;
+	createdAt: number;
+	startedAt: number | null;
+	endedAt: number | null;
+	/** 8 counts: model calls per minute, oldest first. */
+	activity: number[];
+	/** Start of the minute `activity[7]` covers. */
+	activityAt: number;
+};
+
+export type Question = {
+	id: number;
+	text: string;
+	/** Markdown, for the task view. */
+	context: string | null;
+	options: string[] | null;
+	askedAt: number;
+};
+
+export type Step = {
+	id: number;
+	kind: 'command' | 'edit' | 'note';
+	text: string;
+	command: string | null;
+	status: 'running' | 'ok' | 'failed' | 'stopped';
+	startedAt: number;
+	endedAt: number | null;
+	exitCode: number | null;
+	additions: number | null;
+	deletions: number | null;
+	hasDiff: boolean;
+	hasOutput: boolean;
+};
+
+export type Message = {
+	id: number;
+	at: number;
+	channel: string;
+	threadId: string | null;
+	/** Set for notes, answers and replies tied to a task. */
+	taskHandle: string | null;
+	direction: 'in' | 'out';
+	author: string;
+	text: string;
+	truncated: boolean;
+	delivery: 'delivered' | 'pending' | 'failed';
+};
+
+export type RoutedEvent = {
+	/** The event number, shown as #42. */
+	id: number;
+	at: number;
+	channel: string;
+	threadTitle: string | null;
+	author: string;
+	/** The first 80 characters. */
+	preview: string;
+	destination:
+		| { kind: 'task'; handle: string }
+		| { kind: 'router' }
+		| { kind: 'filtered'; reason: string };
+};
+
+export type RouterState = {
+	deciding: boolean;
+	decidingSince: number | null;
+	/** Events in the batch being decided. */
+	batchSize: number;
+	/** Events in the mailbox, to be decided together next. */
+	waiting: number;
+	last: { text: string; at: number } | null;
+};
+
+/** Since local midnight. Costs are estimates. */
+export type Usage = {
+	since: number;
+	calls: number;
+	/** Includes cached tokens. */
+	inputTokens: number;
+	cachedTokens: number;
+	/** Includes reasoning tokens. */
+	outputTokens: number;
+	reasoningTokens: number;
+	costUsd: number;
+};
+
+export type Health = {
+	channels: Array<{
+		name: string;
+		state: 'up' | 'connecting' | 'down';
+		lastEventAt: number | null;
+		detail: string | null;
+	}>;
+	model: {
+		state: 'ok' | 'paused' | 'error';
+		detail: string | null;
+		since: number | null;
+	};
+	/** Failed tasks are tasks, not problems. */
+	problems: Problem[];
+	machine: MachineFacts;
+	/** Always `off` in this version. */
+	proactive: 'off' | 'observe' | 'act';
+	/** Always `off` in this version. */
+	sandbox: 'off' | 'on' | 'unavailable';
+};
+
+export type MachineFacts = {
+	os: string;
+	arch: string;
+	tools: Record<string, boolean>;
+};
+
+export type Problem = {
+	/** Stable, for fades: `model`, `undelivered:812`. */
+	id: string;
+	kind: 'model' | 'channel' | 'undelivered';
+	text: string;
+	since: number;
+};
+
+/** Reserved for observe mode. */
+export type Observed = {
+	id: number;
+	at: number;
+	rule: string;
+	/** `slack · #eng` */
+	source: string;
+	summary: string;
+	eventId: number;
+};
+
+/** `requestId` is unique per attempt; a resent request gets the original result. */
+export type ActionRequest = { requestId: string; action: Action };
+
+export type Action =
+	| { type: 'send_console'; text: string }
+	| { type: 'send_note'; handle: string; text: string }
+	| {
+			type: 'answer_question';
+			handle: string;
+			questionId: number;
+			text: string;
+	  }
+	| { type: 'stop_task'; handle: string }
+	/** `null`: every failed task. */
+	| { type: 'resume_tasks'; handles: string[] | null }
+	| { type: 'act_observed'; id: number }
+	| { type: 'ignore_observed'; id: number };
+
+/** Maps onto a toast: `✓ <subject> · <detail>`. */
+export type ActionResult =
+	| { ok: true; seq: number; subject: string; detail: string | null }
+	| { ok: false; code: string; subject: string; detail: string };
+
+export type ErrorBody = { error: { code: string; message: string } };
