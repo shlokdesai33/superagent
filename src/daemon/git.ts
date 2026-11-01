@@ -129,11 +129,13 @@ function withRepoLock<T>(path: string, run: () => Promise<T>): Promise<T> {
 export function prepareWorktree(
 	daemon: Daemon,
 	task: { handle: string; repo: string; workDir: string },
-): Promise<string> {
+): Promise<string | null> {
 	const path = repoPath(daemon, task.repo);
 	return withRepoLock(path, async () => {
 		const run = (args: string[], timeoutMs?: number) =>
 			git(daemon, ['-C', path, ...args], timeoutMs ? { timeoutMs } : {});
+		// Checked under the lock, so a removal by cleanup has finished.
+		if (existsSync(task.workDir)) return null;
 		if (!existsSync(path)) {
 			throw new Error(`${path} doesn't exist`);
 		}
@@ -285,14 +287,14 @@ export async function editDiff(
  */
 export async function cleanUp(daemon: Daemon): Promise<void> {
 	const now = Date.now();
-	const ended = daemon.db
-		.query<{ handle: string; repo: string; workDir: string }, [number]>(
-			`SELECT handle, repo, work_dir AS workDir FROM tasks
+	const cutoff = now - WORKTREE_RETENTION_MS;
+	const candidates = daemon.db
+		.query<{ id: number; handle: string; repo: string }, [number]>(
+			`SELECT id, handle, repo FROM tasks
 			WHERE repo IS NOT NULL AND state IN ('done', 'failed', 'stopped') AND ended_at < ?`,
 		)
-		.all(now - WORKTREE_RETENTION_MS);
-	for (const task of ended) {
-		if (!existsSync(task.workDir)) continue;
+		.all(cutoff);
+	for (const task of candidates) {
 		let path: string;
 		try {
 			path = repoPath(daemon, task.repo);
@@ -303,15 +305,12 @@ export async function cleanUp(daemon: Daemon): Promise<void> {
 			});
 			continue;
 		}
+		// Under the lock worktree creation uses, so a reopened task's Worker
+		// waits for this and then re-creates its worktree from the branch.
 		// oxlint-disable-next-line eslint/no-await-in-loop
-		const removed = await withRepoLock(path, () =>
-			git(daemon, ['-C', path, 'worktree', 'remove', '--force', task.workDir]),
+		await withRepoLock(path, () =>
+			removeOldWorktree(daemon, task.id, path, cutoff),
 		);
-		daemon.log(removed.code === 0 ? 'info' : 'warn', 'worktree removed', {
-			task: task.handle,
-			path: task.workDir,
-			...(removed.code === 0 ? {} : { error: firstLine(removed.stderr) }),
-		});
 	}
 
 	const tasksDir = join(daemon.paths.home, 'tasks');
@@ -330,6 +329,95 @@ export async function cleanUp(daemon: Daemon): Promise<void> {
 	if (removedLogs > 0) {
 		daemon.log('info', 'old command logs removed', { count: removedLogs });
 	}
+}
+
+/** Whether the task is still ended before `cutoff`, with no Worker running; read fresh each time. */
+function stillOld(
+	daemon: Daemon,
+	taskId: number,
+	cutoff: number,
+): string | null {
+	if (daemon.workers.has(taskId)) return null;
+	const task = daemon.db
+		.query<
+			{ state: string; endedAt: number | null; workDir: string },
+			[number]
+		>(
+			'SELECT state, ended_at AS endedAt, work_dir AS workDir FROM tasks WHERE id = ?',
+		)
+		.get(taskId);
+	if (
+		!task ||
+		!['done', 'failed', 'stopped'].includes(task.state) ||
+		task.endedAt === null ||
+		task.endedAt >= cutoff ||
+		!existsSync(task.workDir)
+	) {
+		return null;
+	}
+	return task.workDir;
+}
+
+/**
+ * Removes one old worktree. Uncommitted changes are first committed to the
+ * task's branch, so removing needs no `--force` and loses nothing.
+ */
+async function removeOldWorktree(
+	daemon: Daemon,
+	taskId: number,
+	repo: string,
+	cutoff: number,
+): Promise<void> {
+	let workDir = stillOld(daemon, taskId, cutoff);
+	if (workDir === null) return;
+	const handle = basename(workDir);
+	const status = await git(daemon, ['-C', workDir, 'status', '--porcelain']);
+	if (status.code === 0 && status.stdout.trim() !== '') {
+		const added = await git(daemon, ['-C', workDir, 'add', '-A']);
+		const committed =
+			added.code === 0
+				? await git(daemon, [
+						'-C',
+						workDir,
+						'-c',
+						'user.name=superagent',
+						'-c',
+						'user.email=superagent@localhost',
+						'commit',
+						'--no-verify',
+						'-q',
+						'-m',
+						'superagent: save uncommitted work before removing the worktree',
+					])
+				: added;
+		daemon.log(
+			committed.code === 0 ? 'info' : 'warn',
+			'uncommitted work saved',
+			{
+				task: handle,
+				...(committed.code === 0 ? {} : { error: firstLine(committed.stderr) }),
+			},
+		);
+	}
+	// Reopened while the commit ran: keep it.
+	workDir = stillOld(daemon, taskId, cutoff);
+	if (workDir === null) return;
+	const removed = await git(daemon, [
+		'-C',
+		repo,
+		'worktree',
+		'remove',
+		workDir,
+	]);
+	daemon.log(
+		removed.code === 0 ? 'info' : 'warn',
+		removed.code === 0 ? 'worktree removed' : 'worktree kept',
+		{
+			task: handle,
+			path: workDir,
+			...(removed.code === 0 ? {} : { error: firstLine(removed.stderr) }),
+		},
+	);
 }
 
 /** Cleans up now and then daily. The returned function stops it and waits for a run in progress. */
