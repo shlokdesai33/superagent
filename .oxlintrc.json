@@ -37,12 +37,6 @@
 	},
 	"overrides": [
 		{
-			"files": ["test/**"],
-			"rules": {
-				"typescript/no-unnecessary-type-assertion": "off"
-			}
-		},
-		{
 			// the command-line entry point is the one place that writes to the
 			// terminal; everywhere else a console call is a stray debug print
 			"files": ["src/cli.ts"],

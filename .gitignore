@@ -70,7 +70,6 @@ Temporary Items/
 dist/
 build/
 out/
-coverage/
 *.tsbuildinfo
 
 # keys and certificates

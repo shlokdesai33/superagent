@@ -1,42 +1,30 @@
 #!/usr/bin/env bun
 import packageJson from '../package.json' with { type: 'json' };
 
-export const usage = `Usage: superagent [options]
+const usage = `Usage: superagent [options]
 
 Options:
   -h, --help     Show this help
   -v, --version  Show the version`;
 
-export interface CliResult {
-	exitCode: number;
-	stdout?: string;
-	stderr?: string;
-}
+const [arg, ...rest] = Bun.argv.slice(2);
 
-export function run(args: readonly string[]): CliResult {
-	const [arg, ...rest] = args;
-	if (rest.length > 0) {
-		return {
-			exitCode: 1,
-			stderr: `Unexpected argument: ${rest[0]}\n\n${usage}`,
-		};
-	}
+if (rest.length > 0) {
+	console.error(`Unexpected argument: ${rest[0]}\n\n${usage}`);
+	process.exitCode = 1;
+} else {
 	switch (arg) {
 		case undefined:
 		case '-h':
 		case '--help':
-			return { exitCode: 0, stdout: usage };
+			console.log(usage);
+			break;
 		case '-v':
 		case '--version':
-			return { exitCode: 0, stdout: packageJson.version };
+			console.log(packageJson.version);
+			break;
 		default:
-			return { exitCode: 1, stderr: `Unknown option: ${arg}\n\n${usage}` };
+			console.error(`Unknown option: ${arg}\n\n${usage}`);
+			process.exitCode = 1;
 	}
-}
-
-if (import.meta.main) {
-	const result = run(Bun.argv.slice(2));
-	if (result.stdout !== undefined) console.log(result.stdout);
-	if (result.stderr !== undefined) console.error(result.stderr);
-	process.exitCode = result.exitCode;
 }
