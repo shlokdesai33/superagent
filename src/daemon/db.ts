@@ -164,6 +164,16 @@ CREATE TABLE model_calls (
 CREATE INDEX model_calls_by_time ON model_calls (started_at);
 `,
 	'ALTER TABLE model_calls DROP COLUMN model;',
+	`
+ALTER TABLE questions ADD COLUMN host TEXT;
+
+CREATE TABLE task_hosts (
+	task_id    INTEGER NOT NULL REFERENCES tasks(id),
+	host       TEXT NOT NULL,
+	granted_at INTEGER NOT NULL,
+	PRIMARY KEY (task_id, host)
+);
+`,
 ];
 
 // Letters and digits without look-alikes (no i, l, o, 0 or 1).

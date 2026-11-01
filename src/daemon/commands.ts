@@ -2,6 +2,7 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { ingest } from './ingest.ts';
+import { type SandboxedCommand, sandboxCommand } from './sandbox.ts';
 import { type Daemon, type Params, type RunningCommand, cut } from './state.ts';
 import {
 	isWorking,
@@ -60,6 +61,7 @@ export function commandLog(
  * Particle key and other secrets can't reach a command.
  */
 function commandEnv(daemon: Daemon, handle: string): Record<string, string> {
+	const tmp = join(taskFolder(daemon, handle), 'tmp');
 	return {
 		PATH: daemon.loginPath,
 		HOME: homedir(),
@@ -67,10 +69,16 @@ function commandEnv(daemon: Daemon, handle: string): Record<string, string> {
 		SHELL: Bun.env.SHELL || '/bin/bash',
 		LANG: Bun.env.LANG || 'C.UTF-8',
 		TERM: 'dumb',
-		TMPDIR: join(taskFolder(daemon, handle), 'tmp'),
+		TMPDIR: tmp,
 		PAGER: 'cat',
 		GIT_PAGER: 'cat',
 		GIT_TERMINAL_PROMPT: '0',
+		// The sandbox keeps .git read-only, so git status mustn't try to lock it.
+		GIT_OPTIONAL_LOCKS: '0',
+		// The home folder is hidden or read-only in the sandbox; caches go in tmp.
+		XDG_CACHE_HOME: join(tmp, 'cache'),
+		npm_config_cache: join(tmp, 'cache', 'npm'),
+		BUN_INSTALL_CACHE_DIR: join(tmp, 'cache', 'bun'),
 	};
 }
 
@@ -89,11 +97,14 @@ function signalGroup(pgid: number, signal: NodeJS.Signals): void {
  */
 export async function runCommand(
 	daemon: Daemon,
-	task: { id: number; handle: string; workDir: string },
+	task: { id: number; handle: string; repo: string | null; workDir: string },
 	command: string,
 	timeoutSeconds: number,
 ): Promise<string> {
-	const { db } = daemon;
+	const { db, sandbox } = daemon;
+	if (sandbox.state !== 'on') {
+		return `error: commands can't run: ${sandbox.text}. The operator has to fix that and restart the agent; the file tools still work.`;
+	}
 	const startedAt = Date.now();
 	mkdirSync(join(taskFolder(daemon, task.handle), 'commands'), {
 		recursive: true,
@@ -114,9 +125,22 @@ export async function runCommand(
 	const path = commandLog(daemon, task.handle, stepId);
 
 	let child: ReturnType<typeof spawn>;
+	let sandboxed: SandboxedCommand | null = null;
 	try {
-		child = spawn(command, task.workDir, commandEnv(daemon, task.handle));
+		sandboxed = await sandboxCommand(
+			daemon,
+			task,
+			join(taskFolder(daemon, task.handle), 'tmp'),
+			command,
+			'requested',
+		);
+		child = spawn(
+			sandboxed.argv,
+			task.workDir,
+			commandEnv(daemon, task.handle),
+		);
 	} catch (error) {
+		sandboxed?.finish();
 		const message = error instanceof Error ? error.message : String(error);
 		appendFileSync(path, `[couldn't start: ${message}]\n`);
 		db.query<unknown, [number, number]>(
@@ -175,6 +199,7 @@ export async function runCommand(
 		if (killTimer) clearTimeout(killTimer);
 		if (truncated) await sink.write('\n[output cut at 10 MB]\n');
 		await sink.end();
+		const denied = sandboxed.finish();
 
 		const exitCode = child.exitCode;
 		const status =
@@ -199,6 +224,7 @@ export async function runCommand(
 			signal: child.signalCode === null ? null : String(child.signalCode),
 			stopReason: entry.stopReason,
 			ms: endedAt - startedAt,
+			denied,
 		});
 		if (entry.background) {
 			ingest(daemon, {
@@ -229,10 +255,10 @@ export async function runCommand(
 	return `still running as step ${stepId}; its result will arrive as a message. Use read_output to look at it meanwhile, or stop_command to end it.`;
 }
 
-function spawn(command: string, cwd: string, env: Record<string, string>) {
+function spawn(argv: string[], cwd: string, env: Record<string, string>) {
 	// `detached` makes the shell a process-group leader, so stopping the group
 	// ends everything the command started.
-	return Bun.spawn(['/bin/bash', '-c', command], {
+	return Bun.spawn(argv, {
 		cwd,
 		env,
 		detached: true,
@@ -252,6 +278,8 @@ function describeResult(
 		signal: string | null;
 		stopReason: RunningCommand['stopReason'];
 		ms: number;
+		/** What the sandbox refused it. */
+		denied: string[];
 	},
 ): string {
 	const outcome =
@@ -274,7 +302,19 @@ function describeResult(
 			...lines.slice(-RESULT_TAIL_LINES),
 		];
 	}
-	const text = [header, `$ ${run.command}`, ...body].join('\n');
+	const denied =
+		run.denied.length === 0
+			? []
+			: [
+					'The sandbox denied:',
+					...run.denied.map((line) => `  ${line}`),
+					...(run.denied.some((line) => line.includes('network-outbound'))
+						? [
+								'request_host asks the operator to let your commands reach a host.',
+							]
+						: []),
+				];
+	const text = [header, `$ ${run.command}`, ...denied, ...body].join('\n');
 	return text.length > RESULT_MAX_CHARS
 		? `${cut(text, RESULT_MAX_CHARS)}\n[cut at 8 KB; read_output step=${stepId} for the rest]`
 		: text;

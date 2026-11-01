@@ -239,7 +239,13 @@ export async function stopAndWait(
 export function askQuestion(
 	daemon: Daemon,
 	taskId: number,
-	question: { text: string; context: string | null; options: string[] | null },
+	question: {
+		text: string;
+		context: string | null;
+		options: string[] | null;
+		/** The host the task's commands may reach if the operator allows it. */
+		host?: string;
+	},
 ): number {
 	const { db } = daemon;
 	const at = Date.now();
@@ -247,8 +253,8 @@ export function askQuestion(
 		const questionId = Number(
 			db
 				.query<unknown, Params>(
-					`INSERT INTO questions (task_id, text, context, options, state, asked_at)
-					VALUES ($taskId, $text, $context, $options, 'open', $at)`,
+					`INSERT INTO questions (task_id, text, context, options, state, asked_at, host)
+					VALUES ($taskId, $text, $context, $options, 'open', $at, $host)`,
 				)
 				.run({
 					taskId,
@@ -256,6 +262,7 @@ export function askQuestion(
 					context: question.context,
 					options: question.options ? JSON.stringify(question.options) : null,
 					at,
+					host: question.host ?? null,
 				}).lastInsertRowid,
 		);
 		db.query<unknown, [number, number]>(

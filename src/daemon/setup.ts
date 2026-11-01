@@ -5,8 +5,8 @@ import {
 	rmSync,
 	writeFileSync,
 } from 'node:fs';
-import { release } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { homedir, release } from 'node:os';
+import { isAbsolute, join } from 'node:path';
 import type { DataPaths } from '../home.ts';
 import type { MachineFacts } from '../protocol.ts';
 
@@ -94,12 +94,15 @@ export type Config = {
 	particleApiKey: string | null;
 	repos: Array<{ name: string; path: string }>;
 	maxWorkingTasks: number;
+	/** Folders in your home folder that sandboxed commands may read, beyond the built-in toolchain list. */
+	sandboxReadPaths: string[];
 };
 
 const DEFAULT_CONFIG: Config = {
 	particleApiKey: null,
 	repos: [],
 	maxWorkingTasks: 4,
+	sandboxReadPaths: [],
 };
 
 /** Reads `config.json`, writing the defaults when it doesn't exist. */
@@ -178,10 +181,26 @@ export function loadConfig(path: string): Config {
 	) {
 		throw invalid('maxWorkingTasks must be a whole number of at least 1');
 	}
+	const sandboxReadPaths = raw.sandboxReadPaths ?? [];
+	if (
+		!Array.isArray(sandboxReadPaths) ||
+		!sandboxReadPaths.every(
+			(folder: unknown) =>
+				typeof folder === 'string' &&
+				(isAbsolute(folder) || folder.startsWith('~/')),
+		)
+	) {
+		throw invalid(
+			'sandboxReadPaths must be a list of absolute or "~/…" folder paths',
+		);
+	}
 	return {
 		particleApiKey,
 		repos: parsedRepos,
 		maxWorkingTasks,
+		sandboxReadPaths: sandboxReadPaths.map((folder: string) =>
+			folder.startsWith('~/') ? join(homedir(), folder.slice(2)) : folder,
+		),
 	};
 }
 
@@ -233,22 +252,26 @@ function osName(): string {
 		const version = swVers('-productVersion');
 		return version ? `${name} ${version}` : name;
 	}
+	const fields = osRelease();
+	const name =
+		fields.get('PRETTY_NAME') ??
+		[fields.get('NAME'), fields.get('VERSION_ID')].filter(Boolean).join(' ');
+	return name || `Linux ${release()}`;
+}
+
+/** The fields of `/etc/os-release`; empty when there's none. */
+export function osRelease(): Map<string, string> {
 	try {
-		const fields = new Map(
+		return new Map(
 			readFileSync('/etc/os-release', 'utf8')
 				.split('\n')
 				.map((line) => line.match(/^([A-Z_]+)=("?)(.*)\2$/))
 				.filter((match) => match !== null)
-				.map((match) => [match[1], match[3]]),
+				.map((match): [string, string] => [match[1] ?? '', match[3] ?? '']),
 		);
-		const name =
-			fields.get('PRETTY_NAME') ??
-			[fields.get('NAME'), fields.get('VERSION_ID')].filter(Boolean).join(' ');
-		if (name) return name;
 	} catch {
-		// No os-release; fall back to the kernel.
+		return new Map();
 	}
-	return `Linux ${release()}`;
 }
 
 function swVers(flag: string): string {

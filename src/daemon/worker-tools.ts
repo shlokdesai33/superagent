@@ -9,7 +9,8 @@ import {
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { FunctionTool, ToolCall } from '../particle/types.ts';
 import { readOutput, runCommand, stopCommand, taskFolder } from './commands.ts';
-import { editDiff } from './git.ts';
+import { editDiff, git } from './git.ts';
+import { grantedHosts, hostProblem } from './sandbox.ts';
 import { type Daemon, type Params, cut } from './state.ts';
 import { openQuestion, publishStep, taskChanged } from './task-feed.ts';
 import { askQuestion, endTask, toRouter } from './tasks.ts';
@@ -41,7 +42,7 @@ const MAX_OPTIONS = 4;
 export const WORKER_TOOLS: FunctionTool[] = [
 	tool(
 		'run',
-		'Run a shell command (bash) in your working folder. Waits up to 30 s; a longer command keeps running in the background and its result arrives as a message.',
+		'Run a shell command (bash) in your working folder, inside the sandbox. Waits up to 30 s; a longer command keeps running in the background and its result arrives as a message.',
 		{
 			command: string('The command'),
 			timeout_s: integer(
@@ -97,6 +98,27 @@ export const WORKER_TOOLS: FunctionTool[] = [
 		['path', 'old', 'new'],
 	),
 	tool(
+		'commit',
+		'Commit every change in your worktree to your branch. Runs outside the sandbox, since .git is read-only to your commands.',
+		{ message: string('The commit message') },
+		['message'],
+	),
+	tool(
+		'push',
+		"Push your branch to the repository's origin remote. Runs outside the sandbox; only your own branch is pushed.",
+		{},
+		[],
+	),
+	tool(
+		'request_host',
+		"Ask the operator to let your commands reach a host the sandbox blocks. Ends your turn; if they allow it, it's reachable for the rest of this task.",
+		{
+			host: string('A host name, optionally with :port: api.example.com'),
+			reason: string('Why the task needs it, for the operator'),
+		},
+		['host', 'reason'],
+	),
+	tool(
 		'ask',
 		'Ask the operator a question when you need a decision. Ends your turn; the answer arrives as a message.',
 		{
@@ -143,7 +165,13 @@ export const WORKER_TOOLS: FunctionTool[] = [
 	),
 ];
 
-export type WorkerTask = { id: number; handle: string; workDir: string };
+export type WorkerTask = {
+	id: number;
+	handle: string;
+	repo: string | null;
+	branch: string | null;
+	workDir: string;
+};
 
 export type WorkerToolOutcome = {
 	/** The tool result for the transcript; errors start with `error:`. */
@@ -201,6 +229,40 @@ export async function runWorkerTool(
 			}
 			case 'edit_file':
 				return done(await editFile(daemon, task, args));
+			case 'commit':
+				return done(
+					await commit(daemon, task, requiredString(args, 'message')),
+				);
+			case 'push':
+				return done(await push(daemon, task));
+			case 'request_host': {
+				const host = requiredString(args, 'host').trim().toLowerCase();
+				const reason = requiredString(args, 'reason');
+				const problem = hostProblem(host, 'requested');
+				if (problem) throw new ToolError(problem);
+				if (grantedHosts(daemon.db, task.id).includes(host)) {
+					throw new ToolError(`${host} is already allowed`);
+				}
+				const open = openQuestion(daemon.db, task.id);
+				if (open) {
+					throw new ToolError(
+						`question ${open.id} is still open; wait for its answer`,
+					);
+				}
+				const id = askQuestion(daemon, task.id, {
+					text: cut(
+						`Let ${task.handle}'s commands reach ${host}?`,
+						QUESTION_CHARS,
+					),
+					context: reason,
+					options: ['Allow', 'Deny'],
+					host,
+				});
+				return done(
+					`asked as question ${id}; if the operator allows it, your commands can reach ${host} for the rest of this task`,
+					true,
+				);
+			}
 			case 'ask': {
 				const open = openQuestion(daemon.db, task.id);
 				if (open) {
@@ -438,6 +500,70 @@ function readOutputTool(daemon: Daemon, task: WorkerTask, args: Args): string {
 			? [`[read_output step=${step} from_line=${end + 1} for more]`]
 			: []),
 	].join('\n');
+}
+
+const PUSH_TIMEOUT_MS = 60_000;
+
+/** `git add -A` and `git commit` on the host, with the safe flags, in the worktree the task row names. */
+async function commit(
+	daemon: Daemon,
+	task: WorkerTask,
+	message: string,
+): Promise<string> {
+	if (task.repo === null) {
+		throw new ToolError("your working folder isn't a git repository");
+	}
+	if (message.trim() === '') throw new ToolError('message is empty');
+	const added = await git(daemon, ['-C', task.workDir, 'add', '-A']);
+	if (added.code !== 0) {
+		throw new ToolError(`git add failed: ${firstLine(added.stderr)}`);
+	}
+	const made = await git(daemon, [
+		'-C',
+		task.workDir,
+		'commit',
+		'--quiet',
+		'-m',
+		message,
+	]);
+	if (made.code !== 0) {
+		const said = `${made.stdout}\n${made.stderr}`;
+		if (/nothing (added )?to commit/.test(said)) return 'nothing to commit';
+		throw new ToolError(
+			`git commit failed: ${firstLine(made.stderr || made.stdout)}`,
+		);
+	}
+	const summary = await git(daemon, [
+		'-C',
+		task.workDir,
+		'show',
+		'--stat',
+		'--format=committed %h: %s',
+		'HEAD',
+	]);
+	return summary.stdout.trim().split('\n').slice(0, 20).join('\n');
+}
+
+/** Pushes only the task's own branch to `origin`, on the host. */
+async function push(daemon: Daemon, task: WorkerTask): Promise<string> {
+	if (task.repo === null || task.branch === null) {
+		throw new ToolError("your working folder isn't a git repository");
+	}
+	const ref = `refs/heads/${task.branch}`;
+	const pushed = await git(
+		daemon,
+		['-C', task.workDir, 'push', 'origin', `${ref}:${ref}`],
+		{ timeoutMs: PUSH_TIMEOUT_MS },
+	);
+	const said = pushed.stderr.trim().split('\n').slice(-10).join('\n');
+	if (pushed.code !== 0) {
+		throw new ToolError(`git push failed: ${said || `exit ${pushed.code}`}`);
+	}
+	return `pushed ${task.branch} to origin\n${said}`.trim();
+}
+
+function firstLine(text: string): string {
+	return text.trim().split('\n')[0] ?? '';
 }
 
 function releaseThread(daemon: Daemon, task: WorkerTask, args: Args): string {

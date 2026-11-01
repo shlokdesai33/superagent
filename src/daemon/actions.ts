@@ -218,10 +218,15 @@ function answerQuestion(
 	if (!task) return unknownTask(handle);
 	const question = daemon.db
 		.query<
-			{ state: string; answeredBy: string | null; answeredAt: number | null },
+			{
+				state: string;
+				answeredBy: string | null;
+				answeredAt: number | null;
+				host: string | null;
+			},
 			[number, number]
 		>(
-			`SELECT state, answered_by AS answeredBy, answered_at AS answeredAt
+			`SELECT state, answered_by AS answeredBy, answered_at AS answeredAt, host
 			FROM questions WHERE id = ? AND task_id = ?`,
 		)
 		.get(questionId, task.id);
@@ -252,6 +257,20 @@ function answerQuestion(
 		};
 	}
 	if (text.trim() === '') return empty();
+	// Only the operator's own answer grants access; an answer from someone on
+	// a thread closes the question without one.
+	const granted = question.host !== null && /^\s*(allow|yes)\b/i.test(text);
+	if (granted) {
+		daemon.db
+			.query<unknown, [number, string, number]>(
+				'INSERT OR IGNORE INTO task_hosts (task_id, host, granted_at) VALUES (?, ?, ?)',
+			)
+			.run(task.id, question.host ?? '', Date.now());
+		daemon.log('info', 'host allowed', {
+			task: task.handle,
+			host: question.host,
+		});
+	}
 	const seq =
 		ingest(daemon, {
 			channel: 'console',
@@ -274,7 +293,12 @@ function answerQuestion(
 		ok: true,
 		seq,
 		subject: `Answered ${task.handle}`,
-		detail: 'it continues from here',
+		detail:
+			question.host === null
+				? 'it continues from here'
+				: granted
+					? `its commands can reach ${question.host} from now on`
+					: `${question.host} stays blocked`,
 	};
 }
 

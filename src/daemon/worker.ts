@@ -4,9 +4,11 @@ import type { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'node:fs';
 import type { ChatResult } from '../particle/client.ts';
 import type { AssistantMessage, ToolCall } from '../particle/types.ts';
-import { stopCommand } from './commands.ts';
+import { join } from 'node:path';
+import { stopCommand, taskFolder } from './commands.ts';
 import { prepareWorktree } from './git.ts';
 import { ModelError, callModel, pausedOn } from './model.ts';
+import { REGISTRY_HOSTS, grantedHosts } from './sandbox.ts';
 import {
 	type Item,
 	appendItems,
@@ -43,6 +45,7 @@ const SYSTEM_PROMPT = `You are a Worker of a local AI agent. You carry out one t
 - You never talk to people. Use report for progress the Router may want to pass on, and ask only when you need a decision from the operator.
 - Before each batch of tool calls, write one short line saying what you found or what you're about to do. The operator sees it as a step.
 - Commands run with bash in your working folder. run waits up to 30 seconds; a longer command keeps running in the background and its result arrives as a message, so you can keep working meanwhile.
+- Commands run in a sandbox. They can write only in your working folder and $TMPDIR, your home folder is hidden apart from toolchains, and credentials are never readable. .git is read-only, so git status, diff and log work but commit and push are tools. The network reaches package registries and the hosts the operator allowed for this task. A command's result names what the sandbox denied; request_host asks the operator for a host. There's no way to run outside the sandbox.
 - File tools take paths relative to your working folder and can't reach outside it.
 - New messages (notes from the operator or the Router, answers to your questions, finished commands) arrive between your steps. Take them into account.
 - Every response ends with tool calls. When you're waiting on something outside, call wait_for. When the task is complete, call finish with a one-line result (at most 80 characters) and, if useful, a markdown report.`;
@@ -335,7 +338,13 @@ async function runTools(
 		if (live.controller.signal.aborted) return;
 		const outcome = await runWorkerTool(
 			daemon,
-			{ id: task.id, handle: task.handle, workDir: task.workDir },
+			{
+				id: task.id,
+				handle: task.handle,
+				repo: task.repo,
+				branch: task.branch,
+				workDir: task.workDir,
+			},
 			call,
 		);
 		appendItems(db, sessionId, [
@@ -583,7 +592,10 @@ function brief(
 			: 'You follow no threads; the Router speaks to people for you.',
 		task.repo === null
 			? `Working folder: ${task.workDir}. It's a scratch folder for this task, not a repository.`
-			: `Working folder: ${task.workDir}. It's a git worktree of the ${task.repo} repository (${daemon.config.repos.find((repo) => repo.name === task.repo)?.path ?? 'no longer in config.json'}) on your own branch, ${task.branch ?? ''}; commit your work there.${worktreeNote ? ` ${worktreeNote}` : ''}`,
+			: `Working folder: ${task.workDir}. It's a git worktree of the ${task.repo} repository (${daemon.config.repos.find((repo) => repo.name === task.repo)?.path ?? 'no longer in config.json'}) on your own branch, ${task.branch ?? ''}; commit your work with the commit tool.${worktreeNote ? ` ${worktreeNote}` : ''}`,
+		daemon.sandbox.state === 'on'
+			? `Sandbox: commands write only in ${task.workDir} and $TMPDIR (${join(taskFolder(daemon, task.handle), 'tmp')}), and reach ${[...REGISTRY_HOSTS, ...grantedHosts(db, task.id)].join(', ')}.`
+			: `Sandbox: unavailable, so run refuses commands until the operator fixes it (${daemon.sandbox.text}).`,
 		`Machine: ${daemon.machine.os} · ${daemon.machine.arch} · on PATH: ${tools
 			.filter(([, found]) => found)
 			.map(([name]) => name)

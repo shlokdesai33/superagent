@@ -6,12 +6,14 @@ import type {
 	Health,
 	MachineFacts,
 	Message,
+	Problem,
 	RouterState,
 	Snapshot,
 	Usage,
 } from '../protocol.ts';
 import type { Feed } from './feed.ts';
 import type { Log } from './log.ts';
+import type { SandboxStatus } from './sandbox.ts';
 import type { Config } from './setup.ts';
 
 const CONSOLE_SNAPSHOT_MESSAGES = 50;
@@ -40,6 +42,8 @@ export type Daemon = {
 	paths: DataPaths;
 	/** Your login shell's PATH, for Worker commands. */
 	loginPath: string;
+	/** Commands are refused unless it's `on`. */
+	sandbox: SandboxStatus;
 	/** Worker loops of active tasks, by task ID. */
 	workers: Map<number, WorkerLive>;
 	/** Commands still running, by step ID. */
@@ -222,6 +226,26 @@ export function usageChanged(daemon: Daemon): void {
 }
 
 export function health(daemon: Daemon): Health {
+	const problems: Problem[] = [];
+	if (daemon.model.state !== 'ok') {
+		problems.push({
+			id: 'model',
+			kind: 'model',
+			text: daemon.model.detail ?? 'Particle is unavailable',
+			fix: null,
+			since: daemon.model.since ?? Date.now(),
+		});
+	}
+	const { sandbox } = daemon;
+	if (sandbox.state === 'unavailable') {
+		problems.push({
+			id: 'sandbox',
+			kind: 'sandbox',
+			text: sandbox.text,
+			fix: sandbox.fix,
+			since: sandbox.since,
+		});
+	}
 	return {
 		channels: [...daemon.channels].map(([name, lastEventAt]) => ({
 			name,
@@ -230,20 +254,10 @@ export function health(daemon: Daemon): Health {
 			detail: null,
 		})),
 		model: { name: MODEL, ...daemon.model },
-		problems:
-			daemon.model.state === 'ok'
-				? []
-				: [
-						{
-							id: 'model',
-							kind: 'model',
-							text: daemon.model.detail ?? 'Particle is unavailable',
-							since: daemon.model.since ?? Date.now(),
-						},
-					],
+		problems,
 		machine: daemon.machine,
 		proactive: 'off',
-		sandbox: 'off',
+		sandbox: sandbox.state,
 	};
 }
 
