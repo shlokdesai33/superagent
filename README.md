@@ -20,10 +20,13 @@ Run `bun run check` before opening a PR, and list its results in the PR descript
 ## Running
 
 ```sh
+bun src/cli.ts                # open the terminal UI; prints the status when piped
 bun src/cli.ts daemon         # run the agent in the foreground; Ctrl-C stops it
 bun src/cli.ts status         # print its status; non-zero exit when it isn't running
 bun src/cli.ts status --json  # the raw feed snapshot
 ```
+
+The terminal UI connects to the daemon for the same data folder and reconnects by itself when it isn't running. It picks a light or dark theme from the terminal's background; press `?` for its keys.
 
 The daemon keeps everything in one data folder, `~/.superagent` unless `SUPERAGENT_HOME` is set: `config.json`, the API `token`, the socket `agent.sock`, the lock `daemon.pid`, the SQLite state `state.db` and `daemon.log`. Clients talk HTTP over the socket, sending `Authorization: Bearer <token>` and `Superagent-Protocol: 1`:
 

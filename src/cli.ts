@@ -5,10 +5,12 @@ import { runDaemon } from './daemon/main.ts';
 import { StartupError } from './daemon/setup.ts';
 import { dataPaths } from './home.ts';
 import { formatStatus } from './status.ts';
+import { runTui } from './tui/main.ts';
 
-const usage = `Usage: superagent <command> [options]
+const usage = `Usage: superagent [command] [options]
 
 Commands:
+  (none)         Open the terminal UI; prints the status when not in a terminal
   daemon         Run the agent in the foreground until Ctrl-C
   status         Print the agent's status and exit
 
@@ -23,6 +25,9 @@ const [command, ...rest] = Bun.argv.slice(2);
 
 switch (command) {
 	case undefined:
+		if (process.stdin.isTTY && process.stdout.isTTY) await runTui();
+		else await status(false);
+		break;
 	case '-h':
 	case '--help':
 		if (rest.length > 0) fail(`Unexpected argument: ${rest[0]}`);
