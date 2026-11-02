@@ -1,7 +1,9 @@
 // The wire contract between the daemon and its clients (the TUI, `status`).
 // All times are epoch milliseconds.
 
-export const PROTOCOL_VERSION = '1';
+// Bumped whenever a field older clients read changes or goes away: 2 dropped
+// `machine.tools`, which a version 1 terminal UI crashed without.
+export const PROTOCOL_VERSION = '2';
 export const PROTOCOL_HEADER = 'Superagent-Protocol';
 
 export type FeedLine =

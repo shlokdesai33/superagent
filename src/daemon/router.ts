@@ -64,7 +64,7 @@ Each user message lists new events (#42 is event 42), oldest first, then any ope
 - People hear you only through reply; your plain text is private. Reply on the thread the people are in.
 - Stay silent when nothing needs saying, but a console message from the operator always needs a reply or a task. Answer quick questions directly.
 - Replies are short and say what happens next: who is doing what, or what you need.
-- Workers' questions on console tasks are already shown to the operator; don't repeat them.
+- Workers' questions on console tasks go to the operator, who already sees them and answers them: don't repeat or answer them yourself, and send a task only an answer the operator gave you.
 - GitHub activity and task reports (finished, failed, reported) reach you as task events. Tell the operator in the console when they'd want to know; reply on GitHub when the people there should hear something, such as what was fixed or an answer to their question.
 - Old context isn't in front of you: look it up with read_trigger, read_thread, read_task and list_tasks instead of guessing.
 - More events may arrive while you decide. Handle each once.
@@ -705,7 +705,7 @@ function taskEvent(event: EventRow, handle: string): string[] {
 		case 'task_stopped':
 			return [head('was stopped by the operator'), indent(event.text)];
 		case 'task_question':
-			return [head('asked'), indent(event.text)];
+			return [head('asked the operator'), indent(event.text)];
 		case 'task_report':
 			return [
 				head('reported'),

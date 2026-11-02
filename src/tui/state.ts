@@ -41,6 +41,11 @@ export function emptyTyping(): Typing {
 	return { mode: 'free', handle: null, questionId: null, text: '', cursor: 0 };
 }
 
+/** How many DONE rows home shows, or `null` for all of them. */
+export function doneShown(ui: Ui): number | null {
+	return ui.done.expanded ? null : ui.done.fits;
+}
+
 /** Something is typed: spaces alone count as nothing, as enter sends nothing. */
 export function typed(ui: Ui): boolean {
 	return ui.typing.text.trim() !== '';
@@ -103,6 +108,11 @@ export type Ui = {
 	scroll: { home: number; page: number; free: boolean };
 	/** From the last frame. */
 	overflow: Overflow;
+	/**
+	 * DONE on home: `fits`, how many of its rows fit before `+ N more`,
+	 * from the last frame; `expanded` once enter on that row shows them all.
+	 */
+	done: { fits: number | null; expanded: boolean };
 	/** From the last frame: where each row of the draft on screen starts. */
 	draftRows: number[];
 	typing: Typing;

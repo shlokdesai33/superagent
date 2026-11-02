@@ -110,6 +110,17 @@ try {
 		status.out.split('\n')[0],
 	);
 
+	const old = await fetch('http://superagent/v1/feed', {
+		headers: { 'Superagent-Protocol': '1' },
+		unix: join(home, 'agent.sock'),
+	});
+	const refusal = await old.text();
+	check(
+		'a version 1 client, which reads fields this agent no longer sends, is refused',
+		old.status === 400 && refusal.includes('unsupported_protocol'),
+		`HTTP ${old.status}`,
+	);
+
 	process.stdout.write('\nA frozen agent, as after SIGSTOP\n');
 	const frozen = agentPid();
 	process.kill(frozen, 'SIGSTOP');

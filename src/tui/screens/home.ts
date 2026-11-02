@@ -14,7 +14,7 @@ import {
 	width,
 } from '../cells.ts';
 import { age, ago, duration } from '../format.ts';
-import { type Live, type Section, sections } from '../model.ts';
+import { type Live, MORE_KEY, type Section, sections } from '../model.ts';
 import {
 	BARS,
 	MEASURE,
@@ -24,11 +24,13 @@ import {
 	oneLine,
 	origin,
 	paragraphs,
+	rule,
 	spinner,
 } from '../parts.ts';
 import { FADE_MS, type Ui } from '../state.ts';
 
-const CONSOLE_SHOWN = 4;
+/** DONE rows shown before its `+ N more`, when they fit. */
+const DONE_FEW = 5;
 
 type Context = {
 	ui: Ui;
@@ -47,7 +49,7 @@ export function homeBody(
 	now: number,
 	/** Body rows on screen. */
 	height: number,
-): { lines: Line[]; animating: boolean } {
+): { lines: Line[]; pinned: Line[]; doneFits: number; animating: boolean } {
 	const ctx: Context = { ui, content, wide, now };
 	const all = sections(live);
 	const lines: Line[] = [];
@@ -111,6 +113,8 @@ export function homeBody(
 		});
 	}
 
+	const needsLength = lines.length;
+
 	if (all.working.length > 0 || leaving('working').length > 0) {
 		section(() => {
 			lines.push(label('WORKING', all.working.length));
@@ -123,43 +127,104 @@ export function homeBody(
 		if (all.working.some((task) => task.status === 'working')) animating = true;
 	}
 
+	// The console's latest exchange (your last message and what came after
+	// it) always shows in full, NEEDS YOU keeps its label and first row, and
+	// DONE folds to what's left.
+	const blocks = live.console.map((message) => {
+		const rows = consoleRows(message, ctx);
+		// An agent from before `held` sends neither field.
+		const { held, pending } = live.router;
+		if (held && pending?.includes(message.id))
+			rows.push(...heldRows(held, ctx));
+		return rows;
+	});
+	const lastYou = live.console.findLastIndex(
+		(message) => message.direction === 'in',
+	);
+	const exchange = blocks
+		.slice(lastYou === -1 ? Math.max(0, blocks.length - 1) : lastYou)
+		.flat();
+	// Tasks keep a label and a row: NEEDS YOU's first, else WORKING's or
+	// DONE's, so an exchange that fills the body still leaves them.
+	const anyTasks = lines.length > 0 || all.done.length > 0;
+	const reserve = needsLength > 0 ? Math.min(2, needsLength) : anyTasks ? 2 : 0;
+	const consoleMin = Math.min(
+		exchange.length,
+		Math.max(0, height - 1 - reserve),
+	);
+	const taskRoom = Math.max(0, height - 1 - consoleMin);
+
+	const doneFits = fitDone(
+		all.done.length,
+		taskRoom - (lines.length > 0 ? lines.length + 1 : 0) - 1,
+	);
 	if (all.done.length > 0 || leaving('done').length > 0) {
+		const shown = ui.done.expanded ? all.done : all.done.slice(0, doneFits);
+		const hidden = all.done.length - shown.length;
 		section(() => {
-			lines.push(label('DONE TODAY', all.done.length));
+			lines.push(label('DONE', all.done.length));
 			lines.push(
-				...withGhosts('done', all.done, (task, fade, ghost) => [
+				...withGhosts('done', shown, (task, fade, ghost) => [
 					doneRow(task, ctx, fade, ghost),
 				]),
 			);
+			if (hidden > 0) lines.push(moreRow(hidden, ctx));
 		});
 	}
 
-	if (live.console.length > 0) {
-		// The newest message always shows in full; older ones only while they
-		// fit under the sections above, so a long reply isn't pushed off screen.
-		const room = height - lines.length - (lines.length > 0 ? 2 : 1);
-		const shown: Line[][] = [];
-		let used = 0;
-		for (const message of live.console.slice(-CONSOLE_SHOWN).toReversed()) {
-			const rows = consoleRows(message, ctx);
-			// An agent from before `held` sends neither field.
-			const { held, pending } = live.router;
-			if (held && pending?.includes(message.id)) {
-				rows.push(...heldRows(held, ctx));
-			}
-			if (shown.length > 0 && used + rows.length > room) break;
-			shown.unshift(rows);
-			used += rows.length;
-		}
-		section(() => {
-			lines.push(label('CONSOLE'), ...shown.flat());
-		});
-	}
-
-	if (lines.length === 0) {
+	if (lines.length === 0 && live.console.length === 0) {
 		lines.push({ segs: [{ t: 'No tasks yet.', fg: 'fg' }] });
 	}
-	return { lines, animating };
+
+	// Taller than the body can hold, the exchange scrolls with the tasks, as
+	// one list: ↓ past the last task reads on through it.
+	if (consoleMin < exchange.length) {
+		return {
+			lines: [...lines, rule(content), ...exchange],
+			pinned: [],
+			doneFits,
+			animating,
+		};
+	}
+
+	// Older messages fill the rows the tasks leave, whole, newest first.
+	const consoleRoom = Math.max(
+		consoleMin,
+		height - 1 - Math.min(lines.length, taskRoom),
+	);
+	let console = exchange;
+	const older = blocks.slice(
+		0,
+		lastYou === -1 ? Math.max(0, blocks.length - 1) : lastYou,
+	);
+	for (const rows of older.toReversed()) {
+		if (console.length + rows.length > consoleRoom) break;
+		console = [...rows, ...console];
+	}
+	return {
+		lines,
+		pinned: [rule(content), ...console],
+		doneFits,
+		animating,
+	};
+}
+
+/** DONE rows that fit in `room` with their `+ N more`: at most a few, at least one. */
+function fitDone(count: number, room: number): number {
+	if (count <= Math.min(room, DONE_FEW + 1)) return count;
+	return Math.max(1, Math.min(DONE_FEW, room - 1));
+}
+
+function moreRow(hidden: number, ctx: Context): Line {
+	const selected = ctx.ui.selected === MORE_KEY;
+	return {
+		segs: [
+			{ t: '+ ', fg: 'faint' },
+			{ t: `${hidden} more`, fg: 'dim', b: selected },
+		],
+		key: MORE_KEY,
+		...(selected ? { bg: 'surface' } : {}),
+	};
 }
 
 function fadeIn(ui: Ui, key: string, now: number): number | undefined {

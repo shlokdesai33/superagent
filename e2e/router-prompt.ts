@@ -167,6 +167,11 @@ try {
 	);
 	const routerSystem = first?.body.messages[0]?.content;
 	check(
+		"the Router is told Workers' questions are the operator's to answer",
+		typeof routerSystem === 'string' &&
+			routerSystem.includes("don't repeat or answer them yourself"),
+	);
+	check(
 		'the Router has tasks push or open a PR only when one is asked for',
 		typeof routerSystem === 'string' &&
 			routerSystem.includes(

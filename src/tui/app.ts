@@ -31,6 +31,7 @@ import type { InputEvent, KeyName } from './input.ts';
 import {
 	type Connection,
 	type Item,
+	MORE_KEY,
 	type Model,
 	apply,
 	fromSnapshot,
@@ -47,6 +48,7 @@ import {
 	type KeyScreen,
 	type Toast,
 	type Ui,
+	doneShown,
 	drafting,
 	emptyTyping,
 	mergedSteps,
@@ -107,6 +109,7 @@ export class App {
 			selectedIndex: 0,
 			scroll: { home: 0, page: 0, free: false },
 			overflow: { above: false, below: false },
+			done: { fits: null, expanded: false },
 			draftRows: [0],
 			typing: emptyTyping(),
 			confirmStop: null,
@@ -766,7 +769,9 @@ export class App {
 		}
 		if (screen.name !== 'home') return;
 		const item = this.selectedItem();
-		if (item?.kind === 'problem') {
+		if (item?.kind === 'more') {
+			this.expandDone();
+		} else if (item?.kind === 'problem') {
 			this.ui.screen = { name: 'health' };
 			this.ui.scroll.page = 0;
 		} else if (item?.kind === 'task' && !this.answer(item.task.handle)) {
@@ -790,7 +795,9 @@ export class App {
 		if (!live) return null;
 		this.syncSelection();
 		return (
-			homeItems(live).find((item) => item.key === this.ui.selected) ?? null
+			homeItems(live, doneShown(this.ui)).find(
+				(item) => item.key === this.ui.selected,
+			) ?? null
 		);
 	}
 
@@ -802,7 +809,7 @@ export class App {
 		}
 		const live = this.model.live;
 		if (!live) return;
-		const items = homeItems(live);
+		const items = homeItems(live, doneShown(this.ui));
 		this.syncSelection();
 		const { scroll, overflow } = this.ui;
 		if (step > 0 && overflow.below) {
@@ -830,9 +837,28 @@ export class App {
 		this.ui.scroll.page = 0;
 	}
 
-	/** Esc with nothing typed: the keys screen goes back where it came from. */
+	/** `+ N more`: every DONE row, the selection on the first it hid. */
+	private expandDone(): void {
+		const live = this.model.live;
+		if (!live) return;
+		this.ui.done.expanded = true;
+		const first = homeItems(live, null)[this.ui.selectedIndex];
+		if (first) this.ui.selected = first.key;
+		this.ui.scroll.free = false;
+	}
+
+	/**
+	 * Esc with nothing typed: DONE folds back to `+ N more`, and the keys
+	 * screen goes back where it came from.
+	 */
 	private back(): void {
 		const { screen } = this.ui;
+		if (screen.name === 'home' && this.ui.done.expanded) {
+			this.ui.done.expanded = false;
+			this.ui.selected = MORE_KEY;
+			this.ui.scroll.free = false;
+			return;
+		}
 		if (screen.name === 'keys') {
 			this.ui.screen = screen.back;
 			this.ui.scroll.page = 0;
@@ -889,7 +915,7 @@ export class App {
 	private syncSelection(): void {
 		const live = this.model.live;
 		if (!live) return;
-		const items = homeItems(live);
+		const items = homeItems(live, doneShown(this.ui));
 		if (items.length === 0) {
 			this.ui.selected = null;
 			this.ui.selectedIndex = 0;
@@ -934,6 +960,7 @@ export class App {
 		if (this.ui.screen.name === 'home') this.ui.scroll.home = output.scroll;
 		else this.ui.scroll.page = output.scroll;
 		this.ui.overflow = output.overflow;
+		if (output.doneFits !== null) this.ui.done.fits = output.doneFits;
 		this.ui.draftRows = output.draftRows;
 		this.terminal.draw(output.rows);
 

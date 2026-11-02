@@ -147,6 +147,35 @@ function sandbox(): Health['sandbox'] | null {
 	return null;
 }
 
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Kills the agent and starts it again, counting its socat bridges. */
+async function crashAndRestart(): Promise<{
+	bridges: number;
+	left: number;
+	after: number;
+}> {
+	const daemonPid = readFileSync(join(agent.home, 'daemon.pid'), 'utf8').trim();
+	const pids = Bun.spawnSync(['pgrep', '-P', daemonPid, '-x', 'socat'])
+		.stdout.toString()
+		.trim()
+		.split('\n')
+		.filter(Boolean)
+		.map(Number);
+	await agent.crash();
+	const left = pids.filter(alive).length;
+	await agent.restart();
+	await Bun.sleep(500);
+	return { bridges: pids.length, left, after: pids.filter(alive).length };
+}
+
 const workerRequests = (handle: string) =>
 	particle.requests.filter(
 		(request) => request.session === 'worker' && request.handle === handle,
@@ -307,6 +336,21 @@ try {
 			(escaped ?? '').includes('outside its process group'),
 			escaped,
 		);
+	}
+
+	// 5. A crash leaves the sandbox's socat bridges running; the next start
+	//    ends them, after Worker commands and before any.
+	if (sandbox() === 'on' && process.platform === 'linux') {
+		process.stdout.write('\nThe sandbox after a crash\n');
+		for (const when of ['after commands ran', 'before any command']) {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			const { bridges, left, after } = await crashAndRestart();
+			check(
+				`the next start ends the socat bridges a crash ${when} left behind`,
+				bridges > 0 && left === bridges && after === 0,
+				`${bridges} bridges, ${left} left by the crash, ${after} after the restart`,
+			);
+		}
 	}
 } catch (error) {
 	failures += 1;

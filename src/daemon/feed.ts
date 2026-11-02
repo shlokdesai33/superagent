@@ -54,7 +54,7 @@ export function createFeed(snapshot: () => Snapshot, log: Log): Feed {
 		broadcast(() => ({ type: 'ping', now: Date.now() }));
 	}, PING_INTERVAL_MS);
 
-	// A fresh snapshot at local midnight resets DONE TODAY and today's usage.
+	// A fresh snapshot at local midnight resets DONE and today's usage.
 	let midnight: Timer;
 	const scheduleMidnight = () => {
 		const next = new Date();

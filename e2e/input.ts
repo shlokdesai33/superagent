@@ -205,7 +205,7 @@ try {
 	await until(tui, 'the reply', (screen) =>
 		showing(screen, 'Hello back (HI).'),
 	);
-	check('and the reply shows under CONSOLE', true);
+	check('and the reply shows in the console', true);
 
 	// 2. With nothing typed, ↑ ↓ move the selection and enter opens it.
 	await agent.action({ type: 'send_console', text: 'two tasks (TASKS)' });
