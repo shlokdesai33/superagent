@@ -331,8 +331,9 @@ export async function editDiff(
 }
 
 /**
- * Removes worktrees of tasks that ended over 7 days ago (their branches stay,
- * so committed work is kept) and command logs older than 30 days.
+ * Removes worktrees and temp folders of tasks that ended over 7 days ago
+ * (their branches stay, so committed work is kept) and command logs older
+ * than 30 days.
  */
 export async function cleanUp(daemon: Daemon): Promise<void> {
 	const now = Date.now();
@@ -360,6 +361,26 @@ export async function cleanUp(daemon: Daemon): Promise<void> {
 		await withRepoLock(path, () =>
 			removeOldWorktree(daemon, task.id, path, cutoff),
 		);
+	}
+
+	// Saving a worktree uses the task's temp folder, so it goes after them.
+	let removedTmp = 0;
+	for (const task of daemon.db
+		.query<{ id: number; handle: string }, [number]>(
+			`SELECT id, handle FROM tasks
+			WHERE state IN ('done', 'failed', 'stopped') AND ended_at < ?`,
+		)
+		.all(cutoff)) {
+		const tmp = join(daemon.paths.home, 'tasks', task.handle, 'tmp');
+		// Synchronous from the query on, so no task is reopened in between;
+		// a reopened task's commands re-create the folder anyway.
+		if (!daemon.workers.has(task.id) && existsSync(tmp)) {
+			rmSync(tmp, { recursive: true, force: true });
+			removedTmp += 1;
+		}
+	}
+	if (removedTmp > 0) {
+		daemon.log('info', 'old task temp folders removed', { count: removedTmp });
 	}
 
 	const tasksDir = join(daemon.paths.home, 'tasks');
