@@ -1,4 +1,9 @@
-import type { Message, Problem, TaskSummary } from '../../protocol.ts';
+import type {
+	Message,
+	Problem,
+	RouterState,
+	TaskSummary,
+} from '../../protocol.ts';
 import {
 	type Line,
 	type Seg,
@@ -8,7 +13,7 @@ import {
 	truncate,
 	width,
 } from '../cells.ts';
-import { age, ago } from '../format.ts';
+import { age, ago, duration } from '../format.ts';
 import { type Live, type Section, sections } from '../model.ts';
 import {
 	BARS,
@@ -138,6 +143,11 @@ export function homeBody(
 		let used = 0;
 		for (const message of live.console.slice(-CONSOLE_SHOWN).toReversed()) {
 			const rows = consoleRows(message, ctx);
+			// An agent from before `held` sends neither field.
+			const { held, pending } = live.router;
+			if (held && pending?.includes(message.id)) {
+				rows.push(...heldRows(held, ctx));
+			}
 			if (shown.length > 0 && used + rows.length > room) break;
 			shown.unshift(rows);
 			used += rows.length;
@@ -404,6 +414,28 @@ function doneRow(
 		task.result ? [{ t: oneLine(task.result), fg: 'faint' }] : undefined,
 		fade,
 		ghost,
+	);
+}
+
+/** Why a console message is still waiting for the Router, under it. */
+function heldRows(
+	held: NonNullable<RouterState['held']>,
+	ctx: Context,
+): Line[] {
+	const segs: Seg[] = [
+		{ t: 'waiting · ', fg: 'faint' },
+		{ t: paragraphs(held.reason), fg: 'warn' },
+	];
+	if (held.until !== null) {
+		segs.push({
+			t: ` · tries again in ${duration(Math.max(0, held.until - ctx.now))}`,
+			fg: 'faint',
+		});
+	}
+	return hang(
+		[{ t: ' '.repeat(7) }, { t: '└ ', fg: 'ghost' }],
+		segs,
+		Math.min(MEASURE, ctx.content),
 	);
 }
 
