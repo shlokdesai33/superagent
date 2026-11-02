@@ -1,14 +1,14 @@
 // End to end: on a terminal without 24-bit colour (Terminal.app before
 // macOS 26), the UI draws with the xterm 256 palette only. The selected NEEDS
-// YOU row and the input band while typing use the theme's 256-colour roles,
+// YOU row and the input box while typing use the theme's 256-colour roles,
 // and every word on screen reads at 4.5:1 or better, in both themes. Console
 // messages are one colour on every line, wrapped ones too, at both depths;
 // truecolor sent to that Terminal.app turned first lines faint. Run with
 // `bun run e2e`; it exits non-zero if a check fails.
 //
-// The screen keeps the terminal's own background: only the selected item and
-// the input band paint one, a subtle step from the background the terminal
-// reports, and every word reads at 4.5:1 on whichever it sits on.
+// The screen keeps the terminal's own background: only the selected item
+// paints one, a subtle step from the background the terminal reports, and
+// every word reads at 4.5:1 on whichever it sits on.
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -184,9 +184,9 @@ async function backgroundChecks(hex: string, version: string): Promise<void> {
 		);
 		const step = contrast(theme.surface, background);
 		check(
-			`${label}: ordinary cells keep the terminal's background; the selected row and band are a subtle surface (${step.toFixed(2)}:1)`,
+			`${label}: ordinary cells keep the terminal's background, the input box too; the selected row is a subtle surface (${step.toFixed(2)}:1)`,
 			paintedRows(home).length === 2 &&
-				paintedRows(typing).length === 3 &&
+				paintedRows(typing).length === 2 &&
 				surfaces.every((cell) => same(cell.bgRgb, theme.surface)) &&
 				step >= 1.05 &&
 				step <= 1.35,
@@ -343,27 +343,35 @@ async function themeChecks(name: ThemeName, handle: string): Promise<void> {
 		await tui.type('\x1b');
 		const typed = find(typing, TYPED);
 		const band = typed?.row ?? [];
-		const prompt = band[0];
+		const y = typing.cells.indexOf(band);
+		const above = typing.cells[y - 1] ?? [];
+		const below = typing.cells[y + 1] ?? [];
+		const prompt = band[2];
 		const arrow = band.find((cell) => cell.ch === '→');
 		const preview = find(typing, 'the Router');
+		const edges = [above[0], above[COLUMNS - 2], band[0], band[COLUMNS - 2]];
 		check(
-			`${name}: while typing, the input row is a surface band with fg text, accent › and →, faint preview`,
-			band.length === COLUMNS &&
-				band.every((cell) => cell.bg === index('surface')) &&
+			`${name}: while typing, the input is a rounded accent box (${index('accent')}) with fg text, accent › and →, faint preview, and no background`,
+			text(above).startsWith('╭─') &&
+				text(above).trimEnd().endsWith('─╮') &&
+				text(below).startsWith('╰─') &&
+				text(band).trimEnd().endsWith('│') &&
+				edges.every((cell) => cell?.fg === index('accent')) &&
+				band.every((cell) => cell.bg === null) &&
 				(typed?.cells ?? []).every((cell) => cell.fg === index('fg')) &&
 				prompt?.ch === '›' &&
 				prompt.fg === index('accent') &&
 				arrow?.fg === index('accent') &&
 				(preview?.cells ?? []).every((cell) => cell.fg === index('faint')),
-			text(band).trimEnd(),
+			[above, band, below].map((line) => text(line).trimEnd()).join(' / '),
 		);
 
 		check(
-			`${name}: only the selected item and the input band paint a background; the rest is the terminal's`,
+			`${name}: only the selected item paints a background; the rest, the input box too, is the terminal's`,
 			paintedRows(home).join('|') ===
 				[text(row), text(question?.row ?? [])].join('|') &&
 				paintedRows(typing).join('|') ===
-					[text(row), text(question?.row ?? []), text(band)].join('|'),
+					[text(row), text(question?.row ?? [])].join('|'),
 			paintedRows(typing)
 				.map((line) => line.trimEnd())
 				.join(' / '),

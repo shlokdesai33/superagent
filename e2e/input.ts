@@ -10,7 +10,7 @@ import type { FeedLine, TaskSummary } from '../src/protocol.ts';
 import { THEMES } from '../src/tui/theme.ts';
 import { startFakeParticle } from './fake-particle.ts';
 import { startAgent } from './harness.ts';
-import { type Screen, replay, text } from './screen.ts';
+import { type Screen, type ScreenCell, replay, text } from './screen.ts';
 import { type Tui, openTui } from './tui.ts';
 
 type TaskLine = Extract<FeedLine, { type: 'task' }>;
@@ -77,6 +77,8 @@ const outside = mkdtempSync(join(tmpdir(), 'sa-input-'));
 // Truecolor dark, so the selection's band is the exact dark `surface`.
 const env = { COLORTERM: 'truecolor', COLORFGBG: '15;0' };
 const surface = THEMES.truecolor.dark.surface.join(',');
+const accent = THEMES.truecolor.dark.accent.join(',');
+const ghost = THEMES.truecolor.dark.ghost.join(',');
 
 function rows(tui: Tui): string[] {
 	return replay(tui.raw()).cells.map(text);
@@ -91,19 +93,43 @@ function selected(screen: Screen): string | null {
 	return row ? text(row).trimEnd() : null;
 }
 
-/** The input band's rows, above the hint line, without the cursor. */
+/** The input box's rows, top border first, above the hint line. */
+function box(screen: Screen): ScreenCell[][] {
+	const bottom = screen.cells.length - 2;
+	let top = bottom;
+	while (top > 0 && !text(screen.cells[top] ?? []).startsWith('╭')) top -= 1;
+	return screen.cells.slice(top, bottom + 1);
+}
+
+/** The draft's rows inside the box, without the border or the cursor. */
 function draftBand(screen: Screen): string[] {
-	const band: string[] = [];
-	for (let y = screen.cells.length - 2; y >= 0; y -= 1) {
-		const line = screen.cells[y] ?? [];
-		if (line.at(-1)?.bgRgb?.join(',') !== surface) break;
-		band.unshift(
+	return box(screen)
+		.slice(1, -1)
+		.map((line) =>
 			text(line)
 				.replaceAll(/[▏\u00a0]/g, '')
-				.trimEnd(),
+				.replace(/^│ /, '')
+				.replace(/\s*│\s*$/, ''),
 		);
-	}
-	return band;
+}
+
+/** The box in `screen()`'s rows, which are sized to the terminal. */
+function boxOf(lines: string[]): string[] {
+	const top = lines.findLastIndex((line) => line.startsWith('╭'));
+	const bottom = lines.findLastIndex((line) => line.startsWith('╰'));
+	return top === -1 ? [] : lines.slice(top, bottom + 1);
+}
+
+/** The cursor, or its blink, is inside the box. */
+function cursorShown(screen: Screen): boolean {
+	return box(screen)
+		.slice(1, -1)
+		.some((line) => /[▏\u00a0]/.test(text(line)));
+}
+
+/** The box's corner colour, as `r,g,b`. */
+function border(screen: Screen): string | undefined {
+	return box(screen)[0]?.[0]?.fgRgb?.join(',');
 }
 
 /** Polls the replayed screen until `done` holds. */
@@ -199,10 +225,11 @@ try {
 		(now) => selected(now)?.includes(BETA) === true,
 	);
 	check(
-		'↑ selects the question at the top, and the hint offers ↑↓, answer and open',
+		'↑ selects the question at the top, the box turns accent, and the hint offers ↑↓, answer and open',
 		showing(screen, '↑↓ move') &&
 			showing(screen, 'enter answer') &&
-			showing(screen, 'ctrl-o open'),
+			showing(screen, 'ctrl-o open') &&
+			border(screen) === accent,
 		selected(screen) ?? 'nothing selected',
 	);
 	await tui.type(DOWN);
@@ -230,9 +257,17 @@ try {
 	await tui.type(UP);
 	await tui.type('X');
 	screen = await until(tui, 'the edited draft', (now) =>
-		showing(now, '› X▏abc'),
+		showing(now, '│ › X▏abc'),
 	);
-	check('with a draft, ↑ moves its cursor to the start', true);
+	check(
+		'with a draft, ↑ moves its cursor to the start, drawn inside the box',
+		true,
+	);
+	check(
+		'a draft turns the box accent',
+		border(screen) === accent,
+		border(screen),
+	);
 	await tui.type(DOWN);
 	await tui.type('Y');
 	await until(tui, 'the draft ended', (now) => showing(now, '› XabcY'));
@@ -244,6 +279,17 @@ try {
 		'and the selection stayed put while typing; esc clears the draft',
 		selected(screen)?.includes(ALPHA) === true,
 		selected(screen) ?? 'nothing selected',
+	);
+	const idleBox = box(screen).map((line) => text(line).trimEnd());
+	check(
+		'with nothing typed and no question selected, the box is a subtle rounded border',
+		border(screen) === ghost &&
+			idleBox.length === 3 &&
+			/^╭─+╮$/.test(idleBox[0] ?? '') &&
+			/^│ › ▏ask, or @handle to message a task +│$/.test(idleBox[1] ?? '') &&
+			/^╰─+╯$/.test(idleBox[2] ?? '') &&
+			(idleBox[0]?.length ?? 0) === 99,
+		idleBox.join(' / '),
 	);
 
 	// In a draft that wraps, ↑ goes to the row above, ↓ past the last row to its end.
@@ -270,6 +316,60 @@ try {
 	);
 	check('and ↓ on the last row goes to the end', true);
 	await tui.type(ESC);
+
+	// Taller than the box allows, with the cursor in the middle: notices for
+	// the rows above and below, the cursor's row always shown, never more
+	// rows than the box has (half the 30 rows, borders included).
+	const many = Array.from({ length: 400 }, (_, index) => `x${index + 100}`);
+	await tui.type(many.join(' '));
+	await tui.type(UP.repeat(16));
+	screen = await until(
+		tui,
+		'both notices',
+		(now) =>
+			showing(now, 'earlier lines') &&
+			showing(now, 'more lines') &&
+			cursorShown(now),
+	);
+	check(
+		'a tall draft keeps the cursor row between "earlier" and "more" notices, within the box',
+		box(screen).length <= 15,
+		`${box(screen).length} rows`,
+	);
+	await tui.type(ESC);
+
+	// 12 rows and an answer at 40 columns: one row for the draft, so the
+	// notices give way and the cursor row stays.
+	const small = await openTui(agent.home, outside, env, {
+		columns: 40,
+		rows: 12,
+		until: 'ask',
+	});
+	await small.type(UP + UP + '\r');
+	await until(small, 'the answer box', (now) => showing(now, 'answers'));
+	await small.type(many.slice(0, 40).join(' '));
+	await small.type(UP);
+	const deadline = Date.now() + WAIT_MS;
+	let squeezed: string[] = [];
+	let rows12: string[] = [];
+	do {
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		await Bun.sleep(100);
+		rows12 = small.screen();
+		squeezed = boxOf(rows12).map((row) => row.trimEnd());
+	} while (
+		!squeezed.some((row) => /[▏\u00a0]/.test(row)) &&
+		Date.now() < deadline
+	);
+	check(
+		'squeezed to one row (the router line wraps), the box still shows the cursor in at most 3 rows',
+		squeezed.length === 3 &&
+			squeezed.some((row) => /[▏\u00a0]/.test(row)) &&
+			rows12.length === 12 &&
+			(rows12[0] ?? '').startsWith('superagent'),
+		squeezed.join(' / '),
+	);
+	await small.quit();
 
 	// 4. Enter on the question answers it; the answer goes to its task.
 	await tui.type(UP);

@@ -52,6 +52,8 @@ const MIN_COLUMNS = 40;
 const MIN_TYPING = 40;
 /** Columns a draft needs beside the preview to start on its row. */
 const MIN_BESIDE_PREVIEW = 12;
+/** Columns the input needs for its border; narrower, it's a plain band. */
+const MIN_BOX_COLUMNS = 30;
 const MIN_ROWS = 12;
 /** Body rows kept when the composer and a toast grow. */
 const MIN_BODY = 3;
@@ -559,9 +561,14 @@ function newTasksIn(model: Model, ui: Ui): string | null {
 	return `new tasks in ${repoName(path, model.live.health.repos ?? [])}`;
 }
 
+/** A row inside the input: its text, and what's right-aligned beside it. */
+type InputRow = { segs: Seg[]; right?: Seg[] };
+
 /**
- * The input line; while typing, the draft wraps over up to `maxLines` rows.
- * `draftRows`: where each of its rows starts in the draft, for ↑ and ↓.
+ * The input, boxed like Claude Code's prompt: a rounded border, subtle until
+ * there's a draft or a question to answer, then in `accent`. Too narrow or too
+ * short for the border, it's the band under the footer's rule instead.
+ * `draftRows`: where each row of the draft starts in it, for ↑ and ↓.
  */
 function inputLines(
 	model: Model,
@@ -570,6 +577,79 @@ function inputLines(
 	maxLines: number,
 	now: number,
 ): { lines: Line[]; draftRows: number[] } {
+	const boxed = content >= MIN_BOX_COLUMNS && maxLines >= 3;
+	const inner = boxed ? content - 4 : content;
+	const { rows, draftRows } = inputRows(
+		model,
+		ui,
+		inner,
+		boxed ? maxLines - 2 : maxLines,
+		now,
+	);
+	if (!boxed) {
+		const band = drafting(ui);
+		return {
+			lines: rows.map((row) => ({
+				segs: row.segs,
+				...(row.right ? { right: row.right } : {}),
+				...(band ? { bg: 'surface' } : {}),
+			})),
+			draftRows,
+		};
+	}
+	const border: Seg['fg'] =
+		model.connection.state === 'live' && (drafting(ui) || asking(model, ui))
+			? 'accent'
+			: 'ghost';
+	const edge = (left: string, right: string): Line => ({
+		segs: [{ t: `${left}${'─'.repeat(content - 2)}${right}`, fg: border }],
+	});
+	const side = (t: string): Seg => ({ t, fg: border });
+	return {
+		lines: [
+			edge('╭', '╮'),
+			...rows.map((row): Line => {
+				const right = row.right ?? [];
+				const room = inner - (right.length > 0 ? width(right) + 2 : 0);
+				const left = truncate(row.segs, Math.max(0, room));
+				const gap = Math.max(0, inner - width(left) - width(right));
+				return {
+					segs: [
+						side('│ '),
+						...left,
+						{ t: ' '.repeat(gap) },
+						...right,
+						side(' │'),
+					],
+				};
+			}),
+			edge('╰', '╯'),
+		],
+		draftRows,
+	};
+}
+
+/** A question is selected on home, or open in the task view. */
+function asking(model: Model, ui: Ui): boolean {
+	const { screen } = ui;
+	const handle =
+		screen.name === 'task'
+			? screen.handle
+			: screen.name === 'home' && ui.selected?.startsWith('task:')
+				? ui.selected.slice('task:'.length)
+				: null;
+	if (handle === null) return false;
+	return model.live?.tasks.get(handle)?.status === 'needs_you';
+}
+
+/** The input's rows in `columns`; the draft wraps over up to `maxLines`. */
+function inputRows(
+	model: Model,
+	ui: Ui,
+	columns: number,
+	maxLines: number,
+	now: number,
+): { rows: InputRow[]; draftRows: number[] } {
 	let draftRows = [0];
 	const offline = model.connection.state !== 'live';
 	const repo = offline ? null : newTasksIn(model, ui);
@@ -577,7 +657,7 @@ function inputLines(
 	if (repo !== null && toRouter(ui)) {
 		const full = `the Router · ${repo}`;
 		// Narrow terminals keep room to type.
-		to = content - width(full) >= MIN_TYPING ? full : repo;
+		to = columns - width(full) >= MIN_TYPING ? full : repo;
 	}
 	const preview: Seg[] = [
 		{ t: '→ ', fg: 'accent' },
@@ -597,7 +677,7 @@ function inputLines(
 			cursor,
 			{ t: text.slice(typing.cursor), fg: 'fg' },
 		];
-		const rest = content - 2;
+		const rest = columns - 2;
 		const first = rest - width(preview) - 2;
 		// Too narrow beside the preview: the draft starts on the next row.
 		const beside = first >= MIN_BESIDE_PREVIEW;
@@ -608,16 +688,14 @@ function inputLines(
 		const lines = beside ? wrapped : [[], ...wrapped];
 		const top = beside ? 0 : 1;
 		const at = lines.findIndex((segs) => segs.some(isCursor));
-		const band: Line[] = window(lines, top, at, maxLines).map((segs) => ({
-			segs: [{ t: '  ' }, ...segs],
-			bg: 'surface',
+		const shown = window(lines, top, at, maxLines);
+		// Squeezed out of its own row, the preview gives way to the draft.
+		const withPreview = beside || shown.head > 0;
+		const rows: InputRow[] = shown.rows.map((segs, index) => ({
+			segs: [index === 0 ? { t: '› ', fg: 'accent' } : { t: '  ' }, ...segs],
+			...(index === 0 && withPreview ? { right: preview } : {}),
 		}));
-		const [head] = band;
-		if (head) {
-			head.segs[0] = { t: '› ', fg: 'accent' };
-			head.right = preview;
-		}
-		return { lines: band, draftRows };
+		return { rows, draftRows };
 	}
 	const placeholder = offline
 		? ''
@@ -633,18 +711,18 @@ function inputLines(
 		{ t: placeholder, fg: 'faint', i: true },
 	];
 	if (typing.mode === 'answer') {
-		return { lines: [{ segs, right: preview, bg: 'surface' }], draftRows };
+		return { rows: [{ segs, right: preview }], draftRows };
 	}
 	if (ui.screen.name === 'task') {
 		return {
-			lines: [{ segs, ...(offline ? {} : { right: preview }) }],
+			rows: [{ segs, ...(offline ? {} : { right: preview }) }],
 			draftRows,
 		};
 	}
 	// Shown only when the placeholder still fits beside it.
 	return {
-		lines: [
-			repo !== null && width(segs) + 2 + width(repo) <= content
+		rows: [
+			repo !== null && width(segs) + 2 + width(repo) <= columns
 				? { segs, right: [{ t: repo, fg: 'faint' }] }
 				: { segs },
 		],
@@ -678,31 +756,49 @@ function notice(count: number, which: string): Seg[] {
 }
 
 /**
- * At most `maxLines` of the draft's rows, keeping the `top` rows and the one
- * with the cursor: rows cut above and below become `… N earlier lines` and
- * `… N more lines`.
+ * At most `maxLines` of the draft's rows, always with the cursor's: rows cut
+ * above and below become `… N earlier lines` and `… N more lines`, which give
+ * way to the draft when there's no room for both. `top` rows (an empty one
+ * beside the preview) come first while they leave a row for the draft;
+ * `head` is how many were kept.
  */
 function window(
 	lines: Seg[][],
 	top: number,
 	cursor: number,
 	maxLines: number,
-): Seg[][] {
-	if (lines.length <= maxLines) return lines;
-	const keep = Math.max(1, maxLines - top);
-	// By default the end, where you're typing, under one notice.
-	let from = Math.max(top, lines.length - (keep - 1));
-	if (cursor !== -1 && cursor < from) from = Math.max(top, cursor);
-	const above = from - top;
-	let room = keep - (above > 0 ? 1 : 0);
-	if (from + room < lines.length && room > 1) room -= 1;
-	const to = Math.min(lines.length, from + room);
-	return [
-		...lines.slice(0, top),
-		...(above > 0 ? [notice(above, 'earlier')] : []),
-		...lines.slice(from, to),
-		...(to < lines.length ? [notice(lines.length - to, 'more')] : []),
-	];
+): { rows: Seg[][]; head: number } {
+	if (lines.length <= maxLines) return { rows: lines, head: top };
+	const head = Math.min(top, Math.max(0, maxLines - 1));
+	const slots = Math.max(1, maxLines - head);
+	const at = cursor >= top ? cursor : lines.length - 1;
+	// By default the end, where you're typing; always the cursor's row.
+	const place = (count: number): [number, number] => {
+		let from = Math.max(top, lines.length - count);
+		if (at < from) from = at;
+		return [from, Math.min(lines.length, from + count)];
+	};
+	let count = slots;
+	let [from, to] = place(count);
+	while (count > 1) {
+		const notices = (from > top ? 1 : 0) + (to < lines.length ? 1 : 0);
+		if (count + notices <= slots) break;
+		count -= 1;
+		[from, to] = place(count);
+	}
+	let earlier = from > top;
+	let more = to < lines.length;
+	if (count + (earlier ? 1 : 0) + (more ? 1 : 0) > slots) more = false;
+	if (count + (earlier ? 1 : 0) > slots) earlier = false;
+	return {
+		rows: [
+			...lines.slice(0, head),
+			...(earlier ? [notice(from - top, 'earlier')] : []),
+			...lines.slice(from, to),
+			...(more ? [notice(lines.length - to, 'more')] : []),
+		],
+		head,
+	};
 }
 
 function hintLine(model: Model, ui: Ui, content: number): Seg[] {

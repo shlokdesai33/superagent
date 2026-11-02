@@ -221,7 +221,11 @@ try {
 		await tui.waitFor('omega.');
 		await settle();
 		const typing = tui.screen();
-		const band = block(typing, (row) => row.startsWith('› '), 2);
+		// Inside the input box's border.
+		const unboxed = typing.map((row) =>
+			row.startsWith('│ ') ? row.slice(2).replace(/\s*│\s*$/, '') : row,
+		);
+		const band = block(unboxed, (row) => row.startsWith('› '), 2);
 		const draft = band
 			? {
 					rows: band.rows,
