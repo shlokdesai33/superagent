@@ -10,6 +10,7 @@ export type KeyName =
 	| 'enter'
 	| 'escape'
 	| 'backspace'
+	| 'delete'
 	| 'tab';
 
 export type InputEvent =
@@ -37,6 +38,7 @@ const CSI_KEYS: Record<string, KeyName> = {
 	'5~': 'pageup',
 	'6~': 'pagedown',
 	'1~': 'home',
+	'3~': 'delete',
 	'7~': 'home',
 	'4~': 'end',
 	'8~': 'end',

@@ -38,7 +38,13 @@ import { keyLines } from './screens/key.ts';
 import { keysBody } from './screens/keys.ts';
 import { taskBody } from './screens/task.ts';
 import { repoChoices, repoName } from './repo.ts';
-import { FADE_MS, type Overflow, type Ui, toRouter } from './state.ts';
+import {
+	FADE_MS,
+	type Overflow,
+	type Ui,
+	drafting,
+	toRouter,
+} from './state.ts';
 import { type Rgb, type Theme, blend } from './theme.ts';
 
 const MIN_COLUMNS = 40;
@@ -59,8 +65,10 @@ export type Frame = {
 	animating: boolean;
 	/** The scroll offset used, to keep for the next frame. */
 	scroll: number;
-	/** Home rows hidden around the selection, for the next j/k. */
+	/** Home rows hidden around the selection, for the next ↑ / ↓. */
 	overflow: Overflow;
+	/** Where each row of the draft on screen starts, for ↑ / ↓ in it. */
+	draftRows: number[];
 };
 
 /** The whole screen, as rows of exactly `columns` cells. */
@@ -88,6 +96,7 @@ export function view(
 			animating: false,
 			scroll: 0,
 			overflow: { above: false, below: false },
+			draftRows: [0],
 		};
 	}
 
@@ -99,6 +108,7 @@ export function view(
 			animating: screen.animating,
 			scroll: 0,
 			overflow: { above: false, below: false },
+			draftRows: ui.draftRows,
 		};
 	}
 	const { connection } = model;
@@ -134,13 +144,13 @@ export function view(
 		ui,
 		now,
 		content,
-		Math.max(1, Math.min(Math.floor(rows / 3), spare - input.length)),
+		Math.max(1, Math.min(Math.floor(rows / 3), spare - input.lines.length)),
 	);
 	if (toast) {
 		footer.push(...toast.lines);
 		if (toast.fading) animating = true;
 	}
-	footer.push(...input, { segs: hintLine(model, ui, content) });
+	footer.push(...input.lines, { segs: hintLine(model, ui, content) });
 
 	const bodyHeight = Math.max(0, rows - 2 - footer.length);
 	const titleCut =
@@ -192,7 +202,13 @@ export function view(
 			? cells.map((cell) => mute(cell, ui))
 			: cells;
 	});
-	return { rows: painted, animating, scroll, overflow };
+	return {
+		rows: painted,
+		animating,
+		scroll,
+		overflow,
+		draftRows: input.draftRows,
+	};
 }
 
 /** Stale data: every word in `faint`, the lines left as they are. */
@@ -379,7 +395,7 @@ function bodyLines(
 
 /**
  * Home keeps the selection in view, its top first when it's taller than the
- * screen, until j/k scroll on through rows it hides (`ui.scroll.free`).
+ * screen, until ↑ / ↓ scroll on through rows it hides (`ui.scroll.free`).
  */
 function scrollFor(
 	lines: Line[],
@@ -526,9 +542,9 @@ function toastLines(
 /** Where typed words go, shown before sending. */
 export function destination(ui: Ui): string {
 	const { typing, screen } = ui;
-	if (typing?.mode === 'answer')
+	if (typing.mode === 'answer')
 		return `answers ${typing.handle ?? 'the'}'s question`;
-	const mention = typing?.text.match(/^@(\S*)/);
+	const mention = typing.text.match(/^@(\S*)/);
 	if (mention)
 		return mention[1] ? `straight to ${mention[1]}` : 'straight to a task';
 	if (screen.name === 'task') return `straight to ${screen.handle}`;
@@ -543,14 +559,18 @@ function newTasksIn(model: Model, ui: Ui): string | null {
 	return `new tasks in ${repoName(path, model.live.health.repos ?? [])}`;
 }
 
-/** The input line; while typing, the draft wraps over up to `maxLines` rows. */
+/**
+ * The input line; while typing, the draft wraps over up to `maxLines` rows.
+ * `draftRows`: where each of its rows starts in the draft, for ↑ and ↓.
+ */
 function inputLines(
 	model: Model,
 	ui: Ui,
 	content: number,
 	maxLines: number,
 	now: number,
-): Line[] {
+): { lines: Line[]; draftRows: number[] } {
+	let draftRows = [0];
 	const offline = model.connection.state !== 'live';
 	const repo = offline ? null : newTasksIn(model, ui);
 	let to = destination(ui);
@@ -563,71 +583,158 @@ function inputLines(
 		{ t: '→ ', fg: 'accent' },
 		{ t: to, fg: 'faint' },
 	];
-	if (ui.typing) {
-		const text = ui.typing.text.replaceAll(/\s/g, ' ');
-		const draft: Seg[] = [{ t: text, fg: 'fg' }];
+	const { typing } = ui;
+	if (typing.text !== '') {
+		const text = typing.text.replaceAll(/\s/g, ' ');
+		// The cursor is wrapped with the text, so it lands where it's drawn; it
+		// blinks to a no-break space, which wraps the same.
+		const cursor: Seg = {
+			t: Math.floor(now / 500) % 2 === 0 ? '▏' : '\u00a0',
+			fg: 'accent',
+		};
+		const draft: Seg[] = [
+			{ t: text.slice(0, typing.cursor), fg: 'fg' },
+			cursor,
+			{ t: text.slice(typing.cursor), fg: 'fg' },
+		];
 		const rest = content - 2;
 		const first = rest - width(preview) - 2;
 		// Too narrow beside the preview: the draft starts on the next row.
 		const beside = first >= MIN_BESIDE_PREVIEW;
-		const lines = beside
+		const wrapped = beside
 			? wrap(draft, rest, Infinity, first)
-			: text === ''
-				? [[]]
-				: [[], ...wrap(draft, rest)];
-		const cursor: Seg = {
-			t: Math.floor(now / 500) % 2 === 0 ? '▏' : ' ',
-			fg: 'accent',
-		};
-		const end = lines.length - 1;
-		const endLine = lines[end] ?? [];
-		if (width(endLine) < (end === 0 ? first : rest)) endLine.push(cursor);
-		else lines.push([cursor]);
-		// Past `maxLines`, the end of the draft, where you're typing, stays.
-		let shown = lines;
-		if (lines.length > maxLines) {
-			// Without room beside the preview, its row stays empty above the notice.
-			const top = beside ? 0 : 1;
-			const hidden = lines.length - maxLines + 1;
-			shown = [
-				...lines.slice(0, top),
-				[{ t: `… ${hidden} earlier ${plural(hidden, 'line')}`, fg: 'faint' }],
-				...lines.slice(top + hidden),
-			];
-		}
-		const band: Line[] = shown.map((segs) => ({
+			: wrap(draft, rest);
+		draftRows = rowStarts(text, wrapped);
+		const lines = beside ? wrapped : [[], ...wrapped];
+		const top = beside ? 0 : 1;
+		const at = lines.findIndex((segs) => segs.some(isCursor));
+		const band: Line[] = window(lines, top, at, maxLines).map((segs) => ({
 			segs: [{ t: '  ' }, ...segs],
 			bg: 'surface',
 		}));
-		const [top] = band;
-		if (top) {
-			top.segs[0] = { t: '› ', fg: 'accent' };
-			top.right = preview;
+		const [head] = band;
+		if (head) {
+			head.segs[0] = { t: '› ', fg: 'accent' };
+			head.right = preview;
 		}
-		return band;
+		return { lines: band, draftRows };
 	}
 	const placeholder = offline
 		? ''
-		: ui.screen.name === 'task'
-			? 'press / to write to this task'
-			: 'press / to ask, or @handle to message a task';
+		: typing.mode === 'answer'
+			? 'type your answer'
+			: ui.screen.name === 'task'
+				? 'write to this task'
+				: 'ask, or @handle to message a task';
+	// The box is always focused: a steady cursor until something is typed.
 	const segs: Seg[] = [
 		{ t: '› ', fg: offline ? 'faint' : 'accent' },
+		{ t: '▏', fg: offline ? 'faint' : 'accent' },
 		{ t: placeholder, fg: 'faint', i: true },
 	];
+	if (typing.mode === 'answer') {
+		return { lines: [{ segs, right: preview, bg: 'surface' }], draftRows };
+	}
 	if (ui.screen.name === 'task') {
-		return [{ segs, ...(offline ? {} : { right: preview }) }];
+		return {
+			lines: [{ segs, ...(offline ? {} : { right: preview }) }],
+			draftRows,
+		};
 	}
 	// Shown only when the placeholder still fits beside it.
+	return {
+		lines: [
+			repo !== null && width(segs) + 2 + width(repo) <= content
+				? { segs, right: [{ t: repo, fg: 'faint' }] }
+				: { segs },
+		],
+		draftRows,
+	};
+}
+
+function isCursor(seg: Seg): boolean {
+	return seg.fg === 'accent';
+}
+
+/** Where each wrapped row of the draft starts in `text`; wrapping drops the spaces it breaks at. */
+function rowStarts(text: string, rows: Seg[][]): number[] {
+	const starts: number[] = [];
+	let at = 0;
+	rows.forEach((segs, index) => {
+		const shown = segs
+			.filter((seg) => !isCursor(seg))
+			.map((seg) => seg.t)
+			.join('');
+		if (index > 0)
+			while (text[at] === ' ' && !text.startsWith(shown, at)) at += 1;
+		starts.push(at);
+		at += shown.length;
+	});
+	return starts;
+}
+
+function notice(count: number, which: string): Seg[] {
+	return [{ t: `… ${count} ${which} ${plural(count, 'line')}`, fg: 'faint' }];
+}
+
+/**
+ * At most `maxLines` of the draft's rows, keeping the `top` rows and the one
+ * with the cursor: rows cut above and below become `… N earlier lines` and
+ * `… N more lines`.
+ */
+function window(
+	lines: Seg[][],
+	top: number,
+	cursor: number,
+	maxLines: number,
+): Seg[][] {
+	if (lines.length <= maxLines) return lines;
+	const keep = Math.max(1, maxLines - top);
+	// By default the end, where you're typing, under one notice.
+	let from = Math.max(top, lines.length - (keep - 1));
+	if (cursor !== -1 && cursor < from) from = Math.max(top, cursor);
+	const above = from - top;
+	let room = keep - (above > 0 ? 1 : 0);
+	if (from + room < lines.length && room > 1) room -= 1;
+	const to = Math.min(lines.length, from + room);
 	return [
-		repo !== null && width(segs) + 2 + width(repo) <= content
-			? { segs, right: [{ t: repo, fg: 'faint' }] }
-			: { segs },
+		...lines.slice(0, top),
+		...(above > 0 ? [notice(above, 'earlier')] : []),
+		...lines.slice(from, to),
+		...(to < lines.length ? [notice(lines.length - to, 'more')] : []),
 	];
 }
 
 function hintLine(model: Model, ui: Ui, content: number): Seg[] {
-	if (ui.typing) {
+	if (ui.confirmQuit) {
+		return truncate(
+			[
+				{ t: 'press ', fg: 'faint' },
+				{ t: 'ctrl-c', fg: 'dim', b: true },
+				{ t: ' again to quit and drop the draft', fg: 'faint' },
+				sep,
+				{ t: 'any other key cancels', fg: 'faint' },
+			],
+			content,
+		);
+	}
+	if (ui.confirmStop) {
+		const task = model.live?.tasks.get(ui.confirmStop);
+		return truncate(
+			[
+				{ t: 'press ', fg: 'faint' },
+				{ t: 'ctrl-x', fg: 'dim', b: true },
+				{
+					t: ` again to ${task?.status === 'failed' ? 'dismiss' : 'stop'} ${ui.confirmStop}`,
+					fg: 'faint',
+				},
+				sep,
+				{ t: 'any other key cancels', fg: 'faint' },
+			],
+			content,
+		);
+	}
+	if (drafting(ui)) {
 		const pairs: Array<[string, string]> = [['enter', 'send']];
 		if (
 			toRouter(ui) &&
@@ -635,40 +742,27 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 		) {
 			pairs.push(['tab', 'change repo']);
 		}
-		pairs.push(['esc', 'cancel']);
+		pairs.push(['esc', ui.typing.text === '' ? 'cancel' : 'clear']);
 		return fitHint(pairs, content, ['tab']);
-	}
-	if (ui.confirmStop) {
-		const task = model.live?.tasks.get(ui.confirmStop);
-		return [
-			{ t: 'press ', fg: 'faint' },
-			{ t: 's', fg: 'dim', b: true },
-			{
-				t: ` again to ${task?.status === 'failed' ? 'dismiss' : 'stop'} ${ui.confirmStop}`,
-				fg: 'faint',
-			},
-			sep,
-			{ t: 'any other key cancels', fg: 'faint' },
-		];
 	}
 	const live = model.live;
 	if (live === null || model.connection.state === 'rejected') {
 		return hint([
 			['?', 'keys'],
-			['q', 'quit'],
+			['ctrl-c', 'quit'],
 		]);
 	}
 	const { screen } = ui;
 	if (screen.name === 'task') {
 		const task = live.tasks.get(screen.handle);
-		const pairs: Array<[string, string]> = [['/', 'write']];
+		const pairs: Array<[string, string]> = [];
 		if (task?.status === 'needs_you') pairs.push(['enter', 'answer']);
 		const link = task ? linkOf(task) : null;
-		if (link) pairs.push(['o', `open ${link.title}`]);
+		if (link) pairs.push(['ctrl-o', `open ${link.title}`]);
 		if (task && stoppable(task))
-			pairs.push(['s s', task.status === 'failed' ? 'dismiss' : 'stop']);
+			pairs.push(['ctrl-x', task.status === 'failed' ? 'dismiss' : 'stop']);
 		pairs.push(['esc', 'back']);
-		return fitHint(pairs, content, ['s s']);
+		return fitHint(pairs, content, ['ctrl-x']);
 	}
 	if (screen.name === 'health') {
 		const failed = [...live.tasks.values()].some(
@@ -676,8 +770,13 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 		);
 		return fitHint(
 			[
-				...(failed ? [['r', 'resume failed'] satisfies [string, string]] : []),
-				['p', live.health.model.key === 'missing' ? 'add key' : 'replace key'],
+				...(failed
+					? [['ctrl-r', 'resume failed'] satisfies [string, string]]
+					: []),
+				[
+					'ctrl-k',
+					live.health.model.key === 'missing' ? 'add key' : 'replace key',
+				],
 				['esc', 'back'],
 				['?', 'keys'],
 			],
@@ -692,19 +791,26 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 		(item) => item.key === ui.selected,
 	);
 	const pairs: Array<[string, string]> = [];
-	if (items.length > 1) pairs.push(['j/k', 'move']);
+	if (items.length > 1) pairs.push(['↑↓', 'move']);
 	if (selected?.kind === 'problem') pairs.push(['enter', 'health']);
 	else if (selected?.kind === 'task') {
-		pairs.push([
-			'enter',
-			selected.task.status === 'needs_you' ? 'answer' : 'open',
-		]);
+		const asks = selected.task.status === 'needs_you';
+		pairs.push(['enter', asks ? 'answer' : 'open']);
+		if (asks) pairs.push(['ctrl-o', 'open']);
 	}
-	pairs.push(['/', 'write']);
 	if (selected?.kind === 'task' && stoppable(selected.task))
-		pairs.push(['s s', selected.task.status === 'failed' ? 'dismiss' : 'stop']);
-	pairs.push(['h', 'health'], ['?', 'keys'], ['q', 'quit']);
-	return fitHint(pairs, content, ['q', 's s', 'h', 'j/k']);
+		pairs.push([
+			'ctrl-x',
+			selected.task.status === 'failed' ? 'dismiss' : 'stop',
+		]);
+	pairs.push(['ctrl-t', 'health'], ['?', 'keys'], ['ctrl-c', 'quit']);
+	return fitHint(pairs, content, [
+		'ctrl-c',
+		'ctrl-o',
+		'ctrl-x',
+		'ctrl-t',
+		'↑↓',
+	]);
 }
 
 /** Drops the hints named in `drop`, in order, until the rest fit. */

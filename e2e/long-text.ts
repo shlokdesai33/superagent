@@ -3,7 +3,7 @@
 // wrapped rows, continuation rows lined up under the text, wide characters and
 // emoji included; so does the draft in the composer while you type it, and a
 // long question under NEEDS YOU and in the task view. Resizing re-wraps, and
-// j/k scroll through a reply taller than the screen. Run with `bun run e2e`;
+// ↑ ↓ scroll through a reply taller than the screen. Run with `bun run e2e`;
 // it exits non-zero if a check fails.
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -217,7 +217,7 @@ try {
 		rows: 30,
 	});
 	try {
-		await tui.type(`/${MESSAGE}`);
+		await tui.type(MESSAGE);
 		await tui.waitFor('omega.');
 		await settle();
 		const typing = tui.screen();
@@ -264,7 +264,7 @@ try {
 			consoleChecks(tui, mark, `resized to ${columns} columns`);
 		}
 
-		// Too short for the reply: j scrolls on through it, k back.
+		// Too short for the reply: ↓ scrolls on through it, ↑ back.
 		mark = tui.mark();
 		await tui.resize(80, 14);
 		await settle();
@@ -275,18 +275,18 @@ try {
 				!short.some((row) => row.includes('sigma.')),
 			short.join('\n'),
 		);
-		await tui.type('jjjjjj');
+		await tui.type('\x1b[B'.repeat(6));
 		await settle();
 		const scrolled = tui.screen(mark);
 		check(
-			'80×14: j scrolls the body until the end of the reply shows',
+			'80×14: ↓ scrolls the body until the end of the reply shows',
 			scrolled.some((row) => row.includes('sigma.')),
 			scrolled.join('\n'),
 		);
-		await tui.type('kkkkkkkk');
+		await tui.type('\x1b[A'.repeat(8));
 		await settle();
 		check(
-			'80×14: k scrolls back up to the CONSOLE label',
+			'80×14: ↑ scrolls back up to the CONSOLE label',
 			tui.screen(mark).some((row) => row.startsWith('CONSOLE')),
 		);
 	} finally {
@@ -325,7 +325,7 @@ try {
 		);
 
 		const mark = tui.mark();
-		await tui.type('o');
+		await tui.type('\x0f');
 		await tui.waitFor('QUESTION', mark);
 		await settle();
 		screen = tui.screen();

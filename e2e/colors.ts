@@ -174,7 +174,7 @@ async function backgroundChecks(hex: string, version: string): Promise<void> {
 		await settle();
 		const home = replay(tui.raw());
 		const mark = tui.mark();
-		await tui.type(`/${TYPED}`);
+		await tui.type(TYPED);
 		await tui.waitFor(TYPED, mark);
 		await settle();
 		const typing = replay(tui.raw());
@@ -336,7 +336,7 @@ async function themeChecks(name: ThemeName, handle: string): Promise<void> {
 		);
 
 		const mark = tui.mark();
-		await tui.type(`/${TYPED}`);
+		await tui.type(TYPED);
 		await tui.waitFor(TYPED, mark);
 		await settle();
 		const typing = replay(tui.raw());
@@ -480,7 +480,7 @@ try {
 		appleTerminal('dark', '470'),
 	);
 	try {
-		await modern.type('/x');
+		await modern.type('x');
 		await modern.waitFor('→ the Router');
 		const [r, g, b] = THEMES.truecolor.dark.surface;
 		check(
