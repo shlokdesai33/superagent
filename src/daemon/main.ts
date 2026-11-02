@@ -11,6 +11,7 @@ import { NO_API_KEY, createModelClient } from './model.ts';
 import { type RouterLoop, recoverRouter, startRouter } from './router.ts';
 import { recoverCommands, captureLoginPath } from './commands.ts';
 import { agentSecrets } from './secrets.ts';
+import { startSandbox, stopSandbox } from './sandbox.ts';
 import { listen } from './server.ts';
 import {
 	createDataFolder,
@@ -44,6 +45,7 @@ export async function runDaemon(options: {
 	let router: RouterLoop | null = null;
 	let stopActivity: (() => void) | null = null;
 	let stopCleanup: (() => Promise<void>) | null = null;
+	let sandboxStarted = false;
 	const teardown = async () => {
 		if (daemon) daemon.stopping = true;
 		await router?.stop();
@@ -58,12 +60,35 @@ export async function runDaemon(options: {
 			if (daemon.taskUpdates.timer) clearTimeout(daemon.taskUpdates.timer);
 		}
 		await server?.stop(true);
+		if (sandboxStarted) await stopSandbox();
 		db?.close();
 		rmSync(paths.socket, { force: true });
 		releaseLock(paths.pid);
 	};
 
+	// Starting the sandbox moves the process to a folder of its own.
+	const startedIn = process.cwd();
 	try {
+		const loginPath = captureLoginPath();
+		if (loginPath === null) {
+			log(
+				'warn',
+				"couldn't read your login shell's PATH; commands get the agent's own",
+			);
+		}
+		const commandPath = loginPath ?? Bun.env.PATH ?? '/usr/bin:/bin';
+		// Before the socket, so no request arrives while it starts.
+		sandboxStarted = true;
+		const sandbox = await startSandbox(paths, commandPath);
+		if (sandbox.state === 'on') {
+			log('info', 'sandbox on');
+		} else {
+			log('error', 'sandbox unavailable; Worker commands are refused', {
+				problem: sandbox.text,
+				fix: sandbox.fix,
+			});
+		}
+
 		// We hold the lock, so any socket left here is from a run that crashed.
 		rmSync(paths.socket, { force: true });
 		// Every step from here to `daemon = …` is synchronous, so no request is
@@ -77,7 +102,7 @@ export async function runDaemon(options: {
 		const secrets = agentSecrets(config);
 		// First run inside a repository: use it.
 		if (config.repos.length === 0) {
-			const top = repositoryRoot(process.cwd(), secrets);
+			const top = repositoryRoot(startedIn, secrets);
 			if (top !== null) {
 				config.repos = [{ name: repositoryName(top), path: top }];
 				saveRepos(paths.config, config.repos);
@@ -89,13 +114,6 @@ export async function runDaemon(options: {
 		}
 		const agentId = loadAgentId(db);
 		const machine = gatherMachineFacts();
-		const loginPath = captureLoginPath();
-		if (loginPath === null) {
-			log(
-				'warn',
-				"couldn't read your login shell's PATH; commands get the agent's own",
-			);
-		}
 
 		const channels = new Map<string, number | null>([['console', null]]);
 		if (options.scriptChannel) channels.set('script', null);
@@ -133,7 +151,8 @@ export async function runDaemon(options: {
 					: { state: 'ok', detail: null, since: null },
 			router: { batch: null, wake: () => {} },
 			paths,
-			loginPath: loginPath ?? Bun.env.PATH ?? '/usr/bin:/bin',
+			loginPath: commandPath,
+			sandbox,
 			workers: new Map(),
 			commands: new Map(),
 			runWorker: () => {},

@@ -162,7 +162,7 @@ export type Health = {
 	machine: MachineFacts;
 	/** Always `off` in this version. */
 	proactive: 'off' | 'observe' | 'act';
-	/** Always `off` in this version. */
+	/** `unavailable` comes with a `sandbox` problem, and commands are refused. Never `off`. */
 	sandbox: 'off' | 'on' | 'unavailable';
 };
 
@@ -175,8 +175,10 @@ export type MachineFacts = {
 export type Problem = {
 	/** Stable, for fades: `model`, `undelivered:812`. */
 	id: string;
-	kind: 'model' | 'channel' | 'undelivered';
+	kind: 'model' | 'channel' | 'undelivered' | 'sandbox';
 	text: string;
+	/** What to run or do to fix it, when the agent knows. */
+	fix: string | null;
 	since: number;
 };
 

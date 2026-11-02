@@ -1,6 +1,8 @@
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { SandboxManager } from '@anthropic-ai/sandbox-runtime';
 import { ingest } from './ingest.ts';
+import { sandboxCommand } from './sandbox.ts';
 import { envWithoutSecrets, redact } from './secrets.ts';
 import { type Daemon, type Params, type RunningCommand, cut } from './state.ts';
 import {
@@ -87,15 +89,20 @@ function signalGroup(pgid: number, signal: NodeJS.Signals): void {
  */
 export async function runCommand(
 	daemon: Daemon,
-	task: { id: number; handle: string; workDir: string },
+	task: { id: number; handle: string; repo: string | null; workDir: string },
 	command: string,
 	timeoutSeconds: number,
 ): Promise<string> {
-	const { db } = daemon;
+	const { db, sandbox } = daemon;
+	if (sandbox.state !== 'on') {
+		return `error: ${sandbox.text}. The operator has to fix that and restart the agent; the file tools still work.`;
+	}
 	const startedAt = Date.now();
-	mkdirSync(join(taskFolder(daemon, task.handle), 'commands'), {
-		recursive: true,
-	});
+	const folder = taskFolder(daemon, task.handle);
+	mkdirSync(join(folder, 'commands'), { recursive: true });
+	// A sandbox write root; tasks from before the sandbox may not have it.
+	const tmp = join(folder, 'tmp');
+	mkdirSync(tmp, { recursive: true });
 	const stepId = Number(
 		db
 			.query<unknown, Params>(
@@ -112,9 +119,13 @@ export async function runCommand(
 	const path = commandLog(daemon, task.handle, stepId);
 
 	let child: ReturnType<typeof spawn>;
+	let wrapped = false;
 	try {
-		child = spawn(command, task.workDir, commandEnv(daemon, task.handle));
+		const argv = await sandboxCommand(daemon, task, tmp, command);
+		wrapped = true;
+		child = spawn(argv, task.workDir, commandEnv(daemon, task.handle));
 	} catch (error) {
+		if (wrapped) SandboxManager.cleanupAfterCommand();
 		const message = error instanceof Error ? error.message : String(error);
 		appendFileSync(path, `[couldn't start: ${message}]\n`);
 		db.query<unknown, [number, number]>(
@@ -169,6 +180,7 @@ export async function runCommand(
 
 	entry.finished = (async () => {
 		await Promise.all([pump(child.stdout), pump(child.stderr), child.exited]);
+		SandboxManager.cleanupAfterCommand();
 		clearTimeout(timeout);
 		if (killTimer) clearTimeout(killTimer);
 		if (truncated) await sink.write('\n[output cut at 10 MB]\n');
@@ -229,10 +241,10 @@ export async function runCommand(
 
 type Env = Record<string, string | undefined>;
 
-function spawn(command: string, cwd: string, env: Env) {
+function spawn(argv: string[], cwd: string, env: Env) {
 	// `detached` makes the shell a process-group leader, so stopping the group
 	// ends everything the command started.
-	return Bun.spawn(['/bin/bash', '-c', command], {
+	return Bun.spawn(argv, {
 		cwd,
 		env,
 		detached: true,
