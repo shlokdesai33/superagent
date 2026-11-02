@@ -1,4 +1,9 @@
-import type { Message, Problem, TaskSummary } from '../../protocol.ts';
+import type {
+	Message,
+	Problem,
+	RouterState,
+	TaskSummary,
+} from '../../protocol.ts';
 import {
 	type Line,
 	type Seg,
@@ -8,7 +13,7 @@ import {
 	width,
 	wrap,
 } from '../cells.ts';
-import { age, ago } from '../format.ts';
+import { age, ago, duration } from '../format.ts';
 import { type Live, type Section, sections } from '../model.ts';
 import {
 	BARS,
@@ -132,6 +137,11 @@ export function homeBody(
 			lines.push(label('CONSOLE'));
 			for (const message of live.console.slice(-CONSOLE_SHOWN)) {
 				lines.push(...consoleRows(message, ctx));
+				// An agent from before `held` sends neither field.
+				const { held, pending } = live.router;
+				if (held && pending?.includes(message.id)) {
+					lines.push(...heldRows(held, ctx));
+				}
 			}
 		});
 	}
@@ -404,6 +414,31 @@ function doneRow(
 		fade,
 		ghost,
 	);
+}
+
+/** Why a console message is still waiting for the Router, under it. */
+function heldRows(
+	held: NonNullable<RouterState['held']>,
+	ctx: Context,
+): Line[] {
+	const room = Math.min(MEASURE, ctx.content) - 9;
+	const segs: Seg[] = [
+		{ t: 'waiting · ', fg: 'faint' },
+		{ t: oneLine(held.reason), fg: 'warn' },
+	];
+	if (held.until !== null) {
+		segs.push({
+			t: ` · tries again in ${duration(Math.max(0, held.until - ctx.now))}`,
+			fg: 'faint',
+		});
+	}
+	return wrap(segs, room, 2).map((line, index) => ({
+		segs: [
+			{ t: ' '.repeat(7) },
+			{ t: index === 0 ? '└ ' : '  ', fg: 'ghost' },
+			...line,
+		],
+	}));
 }
 
 function consoleRows(message: Message, ctx: Context): Line[] {

@@ -9,7 +9,7 @@ import type { ChatRequest } from '../src/particle/types.ts';
 import { startFakeParticle } from './fake-particle.ts';
 import { startAgent } from './harness.ts';
 
-// At 4 characters a token, tool schemas included: 1,219 when set, down from
+// At 4 characters a token, tool schemas included: 1,237 when set, down from
 // 1,668 a call (and two calls) before the Router's prompt was trimmed.
 const HI_BUDGET_TOKENS = 1_300;
 

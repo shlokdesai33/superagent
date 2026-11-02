@@ -36,7 +36,22 @@ export type FakeParticle = {
 	models: { available: boolean; requests: number };
 	/** Every request gets a `401`, as for a revoked key. */
 	auth: { rejected: boolean };
+	/** Chat requests get Particle's `402` (no credit) or `403` (key without the scope). */
+	account: { refused: 402 | 403 | null };
 	stop(): void;
+};
+
+const REFUSALS = {
+	402: {
+		message: 'Your credit balance is empty. Add credits to continue.',
+		type: 'insufficient_credits_error',
+		code: 'insufficient_credits',
+	},
+	403: {
+		message: "This API key doesn't have the scope this route requires.",
+		type: 'authorization_error',
+		code: 'insufficient_scope',
+	},
 };
 
 export function startFakeParticle(
@@ -45,6 +60,7 @@ export function startFakeParticle(
 	const requests: FakeRequest[] = [];
 	const models = { available: true, requests: 0 };
 	const auth = { rejected: false };
+	const account: FakeParticle['account'] = { refused: null };
 	const lastPrompt = new Map<string, string>();
 	let count = 0;
 	const server = Bun.serve({
@@ -82,6 +98,12 @@ export function startFakeParticle(
 							},
 							{ status: 503 },
 						);
+			}
+			if (account.refused !== null) {
+				return Response.json(
+					{ error: REFUSALS[account.refused] },
+					{ status: account.refused },
+				);
 			}
 			const body: unknown = await request.json();
 			if (!isChatRequest(body)) {
@@ -124,6 +146,7 @@ export function startFakeParticle(
 		requests,
 		models,
 		auth,
+		account,
 		stop: () => {
 			void server.stop(true);
 		},
