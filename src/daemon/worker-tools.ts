@@ -1,5 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import {
+	existsSync,
+	lstatSync,
+	mkdirSync,
+	readFileSync,
+	realpathSync,
+	writeFileSync,
+} from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import type { FunctionTool, ToolCall } from '../particle/types.ts';
 import { readOutput, runCommand, stopCommand, taskFolder } from './commands.ts';
 import { editDiff } from './git.ts';
@@ -178,7 +185,7 @@ export async function runWorkerTool(
 			case 'read_file':
 				return done(readFile(task, args));
 			case 'write_file': {
-				const target = resolvePath(task.workDir, requiredString(args, 'path'));
+				const target = writablePath(task.workDir, requiredString(args, 'path'));
 				const content = args.content;
 				if (typeof content !== 'string') {
 					throw new ToolError('content must be a string');
@@ -280,6 +287,35 @@ function resolvePath(
 	return { absolute, relative: relative(workDir, absolute) || '.' };
 }
 
+/**
+ * `resolvePath` for writes, which must land inside the working folder once
+ * symlinks are followed, like the commands' sandbox, so a wrong path can't
+ * change files elsewhere.
+ */
+function writablePath(
+	workDir: string,
+	path: string,
+): { absolute: string; relative: string } {
+	const target = resolvePath(workDir, path);
+	let existing = target.absolute;
+	while (!lstatSync(existing, { throwIfNoEntry: false })) {
+		existing = dirname(existing);
+	}
+	let real: string;
+	try {
+		real = join(realpathSync(existing), relative(existing, target.absolute));
+	} catch {
+		throw new ToolError(`${path} is a broken symlink`);
+	}
+	const inside = relative(realpathSync(workDir), real);
+	if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) {
+		throw new ToolError(
+			`${path} is outside your working folder; file tools write only inside it`,
+		);
+	}
+	return target;
+}
+
 function readFile(task: WorkerTask, args: Args): string {
 	const target = resolvePath(task.workDir, requiredString(args, 'path'));
 	if (!existsSync(target.absolute)) {
@@ -317,7 +353,7 @@ async function editFile(
 	task: WorkerTask,
 	args: Args,
 ): Promise<string> {
-	const target = resolvePath(task.workDir, requiredString(args, 'path'));
+	const target = writablePath(task.workDir, requiredString(args, 'path'));
 	const old = requiredString(args, 'old');
 	const replacement = args.new;
 	if (typeof replacement !== 'string') {

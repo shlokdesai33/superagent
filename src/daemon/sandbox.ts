@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
 	SandboxManager,
@@ -197,10 +198,60 @@ function installCommand(packages: string[]): string {
 	return `Install ${listed(packages)} with your package manager`;
 }
 
+// Package and tool caches in your home folder, so installs and builds work.
+// One whose tool is on your PATH (or with no tool) is created when missing,
+// since the tool can't create it from inside the sandbox.
+const CACHES: Array<[tool: string | null, folder: string]> = [
+	[null, '.cache'],
+	['npm', '.npm'],
+	['bun', '.bun/install/cache'],
+	['pnpm', '.local/share/pnpm'],
+	['yarn', '.yarn/berry'],
+	['go', 'go/pkg/mod'],
+	['cargo', '.cargo/registry'],
+	['cargo', '.cargo/git'],
+	['mvn', '.m2/repository'],
+	['gradle', '.gradle'],
+	...(process.platform === 'darwin'
+		? [
+				[null, 'Library/Caches'] satisfies [null, string],
+				['pnpm', 'Library/pnpm'] satisfies [string, string],
+			]
+		: []),
+];
+
+// Where you've moved a tool's cache, it's used instead.
+const CACHE_ENV = [
+	'XDG_CACHE_HOME',
+	'npm_config_cache',
+	'BUN_INSTALL_CACHE_DIR',
+	'PNPM_HOME',
+	'YARN_CACHE_FOLDER',
+	'PIP_CACHE_DIR',
+	'UV_CACHE_DIR',
+	'GOMODCACHE',
+	'GOCACHE',
+];
+
+function cacheFolders(loginPath: string): string[] {
+	const home = homedir();
+	const folders = [
+		...CACHES.filter(
+			([tool]) => tool === null || Bun.which(tool, { PATH: loginPath }),
+		).map(([, folder]) => join(home, folder)),
+		...CACHE_ENV.map((name) => Bun.env[name]).filter(
+			(folder): folder is string => Boolean(folder),
+		),
+	];
+	for (const folder of folders) mkdirSync(folder, { recursive: true });
+	return folders;
+}
+
 /**
  * `command`, wrapped so it can write only in the task's working folder, its
- * temp folder and, in a worktree, the repository's git folder (so git works
- * as usual). Call `SandboxManager.cleanupAfterCommand()` once it has ended.
+ * temp folder, /tmp, the package and tool caches and, in a worktree, the
+ * repository's git folder (so git works as usual). Call
+ * `SandboxManager.cleanupAfterCommand()` once it has ended.
  */
 export async function sandboxCommand(
 	daemon: Daemon,
@@ -217,7 +268,13 @@ export async function sandboxCommand(
 		{
 			filesystem: {
 				denyRead: [],
-				allowWrite: [task.workDir, tmpDir, ...(gitDir ? [gitDir] : [])],
+				allowWrite: [
+					task.workDir,
+					tmpDir,
+					'/tmp',
+					...cacheFolders(daemon.loginPath),
+					...(gitDir ? [gitDir] : []),
+				],
 				denyWrite: [],
 			},
 		},
