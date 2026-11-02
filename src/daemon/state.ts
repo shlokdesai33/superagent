@@ -22,6 +22,7 @@ import type { Config } from './setup.ts';
 const CONSOLE_SNAPSHOT_MESSAGES = 50;
 const FEED_MESSAGE_CHARS = 4_000;
 const USAGE_INTERVAL_MS = 1_000;
+const UNDELIVERED_MS = 24 * 60 * 60_000;
 
 /** Everything the daemon's handlers share. One per process. */
 export type Daemon = {
@@ -42,6 +43,8 @@ export type Daemon = {
 	github: GitHubLive;
 	/** GitHub's REST client, once the channel runs. */
 	githubApi: GitHubApi | null;
+	/** Tells the GitHub delivery loop a reply is waiting. */
+	wakeDelivery: () => void;
 	/** `POST /v1/events` is on (`--script-channel`), for tests. */
 	scriptChannel: boolean;
 	/** Action results by `requestId`, kept 10 minutes. */
@@ -264,6 +267,25 @@ export function health(daemon: Daemon): Health {
 		});
 	}
 	problems.push(...daemon.github.problems);
+	// GitHub replies that couldn't be posted, for a day.
+	for (const failed of daemon.db
+		.query<
+			{ id: number; at: number; title: string; error: string | null },
+			[number]
+		>(
+			`SELECT m.id, m.at, th.title, m.delivery_error AS error FROM messages m
+			JOIN threads th ON th.id = m.thread_id
+			WHERE m.channel = 'github' AND m.delivery = 'failed' AND m.at > ?`,
+		)
+		.all(Date.now() - UNDELIVERED_MS)) {
+		problems.push({
+			id: `undelivered:${failed.id}`,
+			kind: 'undelivered',
+			text: `Couldn't comment on ${failed.title}: ${failed.error ?? 'unknown error'}`,
+			fix: null,
+			since: failed.at,
+		});
+	}
 	if (daemon.missingIdentity.length > 0) {
 		warnings.push({
 			id: 'git-identity',

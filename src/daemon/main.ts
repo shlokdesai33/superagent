@@ -11,8 +11,14 @@ import {
 	repositoryRoot,
 	startCleanup,
 } from './git.ts';
-import { type GitHubClient, initialGitHub, startGitHub } from './github.ts';
+import {
+	type GitHubClient,
+	githubRetryMs,
+	initialGitHub,
+	startGitHub,
+} from './github.ts';
 import { pollFollowed } from './github-threads.ts';
+import { type Delivery, startDelivery } from './github-delivery.ts';
 import { createLog } from './log.ts';
 import {
 	NO_API_KEY,
@@ -60,10 +66,12 @@ export async function runDaemon(options: {
 	let stopCleanup: (() => Promise<void>) | null = null;
 	let stopKeyWatch: (() => void) | null = null;
 	let github: GitHubClient | null = null;
+	let delivery: Delivery | null = null;
 	let sandboxStarted = false;
 	const teardown = async () => {
 		if (daemon) daemon.stopping = true;
 		stopKeyWatch?.();
+		await delivery?.stop();
 		await github?.stop();
 		await router?.stop();
 		// Workers may still store their last tool result, so the database stays
@@ -173,6 +181,7 @@ export async function runDaemon(options: {
 			channels,
 			github: initialGitHub(config),
 			githubApi: null,
+			wakeDelivery: () => {},
 			scriptChannel: options.scriptChannel,
 			actionResults: new Map(),
 			usageTimer: null,
@@ -227,8 +236,13 @@ export async function runDaemon(options: {
 	stopActivity = startActivityTimer(daemon);
 	stopCleanup = startCleanup(daemon);
 	const running = daemon;
-	github = startGitHub(running, (api) => pollFollowed(running, api));
+	github = startGitHub(running, async (api) => {
+		await pollFollowed(running, api);
+		running.wakeDelivery();
+	});
 	running.githubApi = github;
+	delivery = startDelivery(running, github, githubRetryMs());
+	running.wakeDelivery = delivery.wake;
 
 	const signal = await new Promise<NodeJS.Signals>((resolve) => {
 		process.once('SIGINT', resolve);
