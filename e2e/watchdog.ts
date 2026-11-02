@@ -94,6 +94,26 @@ const workers: Record<string, (request: FakeRequest) => FakeReply> = {
 						},
 					],
 				},
+	// Starts a long, silent command, then waits on it.
+	hanger: (request) =>
+		request.called.includes('run')
+			? {
+					content: 'Waiting on it.',
+					calls: [{ name: 'wait_for', args: { what: 'the command' } }],
+				}
+			: {
+					content: 'Starting it.',
+					calls: [
+						{ name: 'run', args: { command: 'sleep 100', timeout_s: 1000 } },
+					],
+				},
+	// Ends its turns without tool calls, even after the nudge.
+	quitter: () => ({ content: "I think that's it." }),
+	// Waits on CI, though it follows no thread that could tell it.
+	ciwaiter: () => ({
+		content: 'Waiting for CI.',
+		calls: [{ name: 'wait_for', args: { what: 'CI' } }],
+	}),
 	// Finishes at once.
 	quick: () => ({
 		content: 'Done.',
@@ -245,13 +265,19 @@ async function taskLine(
 async function scenario(
 	name: string,
 	body: (agent: Agent) => Promise<void>,
-	/** Findings that may act or report here, by key. */
-	allowed: RegExp | null = null,
-	scale: string = SCALE,
+	options: {
+		/** Findings that may act or report here, by key. */
+		allowed?: RegExp;
+		scale?: string;
+		/** Written as `config.json`. */
+		config?: Record<string, unknown>;
+	} = {},
 ): Promise<void> {
+	const { allowed = null, scale = SCALE, config } = options;
 	process.stdout.write(`\n${name}\n`);
 	const agent = await startAgent(particle.url, {
 		env: { SUPERAGENT_WATCHDOG_SCALE: scale },
+		...(config ? { config } : {}),
 	});
 	try {
 		await body(agent);
@@ -284,11 +310,19 @@ async function scenario(
 	}
 }
 
-type TaskDetail = { task: TaskSummary };
+type TaskDetail = {
+	task: TaskSummary;
+	conversation: Array<{ author: string; text: string }>;
+};
 
 // The daemon is trusted to send the shape it promises.
 function isTaskDetail(value: unknown): value is TaskDetail {
-	return typeof value === 'object' && value !== null && 'task' in value;
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'task' in value &&
+		'conversation' in value
+	);
 }
 
 async function taskDetail(agent: Agent, handle: string): Promise<TaskDetail> {
@@ -296,6 +330,26 @@ async function taskDetail(agent: Agent, handle: string): Promise<TaskDetail> {
 	if (!isTaskDetail(detail)) throw new Error(`not a task detail: ${handle}`);
 	return detail;
 }
+
+/** Problems from the latest health line, by ID. */
+function problems(
+	agent: Agent,
+): Map<string, { text: string; fix: string | null }> {
+	const health = agent.lines.findLast(
+		(line): line is HealthLine => line.type === 'health',
+	)?.health;
+	return new Map(
+		(health?.problems ?? []).map((problem) => [
+			problem.id,
+			{ text: problem.text, fix: problem.fix },
+		]),
+	);
+}
+
+const problemFor = (agent: Agent, prefix: string, suffix: string) =>
+	[...problems(agent)].find(
+		([id]) => id.startsWith(prefix) && id.endsWith(suffix),
+	)?.[1];
 
 const watchdogLines = (agent: Agent) =>
 	agent.lines.filter(
@@ -525,7 +579,7 @@ try {
 			);
 			check('Stop stops the task', stopped.result === 'stopped by you');
 		},
-		/^runaway:/,
+		{ allowed: /^runaway:/ },
 	);
 
 	await scenario(
@@ -576,7 +630,7 @@ try {
 			check('your note does, and the task goes on', going.question === null);
 			await agent.action({ type: 'stop_task', handle: paused.handle });
 		},
-		/^runaway:/,
+		{ allowed: /^runaway:/ },
 	);
 
 	await scenario(
@@ -596,7 +650,7 @@ try {
 			);
 			await agent.action({ type: 'stop_task', handle: paused.handle });
 		},
-		/^runaway:/,
+		{ allowed: /^runaway:/ },
 	);
 
 	await scenario("An upgrade doesn't pause busy tasks", async (agent) => {
@@ -686,7 +740,7 @@ try {
 			check('health counts the reviews', counted >= 2, `${counted} today`);
 			await agent.action({ type: 'stop_task', handle: paused.handle });
 		},
-		/^reviews:/,
+		{ allowed: /^reviews:/ },
 	);
 
 	await scenario(
@@ -718,10 +772,9 @@ try {
 			);
 			await agent.action({ type: 'stop_task', handle: waiting.handle });
 		},
-		null,
 		// 300 ms ticks: the review (100 ms) ends well before the next tick, when
 		// the finding itself would resolve.
-		'0.005',
+		{ scale: '0.005' },
 	);
 
 	await scenario('A progressing verdict is silent', async (agent) => {
@@ -768,6 +821,166 @@ try {
 			done.result === 'Edited 170 times',
 		);
 	});
+
+	await scenario(
+		'A command that hangs',
+		async (agent) => {
+			await agent.action({ type: 'send_console', text: 'please run hanger' });
+			const { handle } = await taskLine(
+				agent,
+				'the hanger running its command',
+				(task) => task.title === 'hanger' && task.now?.command === 'sleep 100',
+			);
+			const noted = await agent.until(
+				"the Watchdog's note about the silent command",
+				async () =>
+					(await taskDetail(agent, handle)).conversation.filter(
+						(message) =>
+							message.author === 'watchdog' &&
+							message.text.includes('has printed nothing'),
+					),
+				(notes) => notes.length > 0,
+			);
+			check(
+				'a command silent for 15 minutes gets its Worker a note',
+				noted[0]?.text.includes('stop_command') === true,
+				noted[0]?.text ?? '',
+			);
+			const long = await agent.until(
+				'the long command in health',
+				async () => problemFor(agent, 'commands:', ':long'),
+				(problem) => problem !== undefined,
+			);
+			check(
+				'a command running for 2 hours is a problem',
+				long?.text.includes('sleep 100') === true &&
+					long.fix?.includes(`@${handle}`) === true,
+				long?.text ?? '',
+			);
+			const notes = (await taskDetail(agent, handle)).conversation.filter(
+				(message) => message.author === 'watchdog',
+			).length;
+			check('the silent command gets one note, not one per tick', notes === 1);
+			await agent.action({ type: 'stop_task', handle });
+			await agent.until(
+				'the problem to clear',
+				async () => problemFor(agent, 'commands:', ':long'),
+				(problem) => problem === undefined,
+			);
+			check('the problem clears once the command ends', true);
+		},
+		{ allowed: /^commands:/ },
+	);
+
+	await scenario(
+		'Tasks that will never move on',
+		async (agent) => {
+			await agent.action({ type: 'send_console', text: 'please run quitter' });
+			await agent.action({ type: 'send_console', text: 'please run ciwaiter' });
+			const idle = await agent.until(
+				'the idle task in health',
+				async () => problemFor(agent, 'waits:', ':idle'),
+				(problem) => problem !== undefined,
+			);
+			check(
+				'a task that ended its turns without finishing or asking is a problem',
+				idle?.text.endsWith('stopped without finishing or asking') === true,
+				idle?.text ?? '',
+			);
+			const nothing = await agent.until(
+				'the task waiting on nothing in health',
+				async () => problemFor(agent, 'waits:', ':nothing'),
+				(problem) => problem !== undefined,
+			);
+			check(
+				'a task waiting on something nothing can deliver is a problem',
+				nothing?.text.includes('waits on "CI" but nothing will tell it') ===
+					true,
+				nothing?.text ?? '',
+			);
+			const handles = new Set(
+				agent.lines.flatMap((line) =>
+					line.type === 'task' ? [line.task.handle] : [],
+				),
+			);
+			check(
+				'neither is woken: the Watchdog only reports them',
+				!particle.requests.some(
+					(request) =>
+						handles.has(request.handle ?? '') &&
+						request.fresh.includes('watchdog'),
+				),
+			);
+			for (const task of agent.lines.flatMap((line) =>
+				line.type === 'task' ? [line.task.handle] : [],
+			)) {
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await agent.action({ type: 'stop_task', handle: task });
+			}
+		},
+		{ allowed: /^waits:/ },
+	);
+
+	await scenario(
+		'Waiting for a worker slot',
+		async (agent) => {
+			await agent.action({ type: 'send_console', text: 'please run hanger' });
+			await taskLine(
+				agent,
+				'the hanger running its command',
+				(task) => task.title === 'hanger' && task.now?.command === 'sleep 100',
+			);
+			await agent.action({ type: 'send_console', text: 'please run quick' });
+			const slot = await agent.until(
+				'the slot wait in health',
+				async () => problemFor(agent, 'waits:', ':slot'),
+				(problem) => problem !== undefined,
+			);
+			check(
+				'a task waiting 30 minutes for a slot is a problem naming what holds it',
+				slot?.text.includes('for a worker slot') === true &&
+					slot.fix?.includes('sleep 100') === true,
+				`${slot?.text ?? ''} · ${slot?.fix ?? ''}`,
+			);
+			for (const task of agent.lines.flatMap((line) =>
+				line.type === 'task' ? [line.task.handle] : [],
+			)) {
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await agent.action({ type: 'stop_task', handle: task });
+			}
+		},
+		{ allowed: /^(waits|commands):/, config: { maxWorkingTasks: 1 } },
+	);
+
+	await scenario(
+		'A crash loop',
+		async (agent) => {
+			const restart = async () => {
+				await agent.crash();
+				await agent.restart();
+				const before = watchdogLines(agent).length;
+				await agent.until(
+					'a few checks after the restart',
+					async () => watchdogLines(agent).length,
+					(count) => count >= before + 3,
+				);
+			};
+			await restart();
+			await restart();
+			check(
+				'two crashes in an hour are not yet a loop',
+				problemFor(agent, 'crashes:', 'loop') === undefined,
+			);
+			await restart();
+			const loop = problemFor(agent, 'crashes:', 'loop');
+			check(
+				'three crashes in an hour are a problem',
+				loop?.text === 'The agent crashed 3 times in the last hour',
+				loop?.text ?? 'no problem',
+			);
+		},
+		{ allowed: /^crashes:/ },
+	);
 
 	await scenario('Particle outage', async (agent) => {
 		controls.outage = true;
