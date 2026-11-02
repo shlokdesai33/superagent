@@ -343,6 +343,43 @@ try {
 			(await detail(b2.handle)).workDir.includes('/worktrees/other/'),
 		`${(await detail(b1.handle)).workDir} · ${(await detail(b2.handle)).workDir}`,
 	);
+
+	// 8. A repository with no commits yet, as right after `git init`.
+	const fresh = join(root, 'fresh');
+	execFileSync('git', ['init', '-q', fresh]);
+	await agent.action({
+		type: 'send_console',
+		text: 'start the project (R5)',
+		repo: fresh,
+	});
+	const r5 = await agent.waitFor(
+		'task R5 to end',
+		(line): line is TaskLine =>
+			line.type === 'task' &&
+			line.task.title === 'Task R5' &&
+			(line.task.status === 'done' || line.task.status === 'failed'),
+	);
+	check(
+		'a task in a repository with no commits works instead of failing',
+		r5.task.status === 'done',
+		r5.task.result ?? r5.task.status,
+	);
+	const r5Detail = await detail(r5.task.handle);
+	const firstCommit = execFileSync(
+		'git',
+		['-C', r5Detail.workDir, 'log', '--format=%s'],
+		{ encoding: 'utf8' },
+	).trim();
+	check(
+		'its branch starts from an empty commit',
+		firstCommit === 'superagent: start from an empty repository',
+		firstCommit,
+	);
+	check(
+		"the repository's own branch still has no commits",
+		Bun.spawnSync(['git', '-C', fresh, 'rev-parse', '--verify', 'HEAD'])
+			.exitCode !== 0,
+	);
 } catch (error) {
 	failures += 1;
 	process.stdout.write(
