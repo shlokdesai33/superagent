@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  A local, always-on coding agent for macOS and Linux.<br>
+  A local, always on coding agent for macOS and Linux.
   You talk to a Router in a terminal UI. It runs tasks in parallel, each in its own git worktree, and follows their GitHub PRs through review and CI.
 </p>
 
