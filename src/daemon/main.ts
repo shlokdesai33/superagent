@@ -5,7 +5,12 @@ import packageJson from '../../package.json' with { type: 'json' };
 import { dataPaths } from '../home.ts';
 import { loadAgentId, openDatabase } from './db.ts';
 import { createFeed } from './feed.ts';
-import { repositoryName, repositoryRoot, startCleanup } from './git.ts';
+import {
+	missingIdentity,
+	repositoryName,
+	repositoryRoot,
+	startCleanup,
+} from './git.ts';
 import { type GitHubClient, initialGitHub, startGitHub } from './github.ts';
 import { createLog } from './log.ts';
 import {
@@ -94,8 +99,8 @@ export async function runDaemon(options: {
 		if (sandbox.state === 'on') {
 			log('info', 'sandbox on');
 		} else {
-			log('error', 'sandbox unavailable; Worker commands are refused', {
-				problem: sandbox.text,
+			log('warn', 'sandbox off; Worker commands run unsandboxed', {
+				cause: sandbox.cause,
 				fix: sandbox.fix,
 			});
 		}
@@ -114,9 +119,10 @@ export async function runDaemon(options: {
 		const key = findParticleKey(paths.particleKey);
 		const secrets: string[] = [];
 		addSecrets(secrets, [...key.found, movedKey]);
+		const machine = gatherMachineFacts(commandPath);
 		// First run inside a repository: use it.
 		if (config.repos.length === 0) {
-			const top = repositoryRoot(startedIn, secrets);
+			const top = repositoryRoot(startedIn, commandPath, secrets);
 			if (top !== null) {
 				config.repos = [{ name: repositoryName(top), path: top }];
 				saveRepos(paths.config, config.repos);
@@ -126,8 +132,17 @@ export async function runDaemon(options: {
 				});
 			}
 		}
+		const identity = missingIdentity(
+			commandPath,
+			secrets,
+			config.repos.map((repo) => repo.path),
+		);
+		if (identity.length > 0) {
+			log('warn', 'git has no commit identity; Worker commits will fail', {
+				missing: identity,
+			});
+		}
 		const agentId = loadAgentId(db);
-		const machine = gatherMachineFacts();
 
 		const channels = new Map<string, number | null>([['console', null]]);
 		if (options.scriptChannel) channels.set('script', null);
@@ -174,6 +189,7 @@ export async function runDaemon(options: {
 			paths,
 			loginPath: commandPath,
 			sandbox,
+			missingIdentity: identity,
 			workers: new Map(),
 			commands: new Map(),
 			runWorker: () => {},

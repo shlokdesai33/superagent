@@ -7,6 +7,7 @@ import {
 	statSync,
 	writeFileSync,
 } from 'node:fs';
+import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { envWithoutSecrets, redact } from './secrets.ts';
 import type { Daemon } from './state.ts';
@@ -66,10 +67,15 @@ function firstLine(text: string): string {
 }
 
 /** The top of the git repository containing `dir`, or `null`. */
-export function repositoryRoot(dir: string, secrets: string[]): string | null {
+/** `path` is the login PATH, the one the startup check found git on. */
+export function repositoryRoot(
+	dir: string,
+	path: string,
+	secrets: string[],
+): string | null {
 	const result = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
 		cwd: dir,
-		env: gitEnv(Bun.env.PATH ?? '/usr/bin:/bin', secrets),
+		env: gitEnv(path, secrets),
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'ignore',
@@ -77,6 +83,45 @@ export function repositoryRoot(dir: string, secrets: string[]): string | null {
 	});
 	const top = result.stdout.toString().trim();
 	return result.exitCode === 0 && top !== '' ? top : null;
+}
+
+/**
+ * Which of `user.name` and `user.email` git can't resolve for a commit, in
+ * any of `repos` (your global config when there are none). Worker commits
+ * fail without them.
+ */
+export function missingIdentity(
+	path: string,
+	secrets: string[],
+	repos: string[],
+): string[] {
+	const env = gitEnv(path, secrets);
+	const places = repos.filter((repo) => existsSync(repo));
+	return ['name', 'email']
+		.filter((field) => {
+			const upper = field.toUpperCase();
+			if (env[`GIT_AUTHOR_${upper}`] && env[`GIT_COMMITTER_${upper}`]) {
+				return false;
+			}
+			const read = (dir: string | null) =>
+				Bun.spawnSync(
+					['git', ...(dir ? ['-C', dir] : []), 'config', `user.${field}`],
+					{
+						cwd: homedir(),
+						env,
+						stdin: 'ignore',
+						stdout: 'pipe',
+						stderr: 'ignore',
+						timeout: GIT_TIMEOUT_MS,
+					},
+				)
+					.stdout.toString()
+					.trim();
+			return places.length === 0
+				? read(null) === ''
+				: places.some((dir) => read(dir) === '');
+		})
+		.map((field) => `user.${field}`);
 }
 
 /** A config-safe repository name from its folder name. */

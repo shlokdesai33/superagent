@@ -15,7 +15,6 @@ const KEY: Record<Health['model']['key'], string> = {
 const SANDBOX: Record<Health['sandbox'], string> = {
 	off: 'commands run unsandboxed',
 	on: 'commands write only inside their task',
-	unavailable: 'the sandbox is unavailable',
 };
 
 export function healthBody(live: Live, content: number, now: number): Line[] {
@@ -70,17 +69,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 				],
 				right: [{ t: ago(now - problem.since), fg: 'faint' }],
 			});
-			if (problem.fix) {
-				for (const segs of wrap(
-					[
-						{ t: 'fix: ', fg: 'faint' },
-						{ t: problem.fix, fg: 'dim' },
-					],
-					measure - 2,
-				)) {
-					lines.push({ segs: [{ t: '  ' }, ...segs] });
-				}
-			}
+			if (problem.fix) lines.push(...fixLines(problem.fix, measure));
 		}
 		for (const task of failed) {
 			lines.push({
@@ -94,6 +83,20 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 					Math.floor(content / 2),
 				),
 			});
+		}
+		lines.push(blank());
+	}
+
+	if (health.warnings.length > 0) {
+		lines.push(label('WARNINGS'));
+		for (const warning of health.warnings) {
+			lines.push({
+				segs: [
+					{ t: '· ', fg: 'warn' },
+					{ t: oneLine(warning.text), fg: 'fg' },
+				],
+			});
+			if (warning.fix) lines.push(...fixLines(warning.fix, measure));
 		}
 		lines.push(blank());
 	}
@@ -216,6 +219,17 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 	];
 	for (const segs of wrap(machine, measure)) lines.push({ segs });
 	return lines;
+}
+
+/** `fix: …`, wrapped and indented under its problem or warning. */
+function fixLines(fix: string, measure: number): Line[] {
+	return wrap(
+		[
+			{ t: 'fix: ', fg: 'faint' },
+			{ t: fix, fg: 'dim' },
+		],
+		measure - 2,
+	).map((segs) => ({ segs: [{ t: '  ' }, ...segs] }));
 }
 
 /** `━` in `accent` on a `─` track, with the cached share in `dim`. */

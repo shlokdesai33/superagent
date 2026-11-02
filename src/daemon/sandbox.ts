@@ -7,13 +7,13 @@ import {
 } from '@anthropic-ai/sandbox-runtime';
 import type { DataPaths } from '../home.ts';
 import { git } from './git.ts';
-import { osRelease } from './setup.ts';
+import { installCommand } from './setup.ts';
 import type { Daemon } from './state.ts';
 
 /** Whether Worker commands run in the sandbox, and if not, why and how to fix it. */
 export type SandboxStatus =
 	| { state: 'on' }
-	| { state: 'unavailable'; text: string; fix: string | null; since: number };
+	| { state: 'off'; cause: string; fix: string | null; since: number };
 
 const SANDBOX_EXEC = '/usr/bin/sandbox-exec';
 const PROBE_TIMEOUT_MS = 15_000;
@@ -30,8 +30,8 @@ Reflect.deleteProperty(NETWORK, 'allowedDomains');
 
 /**
  * Starts the sandbox and runs one probe command through it. Never throws: a
- * sandbox that can't start is `unavailable`, with the fix, and commands are
- * refused until it's fixed and the agent restarted.
+ * sandbox that can't start is `off`, with the fix, and commands run
+ * unsandboxed until it's fixed and the agent restarted.
  */
 export async function startSandbox(
 	paths: DataPaths,
@@ -46,7 +46,7 @@ export async function startSandbox(
 
 	if (process.platform === 'darwin') {
 		if (!existsSync(SANDBOX_EXEC)) {
-			return unavailable(`${SANDBOX_EXEC} is missing`, null);
+			return off(`${SANDBOX_EXEC} is missing`, null);
 		}
 	} else if (process.platform === 'linux') {
 		// sandbox-runtime's own dependency check needs all three.
@@ -56,13 +56,13 @@ export async function startSandbox(
 			Bun.which('rg') ? null : 'ripgrep',
 		].filter((name) => name !== null);
 		if (missing.length > 0) {
-			return unavailable(
+			return off(
 				`the sandbox needs ${listed(missing)}, which ${missing.length === 1 ? "isn't" : "aren't"} installed`,
 				`${installCommand(missing)}, then restart the agent`,
 			);
 		}
 	} else {
-		return unavailable(`${process.platform} has no supported sandbox`, null);
+		return off(`${process.platform} has no supported sandbox`, null);
 	}
 
 	try {
@@ -71,7 +71,7 @@ export async function startSandbox(
 			filesystem: { denyRead: [], allowWrite: [], denyWrite: [] },
 		});
 	} catch (error) {
-		return unavailable(
+		return off(
 			`the sandbox couldn't start (${firstLine(error instanceof Error ? error.message : String(error))})`,
 			null,
 		);
@@ -83,17 +83,17 @@ export async function startSandbox(
 		process.platform === 'darwin'
 			? diagnoseMacProbe(probe)
 			: diagnoseLinuxProbe(probe);
-	return unavailable(diagnosis.text, diagnosis.fix);
+	return off(diagnosis.text, diagnosis.fix);
 }
 
 export async function stopSandbox(): Promise<void> {
 	await SandboxManager.reset();
 }
 
-function unavailable(text: string, fix: string | null): SandboxStatus {
+function off(text: string, fix: string | null): SandboxStatus {
 	return {
-		state: 'unavailable',
-		text: `Commands are blocked: ${text}`,
+		state: 'off',
+		cause: text,
 		fix,
 		since: Date.now(),
 	};
@@ -196,20 +196,6 @@ function diagnoseMacProbe(stderr: string): {
 			? 'Start the agent from a normal terminal, not from inside another sandboxed app, then restart it'
 			: null,
 	};
-}
-
-function installCommand(packages: string[]): string {
-	const release = osRelease();
-	const family = `${release.get('ID') ?? ''} ${release.get('ID_LIKE') ?? ''}`;
-	const names = packages.join(' ');
-	if (/\b(debian|ubuntu)\b/.test(family)) return `sudo apt install ${names}`;
-	if (/\b(fedora|rhel|centos)\b/.test(family)) {
-		return `sudo dnf install ${names}`;
-	}
-	if (/\barch\b/.test(family)) return `sudo pacman -S ${names}`;
-	if (/\bsuse\b/.test(family)) return `sudo zypper install ${names}`;
-	if (/\balpine\b/.test(family)) return `sudo apk add ${names}`;
-	return `Install ${listed(packages)} with your package manager`;
 }
 
 // Package and tool caches in your home folder, so installs and builds work.
