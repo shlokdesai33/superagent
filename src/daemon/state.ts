@@ -71,8 +71,13 @@ export type Daemon = {
 	workers: Map<number, WorkerLive>;
 	/** Commands still running, by step ID. */
 	commands: Map<number, RunningCommand>;
-	/** Starts the task's Worker loop if it's active, or wakes it. */
-	runWorker: (taskId: number) => void;
+	/**
+	 * Starts the task's Worker loop if it's active, or wakes it. A `message`
+	 * (from a person, not a command's end) also stops its wait on a foreground
+	 * command and skips the rest of its turn's tool calls, so it reads the
+	 * message next.
+	 */
+	runWorker: (taskId: number, options?: { message?: boolean }) => void;
 	/** Tasks waiting for a working slot, first come first served. */
 	slotQueue: Array<{ wake: () => void }>;
 	/** Worker model calls in flight, and those waiting for one. */
@@ -119,6 +124,8 @@ export type WorkerLive = {
 	turn: boolean;
 	/** Why it can't go on: `a free worker slot`, `Particle (out of credits)`. */
 	blockedOn: string | null;
+	/** A message arrived since the loop last read its inbox. */
+	heard: boolean;
 	/** Resolves when the loop has exited. */
 	loop: Promise<void>;
 };
@@ -129,6 +136,8 @@ export type RunningCommand = {
 	pgid: number;
 	/** Set once `run` stops waiting; its end then arrives as `command_done`. */
 	background: boolean;
+	/** Makes `run` stop waiting now, for a message; a no-op once it has. */
+	release: () => void;
 	startedAt: number;
 	/** Its `timeout_s`. */
 	timeoutMs: number;
@@ -151,11 +160,15 @@ export type MessageRow = {
 	author: string;
 	text: string;
 	delivery: Message['delivery'];
+	toWorker: number;
+	readAt: number | null;
 };
 
 export const MESSAGE_COLUMNS = `m.id, m.at, m.channel, m.thread_id AS threadId,
-	t.handle AS taskHandle, m.direction, m.author, m.text, m.delivery
-	FROM messages m LEFT JOIN tasks t ON t.id = m.task_id`;
+	t.handle AS taskHandle, m.direction, m.author, m.text, m.delivery,
+	ev.route = 'task' AS toWorker, ev.consumed_at AS readAt
+	FROM messages m LEFT JOIN tasks t ON t.id = m.task_id
+	LEFT JOIN events ev ON ev.id = m.event_id`;
 
 export function toMessage(
 	row: MessageRow,
@@ -173,6 +186,7 @@ export function toMessage(
 		text,
 		truncated: text.length < row.text.length,
 		delivery: row.delivery,
+		worker: row.toWorker === 1 ? { readAt: row.readAt } : null,
 	};
 }
 

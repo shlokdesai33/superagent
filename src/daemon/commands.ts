@@ -60,7 +60,8 @@ export function commandLog(
 
 /**
  * The daemon's environment without the agent's keys, with your login PATH and
- * nothing that waits for a terminal.
+ * nothing that waits for a terminal. Commands have none: stdin is /dev/null
+ * and they run in a session of their own, so a prompt reads end of input.
  */
 function commandEnv(daemon: Daemon, handle: string): Env {
 	return {
@@ -77,6 +78,12 @@ function commandEnv(daemon: Daemon, handle: string): Env {
 		GH_PROMPT_DISABLED: '1',
 		GH_NO_UPDATE_NOTIFIER: '1',
 		GH_SPINNER_DISABLED: '1',
+		// Tools that would ask (npx "Ok to proceed?", apt, pip) take their
+		// default or fail instead.
+		CI: '1',
+		npm_config_yes: 'true',
+		DEBIAN_FRONTEND: 'noninteractive',
+		PIP_NO_INPUT: '1',
 	};
 }
 
@@ -154,6 +161,7 @@ export async function runCommand(
 		timeoutMs: timeoutSeconds * 1000,
 		stopReason: null,
 		finished: Promise.resolve(''),
+		release: () => {},
 	};
 	daemon.commands.set(stepId, entry);
 	publishStep(daemon, stepId);
@@ -256,16 +264,34 @@ export async function runCommand(
 	})();
 
 	let waitTimer: Timer | null = null;
-	const finishedInTime = await Promise.race([
-		entry.finished.then(() => true),
-		new Promise<false>((resolve) => {
-			waitTimer = setTimeout(() => resolve(false), WAIT_MS);
+	const outcome = await Promise.race([
+		entry.finished.then(() => 'finished' as const),
+		new Promise<'waited' | 'message'>((resolve) => {
+			waitTimer = setTimeout(() => resolve('waited'), WAIT_MS);
+			entry.release = () => resolve('message');
+			// It may have come while the command was starting.
+			if (daemon.workers.get(task.id)?.heard) resolve('message');
 		}),
 	]);
 	if (waitTimer) clearTimeout(waitTimer);
-	if (finishedInTime) return entry.finished;
+	entry.release = () => {};
+	if (outcome === 'finished') return entry.finished;
 	entry.background = true;
+	if (outcome === 'message') {
+		daemon.log('info', 'command left running for a message', {
+			task: task.handle,
+			step: stepId,
+		});
+		return `still running as step ${stepId}: a new message arrived, so it went on in the background. Its result will arrive as a message; stop_command ${stepId} ends it.`;
+	}
 	return `still running as step ${stepId}; its result will arrive as a message. Use read_output to look at it meanwhile, or stop_command to end it.`;
+}
+
+/** Stops `run` waiting on the task's foreground command, which goes on in the background. */
+export function releaseCommands(daemon: Daemon, taskId: number): void {
+	for (const command of daemon.commands.values()) {
+		if (command.taskId === taskId && !command.background) command.release();
+	}
 }
 
 /**
