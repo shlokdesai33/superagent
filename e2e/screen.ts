@@ -110,6 +110,50 @@ export function replay(raw: string): Screen {
 	return { cells, foreign };
 }
 
+const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+
+/**
+ * The rows' text at any size, without colours: cursor moves and clears on a
+ * grid without autowrap, as the UI sets it, where a wide character (CJK,
+ * emoji) takes two columns.
+ */
+export function replayText(
+	raw: string,
+	columns: number,
+	rows: number,
+): string[] {
+	const grid = Array.from({ length: rows }, () =>
+		Array<string>(columns).fill(' '),
+	);
+	let row = 0;
+	let column = 0;
+	const token =
+		// oxlint-disable-next-line no-control-regex
+		/\x1b\[([0-?]*)[ -/]*([@-~])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.|([^\x1b]+)/gs;
+	for (const match of raw.matchAll(token)) {
+		const [, params = '', final, printed] = match;
+		if (printed !== undefined) {
+			for (const { segment } of segmenter.segment(printed)) {
+				if (segment < ' ') continue;
+				const w = Math.max(1, Math.min(2, Bun.stringWidth(segment)));
+				const line = grid[row];
+				if (line && column + w <= columns) {
+					line[column] = segment;
+					if (w === 2) line[column + 1] = '';
+				}
+				column += w;
+			}
+		} else if (final === 'H') {
+			const [y = '1', x = '1'] = params.split(';');
+			row = Number(y || 1) - 1;
+			column = Number(x || 1) - 1;
+		} else if (final === 'J' && params === '2') {
+			for (const line of grid) line.fill(' ');
+		}
+	}
+	return grid.map((line) => line.join(''));
+}
+
 /** A cell as Terminal.app before macOS 26 shows it. */
 export type OldTerminalCell = {
 	ch: string;

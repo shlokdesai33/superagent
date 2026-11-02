@@ -1,4 +1,4 @@
-import { type Line, fit } from '../cells.ts';
+import { type Line, fit, hang } from '../cells.ts';
 
 const KEYS: Array<[string, string]> = [
 	['j k  ↓ ↑', 'move or scroll'],
@@ -12,23 +12,18 @@ const KEYS: Array<[string, string]> = [
 	['?', 'keys'],
 	['esc', 'back · cancel typing'],
 	['q  ctrl-c', 'quit (q on home)'],
+	[
+		'while typing',
+		'enter sends · esc cancels · ctrl-u clears · tab changes the repository',
+	],
 ];
 
-export function keysBody(): Line[] {
-	const lines: Line[] = KEYS.map(([key, words]) => ({
-		segs: [
-			{ t: fit(key, 18), fg: 'fg', b: true },
-			{ t: words, fg: 'dim' },
-		],
-	}));
-	lines.push({
-		segs: [
-			{ t: fit('while typing', 18), fg: 'fg', b: true },
-			{
-				t: 'enter sends · esc cancels · ctrl-u clears · tab changes the repository',
-				fg: 'dim',
-			},
-		],
-	});
-	return lines;
+export function keysBody(content: number): Line[] {
+	return KEYS.flatMap(([key, words]) =>
+		hang(
+			[{ t: fit(key, 18), fg: 'fg', b: true }],
+			[{ t: words, fg: 'dim' }],
+			content,
+		),
+	);
 }
