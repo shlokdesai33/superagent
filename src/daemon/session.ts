@@ -22,14 +22,44 @@ const COMPACTION_PROMPT = `You compact the transcript of an AI agent's session s
 - Commitments made to people
 - IDs worth recalling later: events (#42), threads, and tasks (handles such as t97c)`;
 
-/** A transcript entry, stored as JSON. `reasoning_content` is kept but never sent back. */
+/**
+ * A transcript entry, stored as JSON. `reasoning_content` is kept but never
+ * sent back. A Router batch message's `state` (open tasks, repositories) is
+ * sent only during its own batch: later it's stale.
+ */
 export type Item =
-	| UserMessage
+	| (UserMessage & { state?: string })
 	| (AssistantMessage & { reasoning_content?: string })
 	| ToolMessage;
 
-export function userItem(content: string): UserMessage {
-	return { role: 'user', content };
+export function userItem(content: string, state?: string): Item {
+	return state ? { role: 'user', content, state } : { role: 'user', content };
+}
+
+/** The message an item is sent as; `current` says its batch is still running. */
+export function sendable(item: Item, current: boolean): Message {
+	if (item.role === 'assistant') {
+		const { reasoning_content: _, ...message } = item;
+		return message;
+	}
+	if (item.role === 'user' && item.state !== undefined) {
+		const { state, ...message } = item;
+		return current && typeof message.content === 'string'
+			? { ...message, content: `${message.content}\n\n${state}` }
+			: message;
+	}
+	return item;
+}
+
+/** The sequence number the next appended item gets. */
+export function nextSeq(db: Database, sessionId: number): number {
+	return (
+		(db
+			.query<{ seq: number }, [number]>(
+				'SELECT COALESCE(MAX(seq), 0) AS seq FROM session_items WHERE session_id = ?',
+			)
+			.get(sessionId)?.seq ?? 0) + 1
+	);
 }
 
 /** The Router's one session, created on first start. */
@@ -75,12 +105,15 @@ export function appendItems(
 
 /**
  * The messages for the next call: the system prompt, the compaction summary if
- * there is one, then every item it doesn't cover.
+ * there is one, then every item it doesn't cover. Items from `currentFrom` on
+ * belong to the running batch. Only the end changes from call to call, so
+ * Particle can serve the rest from its prefix cache.
  */
 export function promptMessages(
 	db: Database,
 	sessionId: number,
 	system: string,
+	currentFrom = Number.POSITIVE_INFINITY,
 ): Message[] {
 	const session = db
 		.query<{ summary: string | null; through: number }, [number]>(
@@ -89,15 +122,13 @@ export function promptMessages(
 		.get(sessionId);
 	const messages: Message[] = [{ role: 'system', content: system }];
 	if (session?.summary) {
-		messages.push(userItem(`Summary of earlier work:\n\n${session.summary}`));
+		messages.push({
+			role: 'user',
+			content: `Summary of earlier work:\n\n${session.summary}`,
+		});
 	}
-	for (const { item } of loadItems(db, sessionId, session?.through ?? 0)) {
-		if (item.role === 'assistant') {
-			const { reasoning_content: _, ...message } = item;
-			messages.push(message);
-		} else {
-			messages.push(item);
-		}
+	for (const { seq, item } of loadItems(db, sessionId, session?.through ?? 0)) {
+		messages.push(sendable(item, seq >= currentFrom));
 	}
 	return messages;
 }

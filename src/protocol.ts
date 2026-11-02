@@ -124,6 +124,13 @@ export type RouterState = {
 	/** Events in the mailbox, to be decided together next. */
 	waiting: number;
 	last: { text: string; at: number } | null;
+	/**
+	 * Why the Router isn't deciding its waiting events: no Particle key, or a
+	 * failure it's waiting out until `until` (`null`: until a key is saved).
+	 */
+	held: { reason: string; until: number | null } | null;
+	/** Console messages still in the mailbox, the last 50, oldest first. */
+	pending: number[];
 };
 
 /** Since local midnight. Costs are estimates. */
@@ -142,7 +149,7 @@ export type Usage = {
 export type Health = {
 	channels: Array<{
 		name: string;
-		/** `off`: an optional channel that isn't set up; `detail` says how to enable it. Never a problem. */
+		/** `off`: an optional channel that isn't set up or is turned off; `detail` says what's missing. Never a problem. */
 		state: 'up' | 'connecting' | 'down' | 'off';
 		lastEventAt: number | null;
 		detail: string | null;
@@ -247,6 +254,6 @@ export type Action =
 /** Maps onto a toast: `✓ <subject> · <detail>`. */
 export type ActionResult =
 	| { ok: true; seq: number; subject: string; detail: string | null }
-	| { ok: false; code: string; subject: string; detail: string };
+	| { ok: false; code: string; subject: string; detail: string | null };
 
 export type ErrorBody = { error: { code: string; message: string } };

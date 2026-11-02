@@ -1,13 +1,10 @@
-import type { DataPaths } from './home.ts';
-import type { KeySource, Snapshot } from './protocol.ts';
+import type { Snapshot } from './protocol.ts';
 
 /** The text `superagent status` prints. */
-export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
+export function formatStatus(snapshot: Snapshot): string {
 	const { agent, router, usage, health } = snapshot;
 	const lines = [
 		`Agent running · pid ${agent.pid} · up ${duration(snapshot.now - agent.startedAt)} · version ${agent.version}`,
-		`Data folder: ${paths.home}`,
-		`Log: ${paths.log} · superagent logs prints it`,
 	];
 
 	if (snapshot.tasks.length === 0) {
@@ -37,14 +34,14 @@ export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 	lines.push(`Router: ${routerParts.join(' · ')}`);
 
 	const last = snapshot.console.at(-1);
-	lines.push(
-		last
-			? `Console: last message from ${last.author} at ${clock(last.at)}: ${JSON.stringify(oneLine(last.text))}`
-			: 'Console: no messages yet',
-	);
+	if (last) {
+		lines.push(
+			`Console: last message from ${last.author} at ${clock(last.at)}: ${JSON.stringify(oneLine(last.text))}`,
+		);
+	}
 
 	lines.push(
-		`Usage today: ${usage.calls} model ${usage.calls === 1 ? 'call' : 'calls'} · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens · about $${usage.costUsd.toFixed(2)} (estimate)`,
+		`Usage today: ${usage.calls} model ${usage.calls === 1 ? 'call' : 'calls'} · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens (${usage.cachedTokens.toLocaleString('en-US')} cached input) · about $${usage.costUsd.toFixed(2)} (estimate)`,
 		`Channels: ${health.channels
 			.map(
 				(channel) =>
@@ -52,8 +49,9 @@ export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 			)
 			.join(', ')}`,
 		`Model: ${health.model.name} · ${health.model.state}${health.model.detail ? ` · ${health.model.detail}` : ''}`,
-		`Particle key: ${keyText(health.model.key, paths)}`,
 	);
+	const key = keyText(health.model);
+	if (key) lines.push(`Particle key: ${key}`);
 	for (const problem of health.problems) {
 		lines.push(`Problem: ${problem.text}`);
 		if (problem.fix) lines.push(`  Fix: ${problem.fix}`);
@@ -62,16 +60,18 @@ export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 		lines.push(`Warning: ${warning.text}`);
 		if (warning.fix) lines.push(`  Fix: ${warning.fix}`);
 	}
-	lines.push(`Sandbox: ${health.sandbox}`);
 
 	lines.push(`Machine: ${health.machine.os} · ${health.machine.arch}`);
 	return lines.join('\n');
 }
 
-function keyText(source: KeySource, paths: DataPaths): string {
-	if (source === 'env') return 'from PARTICLE_API_KEY';
-	if (source === 'file') return `from ${paths.particleKey}`;
-	return 'missing; run superagent login particle';
+/** Where the key comes from, only when that's the fix. */
+function keyText(model: Snapshot['health']['model']): string | null {
+	if (model.key === 'missing') return 'missing; run superagent login particle';
+	if (model.key === 'env' && model.state === 'error') {
+		return 'from PARTICLE_API_KEY';
+	}
+	return null;
 }
 
 function clock(at: number): string {

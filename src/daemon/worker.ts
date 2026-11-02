@@ -7,7 +7,7 @@ import type { AssistantMessage, ToolCall } from '../particle/types.ts';
 import { stopCommand } from './commands.ts';
 import { prepareWorktree } from './git.ts';
 import { githubIntros } from './github-threads.ts';
-import { ModelError, callModel, pausedOn } from './model.ts';
+import { ACCOUNT_RETRY_MS, ModelError, callModel, pausedOn } from './model.ts';
 import {
 	type Item,
 	appendItems,
@@ -34,7 +34,6 @@ const EFFORT = 'high';
 const MAX_COMPLETION_TOKENS = 32_000;
 const COMPACT_AT_PROMPT_TOKENS = 300_000;
 const STEP_LIMIT = 500;
-const ACCOUNT_RETRY_MS = 2 * 60_000;
 // Transient failures in a row, each after Particle was healthy again, before
 // the request itself is blamed and the task fails.
 const MAX_TRANSIENT_FAILURES = 3;
