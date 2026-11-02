@@ -389,6 +389,8 @@ export async function pollFollowed(
 				await pollComments(daemon, api, row, 'review');
 				// oxlint-disable-next-line eslint/no-await-in-loop
 				await pollReviews(daemon, api, row);
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await pollCi(daemon, api, row);
 			} else {
 				// oxlint-disable-next-line eslint/no-await-in-loop
 				await pollItem(daemon, api, row);
@@ -612,6 +614,256 @@ async function pollPr(
 			updated,
 		});
 	saveCursor(daemon.db, key, null, response.etag);
+}
+
+const CI_FAILED = new Set([
+	'failure',
+	'timed_out',
+	'cancelled',
+	'action_required',
+	'startup_failure',
+]);
+const CI_PASSED = new Set(['success', 'neutral', 'skipped']);
+
+type CiRun = {
+	id: string | null;
+	name: string;
+	status: string;
+	conclusion: string;
+	url: string;
+};
+type CiStatus = { context: string; state: string; url: string };
+type Ci = {
+	sha: string;
+	runs: CiRun[];
+	statuses: CiStatus[];
+	/** Every commit status, listed or not. */
+	statusTotal: number;
+	combined: string;
+	outcome: 'pending' | 'failure' | 'success' | null;
+	failing: string[];
+	/** The last outcome sent to the task, and for which commit. */
+	sent: { sha: string; outcome: string; key: string } | null;
+};
+
+/**
+ * The checks on a followed PR's head commit: its check runs and commit
+ * statuses, combined into one outcome. A `ci` event goes to the task when
+ * a commit's outcome turns failure or success and differs from the last
+ * one sent for it; a PR with no checks sends none.
+ */
+async function pollCi(
+	daemon: Daemon,
+	api: GitHubApi,
+	row: ItemRow,
+): Promise<void> {
+	const { db } = daemon;
+	const head = db
+		.query<{ head: string | null }, [string]>(
+			'SELECT head_sha AS head FROM github_items WHERE thread_id = ?',
+		)
+		.get(row.id)?.head;
+	if (!head) return;
+	const summary = summaryOf(db, row.id);
+	const known = field(summary, 'ci');
+	const previous = isCi(known) && known.sha === head ? known : null;
+	const base = `/repos/${row.repo}/commits/${head}`;
+
+	// Each listing keeps its ETag for this commit, saved with what it saw in
+	// one transaction below, so a 304 always has the data it stands for.
+	const etagFor = (key: string) => {
+		const cursor = loadCursor(db, key);
+		return previous !== null && cursor?.since === head
+			? (cursor.etag ?? null)
+			: null;
+	};
+	const runsKey = `${row.id}:check-runs`;
+	let runs = previous?.runs ?? [];
+	const runsChanged: CiRun[] = [];
+	let runsEtag = etagFor(runsKey);
+	let total = Infinity;
+	for (
+		let page = 1;
+		runsChanged.length < total && page <= REVIEW_PAGES;
+		page++
+	) {
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		const response = await api.request(
+			'GET',
+			`${base}/check-runs?per_page=${PER_PAGE}&page=${page}`,
+			{ etag: page === 1 ? runsEtag : null },
+		);
+		if (response.status === 304) break;
+		if (page === 1) runsEtag = response.etag;
+		const listed = field(response.body, 'check_runs');
+		const batch = Array.isArray(listed) ? listed : [];
+		total = Number(field(response.body, 'total_count') ?? batch.length);
+		runsChanged.push(
+			...batch.map((run) => ({
+				id: idOf(field(run, 'id')),
+				name: text(run, 'name'),
+				status: text(run, 'status'),
+				conclusion: text(run, 'conclusion'),
+				url: text(run, 'html_url') || text(run, 'details_url'),
+			})),
+		);
+		if (batch.length < PER_PAGE) break;
+	}
+	if (Number.isFinite(total)) runs = runsChanged;
+
+	// The combined state covers every status; the list itself is paged.
+	const statusKey = `${row.id}:status`;
+	let statuses = previous?.statuses ?? [];
+	let combined = previous?.combined ?? 'pending';
+	let statusTotal = previous?.statusTotal ?? statuses.length;
+	let statusEtag = etagFor(statusKey);
+	const listedStatuses: CiStatus[] = [];
+	for (let page = 1; page <= REVIEW_PAGES; page++) {
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		const response = await api.request(
+			'GET',
+			`${base}/status?per_page=${PER_PAGE}&page=${page}`,
+			{ etag: page === 1 ? statusEtag : null },
+		);
+		if (response.status === 304) break;
+		const listed = field(response.body, 'statuses');
+		const batch = Array.isArray(listed) ? listed : [];
+		if (page === 1) {
+			statusEtag = response.etag;
+			combined = text(response.body, 'state') || 'pending';
+			statusTotal = Number(field(response.body, 'total_count') ?? batch.length);
+		}
+		listedStatuses.push(
+			...batch.map((entry) => ({
+				context: text(entry, 'context'),
+				state: text(entry, 'state'),
+				url: text(entry, 'target_url'),
+			})),
+		);
+		statuses = listedStatuses;
+		if (batch.length < PER_PAGE || listedStatuses.length >= statusTotal) {
+			break;
+		}
+	}
+
+	const failing = [
+		...runs
+			.filter(
+				(run) => run.status === 'completed' && CI_FAILED.has(run.conclusion),
+			)
+			.map((run) => run.name),
+		...statuses
+			.filter((entry) => entry.state === 'failure' || entry.state === 'error')
+			.map((entry) => entry.context),
+	];
+	const statusFailed = combined === 'failure' || combined === 'error';
+	if (
+		statusFailed &&
+		!statuses.some(
+			(entry) => entry.state === 'failure' || entry.state === 'error',
+		)
+	) {
+		failing.push('a commit status not listed');
+	}
+	const checks = runs.length + statusTotal;
+	const outcome: Ci['outcome'] =
+		checks === 0
+			? null
+			: runs.some((run) => run.status !== 'completed') ||
+				  (statusTotal > 0 && combined === 'pending')
+				? 'pending'
+				: failing.length > 0
+					? 'failure'
+					: 'success';
+	let sent = previous?.sent ?? null;
+	if (
+		(outcome === 'failure' || outcome === 'success') &&
+		!(sent?.sha === head && sent.outcome === outcome)
+	) {
+		const passed =
+			runs.filter(
+				(run) => run.status === 'completed' && CI_PASSED.has(run.conclusion),
+			).length +
+			(combined === 'success'
+				? statusTotal
+				: statuses.filter((entry) => entry.state === 'success').length);
+		const short = head.slice(0, 7);
+		// A re-run that ends the same way again is a new event.
+		const key = `ci:${row.repo}:${head}:${outcome}:${sent?.sha === head ? Date.now() : 0}`;
+		ingest(daemon, {
+			channel: 'github',
+			externalId: key,
+			thread: { id: row.id, title: row.title, url: row.url, ownable: true },
+			kind: 'ci',
+			author: { name: 'CI', id: null, isBot: false, isSelf: false },
+			text:
+				outcome === 'failure'
+					? `CI failed on ${short}: ${andList(failing)} failed; ${passed} of ${checks} passed. gh pr checks ${row.number} and gh run view --log-failed show why.`
+					: `CI passed on ${short} (${checks} ${checks === 1 ? 'check' : 'checks'})`,
+			mentionsAgent: false,
+			data: {
+				...eventData(row, row.url ?? '', Date.now()),
+				sha: head,
+				outcome,
+				failing: [
+					...runs
+						.filter(
+							(run) =>
+								run.status === 'completed' && CI_FAILED.has(run.conclusion),
+						)
+						.map((run) => ({ name: run.name, id: run.id, url: run.url })),
+					...statuses
+						.filter(
+							(entry) => entry.state === 'failure' || entry.state === 'error',
+						)
+						.map((entry) => ({
+							name: entry.context,
+							id: null,
+							url: entry.url,
+						})),
+				],
+			},
+		});
+		sent = { sha: head, outcome, key };
+	}
+	const ci: Ci = {
+		sha: head,
+		runs,
+		statuses,
+		statusTotal,
+		combined,
+		outcome,
+		failing,
+		sent,
+	};
+	summary.ci = ci;
+	db.transaction(() => {
+		db.query<unknown, Params>(
+			`UPDATE github_items SET summary = $summary, ci_outcome = $outcome
+			WHERE thread_id = $id`,
+		).run({
+			id: row.id,
+			summary: JSON.stringify(summary),
+			outcome: sent?.sha === head ? sent.outcome : null,
+		});
+		saveCursor(db, runsKey, head, runsEtag);
+		saveCursor(db, statusKey, head, statusEtag);
+	})();
+}
+
+// Written by pollCi itself, so its shape is trusted once these hold.
+function isCi(value: unknown): value is Ci {
+	return (
+		typeof field(value, 'sha') === 'string' &&
+		Array.isArray(field(value, 'runs')) &&
+		Array.isArray(field(value, 'statuses'))
+	);
+}
+
+/** `a`, `a and b`, `a, b and c`. */
+function andList(names: string[]): string {
+	if (names.length <= 1) return names[0] ?? '';
+	return `${names.slice(0, -1).join(', ')} and ${names.at(-1) ?? ''}`;
 }
 
 const REVIEW_WORDS: Record<string, string> = {
@@ -905,6 +1157,18 @@ export function githubThreadState(
 		if (item.head) parts.push(`head ${item.head.slice(0, 7)}`);
 		if (summary.draft === true) parts.push('draft');
 		if (summary.mergeable === false) parts.push('has conflicts');
+		const ci = field(summary, 'ci');
+		const outcome = field(ci, 'outcome');
+		if (outcome === 'failure') {
+			const failing = field(ci, 'failing');
+			parts.push(
+				`CI failed: ${Array.isArray(failing) ? failing.map(String).join(', ') : ''}`,
+			);
+		} else if (outcome === 'success') {
+			parts.push('CI passed');
+		} else if (outcome === 'pending') {
+			parts.push('CI running');
+		}
 		const reviews = field(summary, 'reviews');
 		if (typeof reviews === 'object' && reviews !== null) {
 			const entries = Object.entries(reviews);

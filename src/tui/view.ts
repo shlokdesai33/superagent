@@ -15,6 +15,7 @@ import {
 	type Live,
 	type Model,
 	homeItems,
+	linkOf,
 	needsCount,
 	problemCount,
 	stoppable,
@@ -531,6 +532,8 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 		const task = live.tasks.get(screen.handle);
 		const pairs: Array<[string, string]> = [['/', 'write']];
 		if (task?.status === 'needs_you') pairs.push(['enter', 'answer']);
+		const link = task ? linkOf(task) : null;
+		if (link) pairs.push(['o', `open ${link.title}`]);
 		if (task && stoppable(task))
 			pairs.push(['s s', task.status === 'failed' ? 'dismiss' : 'stop']);
 		pairs.push(['esc', 'back']);
