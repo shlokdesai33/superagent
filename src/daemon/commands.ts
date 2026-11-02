@@ -15,6 +15,7 @@ import {
 
 const WAIT_MS = 30_000;
 const KILL_AFTER_MS = 5_000;
+const ABANDON_AFTER_MS = 1_000;
 const MAX_LOG_BYTES = 10 * 1024 * 1024;
 const RESULT_HEAD_LINES = 20;
 const RESULT_TAIL_LINES = 100;
@@ -162,22 +163,34 @@ export async function runCommand(
 		stopReason: null,
 		finished: Promise.resolve(''),
 		release: () => {},
+		killed: () => {},
 	};
 	daemon.commands.set(stepId, entry);
 	publishStep(daemon, stepId);
 	taskChanged(daemon, task.id);
 
+	// A process that left the group (setsid, a daemon) can hold the output
+	// open after the group is killed; then the output stops being read.
+	let left = false;
+	const abandoned = Promise.withResolvers<false>();
+	entry.killed = () =>
+		setTimeout(() => abandoned.resolve(false), ABANDON_AFTER_MS);
+
 	let killTimer: Timer | null = null;
 	const timeout = setTimeout(() => {
 		entry.stopReason ??= 'timed out';
 		signalGroup(pgid, 'SIGTERM');
-		killTimer = setTimeout(() => signalGroup(pgid, 'SIGKILL'), KILL_AFTER_MS);
+		killTimer = setTimeout(() => {
+			signalGroup(pgid, 'SIGKILL');
+			entry.killed();
+		}, KILL_AFTER_MS);
 	}, timeoutSeconds * 1000);
 
 	const sink = Bun.file(path).writer();
 	let written = 0;
 	let truncated = false;
 	const write = async (text: string) => {
+		if (left) return;
 		const bytes = Buffer.from(text);
 		const room = MAX_LOG_BYTES - written;
 		if (room <= 0) {
@@ -190,20 +203,42 @@ export async function runCommand(
 		written += part.length;
 	};
 	// The log file holds output with the agent's keys already redacted.
+	const cancels: Array<() => Promise<void>> = [];
 	const pump = async (stream: ReadableStream<Uint8Array>) => {
+		const reader = stream.getReader();
+		cancels.push(() => reader.cancel());
 		const decoder = new TextDecoder();
 		let held = '';
-		for await (const chunk of stream) {
-			const text = held + decoder.decode(chunk, { stream: true });
+		for (;;) {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			const { done, value } = await reader.read();
+			if (done || left) break;
+			const text = held + decoder.decode(value, { stream: true });
 			const end = safeCut(daemon.secrets, text);
 			held = text.slice(end);
+			// oxlint-disable-next-line eslint/no-await-in-loop
 			await write(redact(daemon.secrets, text.slice(0, end)));
 		}
 		await write(redact(daemon.secrets, held + decoder.decode()));
 	};
 
 	entry.finished = (async () => {
-		await Promise.all([pump(child.stdout), pump(child.stderr), child.exited]);
+		const pumps = Promise.all([pump(child.stdout), pump(child.stderr)]).then(
+			() => true,
+		);
+		const [read] = await Promise.all([
+			Promise.race([pumps, abandoned.promise]),
+			child.exited,
+		]);
+		if (!read) {
+			left = true;
+			// Open reads would keep the daemon from exiting.
+			for (const cancel of cancels) cancel().catch(() => {});
+			pumps.catch(() => {});
+			await sink.write(
+				'\n[killed, but a process it started outside its process group still holds its output and may still be running]\n',
+			);
+		}
 		if (sandboxed) SandboxManager.cleanupAfterCommand();
 		clearTimeout(timeout);
 		if (killTimer) clearTimeout(killTimer);
@@ -414,10 +449,10 @@ export async function stopCommand(
 	if (!entry) return;
 	entry.stopReason ??= reason;
 	signalGroup(entry.pgid, 'SIGTERM');
-	const kill = setTimeout(
-		() => signalGroup(entry.pgid, 'SIGKILL'),
-		KILL_AFTER_MS,
-	);
+	const kill = setTimeout(() => {
+		signalGroup(entry.pgid, 'SIGKILL');
+		entry.killed();
+	}, KILL_AFTER_MS);
 	await entry.finished.catch(() => '');
 	clearTimeout(kill);
 }

@@ -3,7 +3,8 @@
 // at once, with no terminal to fall back on; an @ note to a task blocked on a
 // silent command reaches its Worker within seconds, the command going on in
 // the background under its own timeout, and the task view shows the note
-// read. Run with `bun run e2e`; it exits non-zero if a check fails.
+// read; and a timeout ends a command whose helper left its process group.
+// Run with `bun run e2e`; it exits non-zero if a check fails.
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,6 +28,9 @@ const PROBE = `tty=no; [ -t 0 ] && tty=stdin; (exec 3</dev/tty) 2>/dev/null && t
 // Stands in for a browser that never returns.
 const HANG = 'echo launching; sleep 60';
 const HANG_TIMEOUT_S = 10;
+// A helper that leaves the process group, like a daemon, and keeps the
+// command's output open.
+const ESCAPE = `setsid sh -c 'exec sleep 117' & sleep 60`;
 
 const workers: Record<string, (request: FakeRequest) => FakeReply> = {
 	prompter: (request) =>
@@ -41,6 +45,16 @@ const workers: Record<string, (request: FakeRequest) => FakeReply> = {
 						{ name: 'run', args: { command: PROMPT } },
 						{ name: 'run', args: { command: PROBE } },
 					],
+				},
+	escaper: (request) =>
+		request.called.includes('run')
+			? {
+					content: 'Done.',
+					calls: [{ name: 'finish', args: { result: 'Escaped' } }],
+				}
+			: {
+					content: 'Starting a daemon.',
+					calls: [{ name: 'run', args: { command: ESCAPE, timeout_s: 2 } }],
 				},
 	blocker: (request) => {
 		if (!request.called.includes('run')) {
@@ -252,6 +266,23 @@ try {
 		'the call after the command was not run',
 		!existsSync(join(detail.workDir, 'after.txt')),
 	);
+
+	// 4. Its timeout ends a command whose helper left the process group.
+	process.stdout.write('\nA helper outside the process group\n');
+	const escapeAt = Date.now();
+	await agent.action({ type: 'send_console', text: 'please run escaper' });
+	const escaper = await taskLine(
+		'the escaper finished',
+		(task) => task.title === 'escaper' && task.status === 'done',
+	);
+	const [escaped] = workerRequests(escaper.handle)[1]?.results ?? [];
+	check(
+		'the command ends at its timeout though a helper holds its output',
+		Date.now() - escapeAt < 20_000 &&
+			(escaped ?? '').includes('timed out') &&
+			(escaped ?? '').includes('outside its process group'),
+		escaped?.split('\n')[0],
+	);
 } catch (error) {
 	failures += 1;
 	process.stdout.write(
@@ -267,6 +298,7 @@ try {
 		);
 	});
 	particle.stop();
+	Bun.spawnSync(['pkill', '-f', 'sleep 117']);
 }
 
 process.stdout.write(failures === 0 ? '\nall checks passed\n' : '\n');

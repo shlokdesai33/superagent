@@ -138,6 +138,8 @@ export type RunningCommand = {
 	background: boolean;
 	/** Makes `run` stop waiting now, for a message; a no-op once it has. */
 	release: () => void;
+	/** Call after SIGKILL to its group: output still open a second later isn't waited for. */
+	killed: () => void;
 	startedAt: number;
 	/** Its `timeout_s`. */
 	timeoutMs: number;
