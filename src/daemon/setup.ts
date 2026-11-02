@@ -217,22 +217,26 @@ function osName(): string {
 		const version = swVers('-productVersion');
 		return version ? `${name} ${version}` : name;
 	}
+	const fields = osRelease();
+	const name =
+		fields.get('PRETTY_NAME') ??
+		[fields.get('NAME'), fields.get('VERSION_ID')].filter(Boolean).join(' ');
+	return name || `Linux ${release()}`;
+}
+
+/** The fields of `/etc/os-release`; empty when there's none. */
+export function osRelease(): Map<string, string> {
 	try {
-		const fields = new Map(
+		return new Map(
 			readFileSync('/etc/os-release', 'utf8')
 				.split('\n')
 				.map((line) => line.match(/^([A-Z_]+)=("?)(.*)\2$/))
 				.filter((match) => match !== null)
-				.map((match) => [match[1], match[3]]),
+				.map((match): [string, string] => [match[1] ?? '', match[3] ?? '']),
 		);
-		const name =
-			fields.get('PRETTY_NAME') ??
-			[fields.get('NAME'), fields.get('VERSION_ID')].filter(Boolean).join(' ');
-		if (name) return name;
 	} catch {
-		// No os-release; fall back to the kernel.
+		return new Map();
 	}
-	return `Linux ${release()}`;
 }
 
 function swVers(flag: string): string {

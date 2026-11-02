@@ -14,7 +14,7 @@ const PROACTIVE: Record<Health['proactive'], string> = {
 
 const SANDBOX: Record<Health['sandbox'], string> = {
 	off: 'commands run unsandboxed',
-	on: 'commands run in the sandbox',
+	on: 'commands write only inside their task',
 	unavailable: 'the sandbox is unavailable',
 };
 
@@ -68,6 +68,17 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 				],
 				right: [{ t: ago(now - problem.since), fg: 'faint' }],
 			});
+			if (problem.fix) {
+				for (const segs of wrap(
+					[
+						{ t: 'fix: ', fg: 'faint' },
+						{ t: problem.fix, fg: 'dim' },
+					],
+					measure - 2,
+				)) {
+					lines.push({ segs: [{ t: '  ' }, ...segs] });
+				}
+			}
 		}
 		for (const task of failed) {
 			lines.push({
