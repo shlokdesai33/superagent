@@ -1,10 +1,12 @@
 import type { Problem } from '../protocol.ts';
-import { stopCommand } from './commands.ts';
+import { statSync } from 'node:fs';
+import { commandLog, stopCommand } from './commands.ts';
 import { ingest } from './ingest.ts';
 import { pauseTask } from './tasks.ts';
 import { watchdogMs } from './scale.ts';
 import { type Daemon, type Params, cut, dayStart, health } from './state.ts';
 import { type Verdict, repeatedCalls, reviewTask } from './watchdog-review.ts';
+import { SLOT } from './worker.ts';
 
 const TICK_MS = watchdogMs(60_000);
 // Recovery's own effects settle before anything is judged.
@@ -31,6 +33,18 @@ const REVIEW_EVERY_MS = watchdogMs(30 * 60_000);
 const QUIET_AFTER_PROGRESSING = 40;
 const QUIET_AFTER_NOTE = 20;
 const QUESTION_CHARS = 300;
+const SILENT_MS = watchdogMs(15 * 60_000);
+const LONG_COMMAND_MS = watchdogMs(2 * 60 * 60_000);
+const IDLE_MS = watchdogMs(30 * 60_000);
+const WAITING_ON_NOTHING_MS = watchdogMs(60 * 60_000);
+const CHANNEL_OFF_MS = watchdogMs(30 * 60_000);
+const SLOT_WAIT_MS = watchdogMs(30 * 60_000);
+const CHURN_WINDOW_MS = watchdogMs(60 * 60_000);
+const CHURN_CALLS = 120;
+// Unscaled: restarts take real time, even in tests.
+const CRASH_WINDOW_MS = 60 * 60_000;
+const CRASHES = 3;
+const STARTS_KEPT = 10;
 
 /** A stored finding: one check's condition that holds, acted on once. */
 export type Finding = {
@@ -91,7 +105,13 @@ const FINDING_COLUMNS = `id, key, task_id AS taskId, opened_at AS openedAt, stag
 export function startWatchdog(daemon: Daemon): Watchdog {
 	const stopping = new AbortController();
 	const inReview = new Map<number, Promise<void>>();
-	const checks = [...CHECKS, reviews(stopping.signal, inReview)];
+	const starts = recordStart(daemon, Date.now());
+	const checks = [
+		...CHECKS,
+		commands(),
+		reviews(stopping.signal, inReview),
+		crashes(starts),
+	];
 	const failing = new Map<string, number>();
 	let timer: Timer | null = null;
 	// When the previous tick ran; before the first, as if one ran a tick
@@ -168,6 +188,7 @@ export function startWatchdog(daemon: Daemon): Watchdog {
 			timer = null;
 			stopping.abort();
 			await Promise.all(inReview.values());
+			markCleanStop(daemon);
 		},
 	};
 }
@@ -355,8 +376,22 @@ const router: Check = {
 	name: 'router',
 	timed: true,
 	run: (round) => {
-		const { daemon, tickMs } = round;
+		const { daemon, now, tickMs } = round;
 		const { batch, backoffUntil } = daemon.router;
+		const calls =
+			daemon.db
+				.query<{ count: number }, [number]>(
+					"SELECT COUNT(*) AS count FROM model_calls WHERE purpose = 'router' AND started_at >= ?",
+				)
+				.get(now - CHURN_WINDOW_MS)?.count ?? 0;
+		if (calls >= CHURN_CALLS) {
+			round.report(
+				round.hold('router:churn'),
+				'agent',
+				`The Router made ${calls} calls in the last hour`,
+				'see daemon.log for the events it was deciding',
+			);
+		}
 		if (batch !== null && round.since(batch.since) > BATCH_STUCK_MS) {
 			round.report(
 				round.hold('router:batch'),
@@ -456,31 +491,276 @@ const github: Check = {
 	},
 };
 
-/** Commands still running past their own timeout, whose timer should have ended them. */
-const commands: Check = {
-	name: 'commands',
+/**
+ * Running commands: one past its own timeout is killed (its timer should have
+ * ended it), one silent for 15 minutes gets its Worker a note, and one running
+ * for 2 hours is reported.
+ */
+function commands(): Check {
+	// When each running command's log last grew, by step.
+	const heard = new Map<number, { size: number; at: number }>();
+	return {
+		name: 'commands',
+		timed: true,
+		run: (round) => {
+			const { daemon, now } = round;
+			for (const step of heard.keys()) {
+				if (!daemon.commands.has(step)) heard.delete(step);
+			}
+			for (const command of daemon.commands.values()) {
+				const step = daemon.db
+					.query<{ handle: string; text: string }, [number]>(
+						'SELECT t.handle, s.text FROM steps s JOIN tasks t ON t.id = s.task_id WHERE s.id = ?',
+					)
+					.get(command.stepId);
+				if (!step) continue;
+				// Its timer counts awake time too, so a sleep doesn't make it late.
+				const ran = round.since(command.startedAt);
+				if (ran - command.timeoutMs >= PAST_DEADLINE_MS) {
+					const finding = round.hold(
+						`commands:${command.stepId}:past-timeout`,
+						command.taskId,
+					);
+					if (finding.stage === null) {
+						command.stopReason ??= 'timed out';
+						void stopCommand(daemon, command.stepId);
+						round.stage(finding, 'killed');
+					}
+					continue;
+				}
+				if (ran >= LONG_COMMAND_MS) {
+					round.report(
+						round.hold(`commands:${command.stepId}:long`, command.taskId),
+						'task',
+						`${step.handle}'s ${step.text} has run ${minutes(ran)} and holds a worker slot`,
+						`send @${step.handle} a note, or stop the task`,
+					);
+				}
+				let size = 0;
+				try {
+					size = statSync(commandLog(daemon, step.handle, command.stepId)).size;
+				} catch {
+					// Not written yet.
+				}
+				const last = heard.get(command.stepId);
+				if (!last || last.size !== size) {
+					heard.set(command.stepId, { size, at: now });
+					continue;
+				}
+				const thinking =
+					(daemon.workers.get(command.taskId)?.callSince ?? null) !== null;
+				if (thinking || round.since(last.at) < SILENT_MS) continue;
+				const finding = round.hold(
+					`commands:${command.stepId}:silent`,
+					command.taskId,
+				);
+				if (finding.stage !== null) continue;
+				ingest(daemon, {
+					channel: 'console',
+					externalId: null,
+					thread: null,
+					kind: 'note',
+					author: { name: 'watchdog', id: null, isBot: false, isSelf: false },
+					text: `step ${command.stepId} (${step.text}) has printed nothing for ${minutes(round.since(last.at))}. If it's stuck, stop_command ${command.stepId}.`,
+					mentionsAgent: false,
+					taskId: command.taskId,
+				});
+				round.stage(finding, 'noted');
+			}
+		},
+	};
+}
+
+/**
+ * Tasks that will never move on by themselves: idle without saying why,
+ * waiting on something nothing can deliver, waiting on GitHub while it's off
+ * or down, or waiting for a worker slot. Reported, never woken.
+ */
+const waits: Check = {
+	name: 'waits',
 	timed: true,
 	run: (round) => {
 		const { daemon } = round;
-		for (const command of daemon.commands.values()) {
-			// Its timer counts awake time too, so a sleep doesn't make it late.
-			if (
-				round.since(command.startedAt) - command.timeoutMs <
-				PAST_DEADLINE_MS
-			) {
+		const { db } = daemon;
+		for (const task of db
+			.query<{ id: number; handle: string; waitingOn: string | null }, []>(
+				"SELECT id, handle, waiting_on AS waitingOn FROM tasks WHERE state = 'active'",
+			)
+			.all()) {
+			const live = daemon.workers.get(task.id);
+			if (!live) continue;
+			const fix = `send @${task.handle} a note, or stop it`;
+			if (live.blockedOn === SLOT) {
+				const finding = round.hold(`waits:${task.handle}:slot`, task.id);
+				if (round.age(finding) >= SLOT_WAIT_MS) {
+					round.report(
+						finding,
+						'task',
+						`${task.handle} has waited ${minutes(round.age(finding))} for a worker slot`,
+						slotHolders(daemon, round),
+					);
+				}
 				continue;
 			}
-			const finding = round.hold(
-				`commands:${command.stepId}:past-timeout`,
-				command.taskId,
+			if (!live.asleep || live.blockedOn !== null) continue;
+			const running = [...daemon.commands.values()].some(
+				(command) => command.taskId === task.id,
 			);
-			if (finding.stage !== null) continue;
-			command.stopReason ??= 'timed out';
-			void stopCommand(daemon, command.stepId);
-			round.stage(finding, 'killed');
+			if (running) continue;
+			const inbox =
+				db
+					.query<{ count: number }, [number]>(
+						"SELECT COUNT(*) AS count FROM events WHERE route = 'task' AND task_id = ? AND consumed_at IS NULL",
+					)
+					.get(task.id)?.count ?? 0;
+			if (inbox > 0) continue;
+			if (task.waitingOn === null) {
+				const last = db
+					.query<{ at: number; calls: number }, [number]>(
+						`SELECT i.at, json_array_length(json_extract(i.item, '$.tool_calls')) AS calls
+						FROM session_items i JOIN sessions s ON s.id = i.session_id
+						WHERE s.task_id = ? AND json_extract(i.item, '$.role') = 'assistant'
+						ORDER BY i.seq DESC LIMIT 1`,
+					)
+					.get(task.id);
+				// Its last response called no tools, even after the nudge.
+				if (!last || (last.calls ?? 0) > 0 || round.since(last.at) < IDLE_MS) {
+					continue;
+				}
+				round.report(
+					round.hold(`waits:${task.handle}:idle`, task.id),
+					'task',
+					`${task.handle} stopped without finishing or asking`,
+					fix,
+				);
+				continue;
+			}
+			const followed = db
+				.query<{ channel: string }, [number]>(
+					'SELECT channel FROM threads WHERE owner_task_id = ?',
+				)
+				.all(task.id);
+			if (followed.length === 0) {
+				const finding = round.hold(`waits:${task.handle}:nothing`, task.id);
+				if (round.age(finding) >= WAITING_ON_NOTHING_MS) {
+					round.report(
+						finding,
+						'task',
+						`${task.handle} waits on "${task.waitingOn}" but nothing will tell it`,
+						fix,
+					);
+				}
+				continue;
+			}
+			const channel = daemon.github;
+			if (
+				followed.some((thread) => thread.channel === 'github') &&
+				(channel.state === 'off' || channel.state === 'down')
+			) {
+				const finding = round.hold(`waits:${task.handle}:channel`, task.id);
+				if (round.age(finding) >= CHANNEL_OFF_MS) {
+					round.report(
+						finding,
+						'task',
+						`${task.handle} waits on ${task.waitingOn}, but GitHub is ${channel.state}`,
+						channel.detail,
+					);
+				}
+			}
 		}
 	},
 };
+
+/** What holds the worker slots: tasks with a model call or command running. */
+function slotHolders(daemon: Daemon, round: Round): string {
+	const holders: string[] = [];
+	for (const command of daemon.commands.values()) {
+		const step = daemon.db
+			.query<{ handle: string; text: string }, [number]>(
+				'SELECT t.handle, s.text FROM steps s JOIN tasks t ON t.id = s.task_id WHERE s.id = ?',
+			)
+			.get(command.stepId);
+		if (step) {
+			holders.push(
+				`${step.handle}: ${cut(step.text, 60)}, ${minutes(round.since(command.startedAt))}`,
+			);
+		}
+	}
+	return holders.length > 0
+		? `held by ${holders.join(' · ')}`
+		: 'every slot is busy with a model call';
+}
+
+type Start = { at: number; clean: boolean };
+
+/** Records this start in `meta.starts`, keeping the last 10. */
+function recordStart(daemon: Daemon, at: number): Start[] {
+	const starts = readStarts(daemon);
+	starts.push({ at, clean: false });
+	const kept = starts.slice(-STARTS_KEPT);
+	writeStarts(daemon, kept);
+	return kept;
+}
+
+/** An orderly stop: the next start doesn't follow a crash. */
+function markCleanStop(daemon: Daemon): void {
+	const starts = readStarts(daemon);
+	const last = starts.at(-1);
+	if (!last) return;
+	last.clean = true;
+	writeStarts(daemon, starts);
+}
+
+function readStarts(daemon: Daemon): Start[] {
+	const value = daemon.db
+		.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'starts'")
+		.get()?.value;
+	if (value === undefined) return [];
+	const parsed: unknown = JSON.parse(value);
+	return Array.isArray(parsed)
+		? parsed.flatMap((entry: unknown) =>
+				typeof entry === 'object' &&
+				entry !== null &&
+				'at' in entry &&
+				typeof entry.at === 'number' &&
+				'clean' in entry &&
+				typeof entry.clean === 'boolean'
+					? [{ at: entry.at, clean: entry.clean }]
+					: [],
+			)
+		: [];
+}
+
+function writeStarts(daemon: Daemon, starts: Start[]): void {
+	daemon.db
+		.query<unknown, [string]>(
+			"INSERT INTO meta (key, value) VALUES ('starts', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+		)
+		.run(JSON.stringify(starts));
+}
+
+/** Three starts after a crash within an hour. Restarting is the service manager's job. */
+function crashes(starts: Start[]): Check {
+	return {
+		name: 'crashes',
+		timed: false,
+		run: (round) => {
+			const recent = starts.filter(
+				(start, index) =>
+					index > 0 &&
+					starts[index - 1]?.clean === false &&
+					round.now - start.at < CRASH_WINDOW_MS,
+			).length;
+			if (recent < CRASHES) return;
+			round.report(
+				round.hold('crashes:loop'),
+				'agent',
+				`The agent crashed ${recent} times in the last hour`,
+				'see daemon.log',
+			);
+		},
+	};
+}
 
 /**
  * Tasks spending model calls without progress. The backstop needs no model:
@@ -707,7 +987,7 @@ function applyVerdict(
 	if (paused) settle('paused', null);
 }
 
-const CHECKS: Check[] = [workers, router, github, commands, runaway];
+const CHECKS: Check[] = [workers, router, github, waits, runaway];
 
 function minutes(ms: number): string {
 	const total = Math.max(1, Math.round(ms / 60_000));
