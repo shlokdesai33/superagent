@@ -14,6 +14,7 @@ import {
 } from './github.ts';
 import { pollFollowed } from './github-threads.ts';
 import { type Delivery, startDelivery } from './github-delivery.ts';
+import { type Watchdog, startWatchdog } from './watchdog.ts';
 import { createLog } from './log.ts';
 import {
 	NO_API_KEY,
@@ -63,8 +64,10 @@ export async function runDaemon(options: {
 	let stopKeyWatch: (() => void) | null = null;
 	let github: GitHubClient | null = null;
 	let delivery: Delivery | null = null;
+	let watchdog: Watchdog | null = null;
 	let sandboxStarted = false;
 	const teardown = async () => {
+		await watchdog?.stop();
 		if (daemon) daemon.stopping = true;
 		stopKeyWatch?.();
 		await delivery?.stop();
@@ -178,7 +181,7 @@ export async function runDaemon(options: {
 							since: startedAt,
 						}
 					: { state: 'ok', detail: null, since: null },
-			router: { batch: null, wake: () => {} },
+			router: { batch: null, backoffUntil: null, wake: () => {} },
 			paths,
 			loginPath: commandPath,
 			sandbox,
@@ -190,6 +193,7 @@ export async function runDaemon(options: {
 			calls: { workers: 0, waiters: new Set() },
 			taskUpdates: { pending: new Set(), timer: null },
 			stopping: false,
+			watchdog: { lastCheckAt: null },
 		};
 		installWorkers(context);
 		recoverRouter(context);
@@ -225,6 +229,7 @@ export async function runDaemon(options: {
 	running.githubApi = github;
 	delivery = startDelivery(running, github, githubRetryMs());
 	running.wakeDelivery = delivery.wake;
+	watchdog = startWatchdog(running);
 
 	const signal = await new Promise<NodeJS.Signals>((resolve) => {
 		process.once('SIGINT', resolve);

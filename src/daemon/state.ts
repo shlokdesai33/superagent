@@ -14,7 +14,7 @@ import type {
 	Warning,
 } from '../protocol.ts';
 import type { Feed } from './feed.ts';
-import type { GitHubApi, GitHubLive } from './github.ts';
+import type { GitHubClient, GitHubLive } from './github.ts';
 import type { Log } from './log.ts';
 import type { SandboxStatus } from './sandbox.ts';
 import type { Config } from './setup.ts';
@@ -42,7 +42,7 @@ export type Daemon = {
 	/** The GitHub channel's health; `off` unless gh is installed and logged in. */
 	github: GitHubLive;
 	/** GitHub's REST client, once the channel runs. */
-	githubApi: GitHubApi | null;
+	githubApi: GitHubClient | null;
 	/** Tells the GitHub delivery loop a reply is waiting. */
 	wakeDelivery: () => void;
 	/** `POST /v1/events` is on (`--script-channel`), for tests. */
@@ -78,12 +78,21 @@ export type Daemon = {
 	taskUpdates: { pending: Set<number>; timer: Timer | null };
 	/** Set once shutdown starts, so ended loops aren't restarted. */
 	stopping: boolean;
+	watchdog: WatchdogLive;
+};
+
+/** What health shows of the Watchdog; its findings are in SQLite. */
+export type WatchdogLive = {
+	/** The last round of checks. */
+	lastCheckAt: number | null;
 };
 
 /** What the Router loop is doing right now; the rest of its state is in SQLite. */
 export type RouterLive = {
 	/** The open batch, while the Router is deciding. */
 	batch: { id: number; since: number; size: number } | null;
+	/** When its backoff after a failure ends, while it's backing off. */
+	backoffUntil: number | null;
 	/** Tells the Router loop the mailbox may have changed. */
 	wake: () => void;
 };
@@ -97,6 +106,8 @@ export type WorkerLive = {
 	wake: () => void;
 	/** When its model call started, while one is running. */
 	callSince: number | null;
+	/** Sleeping until woken, with nothing to do as far as it knows. */
+	asleep: boolean;
 	/** Holds a working slot for the current turn. */
 	turn: boolean;
 	/** Why it can't go on: `a free worker slot`, `Particle (out of credits)`. */
@@ -111,6 +122,9 @@ export type RunningCommand = {
 	pgid: number;
 	/** Set once `run` stops waiting; its end then arrives as `command_done`. */
 	background: boolean;
+	startedAt: number;
+	/** Its `timeout_s`. */
+	timeoutMs: number;
 	/** Why it was ended early, if it was. */
 	stopReason: 'stopped' | 'timed out' | null;
 	/** Resolves with the tool result once the command has ended and its step is stored. */
@@ -293,6 +307,32 @@ export function health(daemon: Daemon): Health {
 			since: failed.at,
 		});
 	}
+	// Open Watchdog findings that report.
+	for (const finding of daemon.db
+		.query<
+			{
+				key: string;
+				kind: Problem['kind'];
+				text: string;
+				fix: string | null;
+				since: number;
+			},
+			[]
+		>(
+			`SELECT key, problem_kind AS kind, text, fix, opened_at AS since
+			FROM watchdog_findings
+			WHERE state = 'open' AND problem_kind IS NOT NULL AND text IS NOT NULL
+			ORDER BY id`,
+		)
+		.all()) {
+		problems.push({
+			id: finding.key,
+			kind: finding.kind,
+			text: finding.text,
+			fix: finding.fix,
+			since: finding.since,
+		});
+	}
 	if (daemon.missingIdentity.length > 0) {
 		warnings.push({
 			id: 'git-identity',
@@ -329,6 +369,15 @@ export function health(daemon: Daemon): Health {
 		warnings,
 		machine: daemon.machine,
 		sandbox: sandbox.state,
+		watchdog: {
+			lastCheckAt: daemon.watchdog.lastCheckAt,
+			reviewsToday:
+				daemon.db
+					.query<{ count: number }, [number]>(
+						"SELECT COUNT(*) AS count FROM model_calls WHERE purpose = 'watchdog' AND started_at >= ?",
+					)
+					.get(dayStart(Date.now()))?.count ?? 0,
+		},
 	};
 }
 

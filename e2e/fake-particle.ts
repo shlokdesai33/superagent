@@ -20,6 +20,8 @@ export type FakeReply = {
 	calls?: Array<{ name: string; args: Record<string, unknown> }>;
 	/** The stream ends without a finish reason or `[DONE]`: a dropped connection. */
 	broken?: boolean;
+	/** Wall time before the answer starts, like a slow model. */
+	delayMs?: number;
 };
 
 export type FakeParticle = {
@@ -99,7 +101,9 @@ export function startFakeParticle(
 			}
 			const fake = describe(body);
 			requests.push(fake);
-			return stream(id, body, respond(fake));
+			const reply = respond(fake);
+			if (reply.delayMs) await Bun.sleep(reply.delayMs);
+			return stream(id, body, reply);
 		},
 	});
 	return {
