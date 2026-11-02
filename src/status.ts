@@ -51,7 +51,11 @@ export function formatStatus(snapshot: Snapshot, home: string): string {
 			.join(', ')}`,
 		`Model: ${health.model.name} · ${health.model.state}${health.model.detail ? ` · ${health.model.detail}` : ''}`,
 	);
-	for (const problem of health.problems) lines.push(`Problem: ${problem.text}`);
+	for (const problem of health.problems) {
+		lines.push(`Problem: ${problem.text}`);
+		if (problem.fix) lines.push(`  Fix: ${problem.fix}`);
+	}
+	lines.push(`Sandbox: ${health.sandbox}`);
 
 	const tools = Object.entries(health.machine.tools);
 	const missing = tools.filter(([, found]) => !found).map(([tool]) => tool);
