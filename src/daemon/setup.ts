@@ -20,17 +20,6 @@ export class StartupError extends Error {
 // sun_path sizes, including the terminating NUL.
 const SOCKET_PATH_LIMIT = process.platform === 'darwin' ? 104 : 108;
 
-const MACHINE_TOOLS = [
-	'git',
-	'gh',
-	'rg',
-	'jq',
-	'bun',
-	'node',
-	'python3',
-	'docker',
-];
-
 export function createDataFolder(paths: DataPaths): void {
 	// Only you can read it: the key file and command logs hold API keys.
 	mkdirSync(paths.home, { recursive: true, mode: 0o700 });
@@ -243,8 +232,8 @@ export function loadConfig(path: string): Config {
 }
 
 /**
- * Which tools are on `path`, the PATH commands and the daemon's git get.
- * Fails without `bash`, which every command runs in, or a working `git`.
+ * The OS and architecture. Fails without `bash`, which every command runs
+ * in, or a working `git`, on `path`, the PATH commands and the daemon's git get.
  */
 export function gatherMachineFacts(path: string): MachineFacts {
 	if (Bun.which('bash', { PATH: path }) === null) {
@@ -252,7 +241,7 @@ export function gatherMachineFacts(path: string): MachineFacts {
 			'The agent needs bash on PATH; install it and start again',
 		);
 	}
-	if (!installed('git', path)) {
+	if (!gitInstalled(path)) {
 		const fix =
 			process.platform === 'darwin'
 				? 'xcode-select --install'
@@ -261,37 +250,25 @@ export function gatherMachineFacts(path: string): MachineFacts {
 			`The agent needs git on PATH. Install it (${fix}) and start again`,
 		);
 	}
-	return {
-		os: osName(),
-		arch: process.arch,
-		tools: Object.fromEntries(
-			MACHINE_TOOLS.map((tool) => [tool, installed(tool, path)]),
-		),
-	};
+	return { os: osName(), arch: process.arch };
 }
 
-// On macOS these exist in /usr/bin even without the Command Line Tools, as
-// stubs that open an install dialog and fail.
-const MACOS_STUBS = new Set(['/usr/bin/git', '/usr/bin/python3']);
+// On macOS it exists even without the Command Line Tools, as a stub that
+// opens an install dialog and fails.
+const MACOS_GIT_STUB = '/usr/bin/git';
 
-function installed(tool: string, path: string): boolean {
-	const found = Bun.which(tool, { PATH: path });
+function gitInstalled(path: string): boolean {
+	const found = Bun.which('git', { PATH: path });
 	if (found === null) return false;
-	if (process.platform !== 'darwin' || !MACOS_STUBS.has(found)) return true;
-	return developerToolsInstalled();
-}
-
-let developerTools: boolean | null = null;
-
-/** Whether `xcode-select -p` finds the developer tools; it never opens the dialog. */
-function developerToolsInstalled(): boolean {
-	developerTools ??=
+	if (process.platform !== 'darwin' || found !== MACOS_GIT_STUB) return true;
+	// `xcode-select -p` finds the developer tools without opening the dialog.
+	return (
 		Bun.spawnSync(['/usr/bin/xcode-select', '-p'], {
 			stdin: 'ignore',
 			stdout: 'ignore',
 			stderr: 'ignore',
-		}).exitCode === 0;
-	return developerTools;
+		}).exitCode === 0
+	);
 }
 
 function osName(): string {
