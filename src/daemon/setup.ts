@@ -91,13 +91,17 @@ function isAlive(pid: number): boolean {
 }
 
 export type Config = {
-	repos: Array<{ name: string; path: string }>;
+	/** `githubRepo` (`owner/name`) overrides the GitHub name read from `origin`. */
+	repos: Array<{ name: string; path: string; githubRepo?: string }>;
 	maxWorkingTasks: number;
+	/** `false` turns GitHub off even when gh is logged in. */
+	github: boolean;
 };
 
 const DEFAULT_CONFIG: Config = {
 	repos: [],
 	maxWorkingTasks: 4,
+	github: true,
 };
 
 /**
@@ -152,7 +156,8 @@ export function loadConfig(path: string): Config {
 		text = readFileSync(path, 'utf8');
 	} catch (error) {
 		if (errorCode(error) !== 'ENOENT') throw error;
-		writeFileSync(path, `${JSON.stringify(DEFAULT_CONFIG, null, '\t')}\n`, {
+		const { github: _, ...defaults } = DEFAULT_CONFIG;
+		writeFileSync(path, `${JSON.stringify(defaults, null, '\t')}\n`, {
 			flag: 'wx',
 			mode: 0o600,
 		});
@@ -188,10 +193,20 @@ export function loadConfig(path: string): Config {
 	) {
 		throw invalid('repos must be a list of { "name", "path" } objects');
 	}
-	const parsedRepos = repos.map((repo: { name: string; path: string }) => ({
-		name: repo.name,
-		path: repo.path,
-	}));
+	const parsedRepos: Config['repos'] = repos.map(
+		(repo: { name: string; path: string; githubRepo?: unknown }) => {
+			if (repo.githubRepo === undefined) {
+				return { name: repo.name, path: repo.path };
+			}
+			if (
+				typeof repo.githubRepo !== 'string' ||
+				!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo.githubRepo)
+			) {
+				throw invalid(`githubRepo of ${repo.name} must look like "owner/name"`);
+			}
+			return { name: repo.name, path: repo.path, githubRepo: repo.githubRepo };
+		},
+	);
 	const names = new Set<string>();
 	for (const repo of parsedRepos) {
 		// The name becomes a folder under worktrees/.
@@ -216,9 +231,14 @@ export function loadConfig(path: string): Config {
 	) {
 		throw invalid('maxWorkingTasks must be a whole number of at least 1');
 	}
+	const github = raw.github ?? DEFAULT_CONFIG.github;
+	if (typeof github !== 'boolean') {
+		throw invalid('github must be true or false');
+	}
 	return {
 		repos: parsedRepos,
 		maxWorkingTasks,
+		github,
 	};
 }
 

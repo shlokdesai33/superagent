@@ -1,6 +1,6 @@
 // Drives a real daemon end to end (§10): an isolated data folder, the script
 // channel, and every request over the Unix socket like the TUI's.
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
 	type Action,
@@ -32,7 +32,15 @@ export type Agent = {
 		read: () => Promise<T>,
 		done: (value: T) => boolean,
 	): Promise<T>;
-	stop(): Promise<void>;
+	/** Stops the daemon, runs `inspect` on its data folder, then removes it. */
+	stop(inspect?: (home: string) => void | Promise<void>): Promise<void>;
+};
+
+export type AgentOptions = {
+	/** Added to the daemon's environment. */
+	env?: Record<string, string>;
+	/** Written as `config.json` before the daemon starts. */
+	config?: Record<string, unknown>;
 };
 
 export type ScriptEvent = {
@@ -71,10 +79,20 @@ function has<K extends string>(
 }
 
 /** Starts `superagent daemon --script-channel` in a fresh `/tmp/sa-…` folder. */
-export async function startAgent(particleUrl: string): Promise<Agent> {
+export async function startAgent(
+	particleUrl: string,
+	options: AgentOptions = {},
+): Promise<Agent> {
 	// Short, to stay under the socket path limit.
 	const home = mkdtempSync('/tmp/sa-');
 	const socket = join(home, 'agent.sock');
+	if (options.config) {
+		writeFileSync(
+			join(home, 'config.json'),
+			`${JSON.stringify(options.config, null, '\t')}\n`,
+			{ mode: 0o600 },
+		);
+	}
 	const child = Bun.spawn(['bun', CLI, 'daemon', '--script-channel'], {
 		// Not inside a repository, so first-run detection adds none.
 		cwd: home,
@@ -83,6 +101,9 @@ export async function startAgent(particleUrl: string): Promise<Agent> {
 			SUPERAGENT_HOME: home,
 			PARTICLE_BASE_URL: particleUrl,
 			PARTICLE_API_KEY: 'pai-e2e',
+			// Never the real gh: off unless a test brings a fake one.
+			SUPERAGENT_GH: join(home, 'no-gh'),
+			...options.env,
 		},
 		stdin: 'ignore',
 		stdout: 'ignore',
@@ -201,9 +222,10 @@ export async function startAgent(particleUrl: string): Promise<Agent> {
 				await Bun.sleep(100);
 			}
 		},
-		async stop() {
+		async stop(inspect) {
 			child.kill('SIGTERM');
 			await child.exited;
+			await inspect?.(home);
 			if (!Bun.env.E2E_KEEP) rmSync(home, { recursive: true, force: true });
 		},
 	};

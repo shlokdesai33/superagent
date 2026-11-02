@@ -142,7 +142,8 @@ export type Usage = {
 export type Health = {
 	channels: Array<{
 		name: string;
-		state: 'up' | 'connecting' | 'down';
+		/** `off`: an optional channel that isn't set up; `detail` says how to enable it. Never a problem. */
+		state: 'up' | 'connecting' | 'down' | 'off';
 		lastEventAt: number | null;
 		detail: string | null;
 	}>;

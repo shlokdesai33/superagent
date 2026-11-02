@@ -47,7 +47,7 @@ export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 		`Channels: ${health.channels
 			.map(
 				(channel) =>
-					`${channel.name} ${channel.state}${channel.lastEventAt === null ? '' : ` (last event ${clock(channel.lastEventAt)})`}`,
+					`${channel.name} ${channel.state}${channel.lastEventAt === null ? '' : ` (last event ${clock(channel.lastEventAt)})`}${channel.detail ? ` · ${channel.detail}` : ''}`,
 			)
 			.join(', ')}`,
 		`Model: ${health.model.name} · ${health.model.state}${health.model.detail ? ` · ${health.model.detail}` : ''}`,

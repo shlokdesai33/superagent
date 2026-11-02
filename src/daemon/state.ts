@@ -13,6 +13,7 @@ import type {
 	Usage,
 } from '../protocol.ts';
 import type { Feed } from './feed.ts';
+import type { GitHubLive } from './github.ts';
 import type { Log } from './log.ts';
 import type { SandboxStatus } from './sandbox.ts';
 import type { Config } from './setup.ts';
@@ -36,6 +37,8 @@ export type Daemon = {
 	machine: MachineFacts;
 	/** The last event time of each channel, for health. */
 	channels: Map<string, number | null>;
+	/** The GitHub channel's health; `off` unless gh is installed and logged in. */
+	github: GitHubLive;
 	/** `POST /v1/events` is on (`--script-channel`), for tests. */
 	scriptChannel: boolean;
 	/** Action results by `requestId`, kept 10 minutes. */
@@ -255,13 +258,22 @@ export function health(daemon: Daemon): Health {
 			since: sandbox.since,
 		});
 	}
+	problems.push(...daemon.github.problems);
 	return {
-		channels: [...daemon.channels].map(([name, lastEventAt]) => ({
-			name,
-			state: 'up',
-			lastEventAt,
-			detail: null,
-		})),
+		channels: [
+			...[...daemon.channels].map(([name, lastEventAt]) => ({
+				name,
+				state: 'up' as const,
+				lastEventAt,
+				detail: null,
+			})),
+			{
+				name: 'github',
+				state: daemon.github.state,
+				lastEventAt: null,
+				detail: daemon.github.detail,
+			},
+		],
 		model: { name: MODEL, ...daemon.model, key: daemon.keySource },
 		problems,
 		machine: daemon.machine,

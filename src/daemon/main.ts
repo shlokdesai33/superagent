@@ -6,6 +6,7 @@ import { dataPaths } from '../home.ts';
 import { loadAgentId, openDatabase } from './db.ts';
 import { createFeed } from './feed.ts';
 import { repositoryName, repositoryRoot, startCleanup } from './git.ts';
+import { type GitHubClient, initialGitHub, startGitHub } from './github.ts';
 import { createLog } from './log.ts';
 import {
 	NO_API_KEY,
@@ -52,10 +53,12 @@ export async function runDaemon(options: {
 	let stopActivity: (() => void) | null = null;
 	let stopCleanup: (() => Promise<void>) | null = null;
 	let stopKeyWatch: (() => void) | null = null;
+	let github: GitHubClient | null = null;
 	let sandboxStarted = false;
 	const teardown = async () => {
 		if (daemon) daemon.stopping = true;
 		stopKeyWatch?.();
+		await github?.stop();
 		await router?.stop();
 		// Workers may still store their last tool result, so the database stays
 		// open until they and their commands have ended.
@@ -152,6 +155,7 @@ export async function runDaemon(options: {
 			},
 			machine,
 			channels,
+			github: initialGitHub(config),
 			scriptChannel: options.scriptChannel,
 			actionResults: new Map(),
 			usageTimer: null,
@@ -204,6 +208,7 @@ export async function runDaemon(options: {
 	startWorkers(daemon);
 	stopActivity = startActivityTimer(daemon);
 	stopCleanup = startCleanup(daemon);
+	github = startGitHub(daemon);
 
 	const signal = await new Promise<NodeJS.Signals>((resolve) => {
 		process.once('SIGINT', resolve);

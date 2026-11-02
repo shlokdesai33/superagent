@@ -25,7 +25,9 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 		(task) => task.status === 'failed' && !task.dismissed,
 	);
 	const problems = health.problems.length + failed.length;
-	const up = health.channels.filter((channel) => channel.state === 'up').length;
+	// Channels that are off are optional extras, not part of the count.
+	const active = health.channels.filter((channel) => channel.state !== 'off');
+	const up = active.filter((channel) => channel.state === 'up').length;
 	const summary: Seg[] = [
 		...(problems === 0
 			? [
@@ -42,7 +44,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 				]),
 		sep,
 		{
-			t: `${up} of ${health.channels.length} ${plural(health.channels.length, 'channel')} up`,
+			t: `${up} of ${active.length} ${plural(active.length, 'channel')} up`,
 			fg: 'faint',
 		},
 		sep,
@@ -109,11 +111,16 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 				? `connected · ${channel.lastEventAt === null ? 'no events yet' : `last event ${ago(now - channel.lastEventAt)}`}`
 				: channel.state === 'down'
 					? 'disconnected'
-					: 'connecting';
+					: channel.state === 'off'
+						? 'off'
+						: 'connecting';
 		lines.push({
 			segs: [
 				dot,
-				{ t: fit(channel.name, 12), fg: 'fg' },
+				{
+					t: fit(channel.name, 12),
+					fg: channel.state === 'off' ? 'faint' : 'fg',
+				},
 				{ t: words, fg: 'faint' },
 				...(channel.detail
 					? [sep, { t: oneLine(channel.detail), fg: 'faint' } satisfies Seg]

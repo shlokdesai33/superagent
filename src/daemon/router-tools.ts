@@ -9,6 +9,7 @@ import {
 } from './state.ts';
 import { taskByHandle } from './task-feed.ts';
 import { taskBranch } from './git.ts';
+import { githubOff } from './github.ts';
 import { createTask, endTask, reopenTask } from './tasks.ts';
 import {
 	type Args,
@@ -179,6 +180,8 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 
 	const threads: string[] = [];
 	for (const id of optionalStrings(args, 'threads')) {
+		const off = id.startsWith('github:') ? githubOff(daemon) : null;
+		if (off !== null) throw new ToolError(off);
 		const thread = db
 			.query<{ ownable: number; owner: string | null }, [string]>(
 				`SELECT th.ownable, t.handle AS owner FROM threads th
