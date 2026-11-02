@@ -9,6 +9,8 @@ import {
 	type TaskDetail,
 } from './protocol.ts';
 
+export const NOT_RUNNING = "superagent isn't running. Run `superagent start`.";
+
 /**
  * - `not_running`: nothing listening on the socket.
  * - `rejected`: the daemon refused the protocol version.
@@ -49,7 +51,7 @@ export async function daemonFetch(
 		if (init.signal?.aborted) throw error;
 		throw new DaemonUnreachable(
 			'not_running',
-			`The agent isn't running in ${paths.home}. Start it with: superagent daemon`,
+			NOT_RUNNING,
 			`nothing listening on ${paths.socket} (${errorName(error)})`,
 		);
 	}

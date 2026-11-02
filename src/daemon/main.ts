@@ -2,7 +2,7 @@ import type { Database } from 'bun:sqlite';
 import { rmSync } from 'node:fs';
 import type { Server } from 'bun';
 import packageJson from '../../package.json' with { type: 'json' };
-import { dataPaths } from '../home.ts';
+import { BACKGROUND_ENV, dataPaths } from '../home.ts';
 import { loadAgentId, openDatabase } from './db.ts';
 import { createFeed } from './feed.ts';
 import {
@@ -50,7 +50,9 @@ export async function runDaemon(options: {
 	const paths = dataPaths();
 	createDataFolder(paths);
 	takeLock(paths.pid);
-	const log = createLog(paths.log);
+	// In the background, stderr goes to output.log, which is kept for what the
+	// log can't hold: startup errors and crashes.
+	const log = createLog(paths.log, !Bun.env[BACKGROUND_ENV]);
 
 	let server: Server<undefined> | null = null;
 	let db: Database | null = null;
