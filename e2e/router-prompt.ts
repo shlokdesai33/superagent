@@ -165,6 +165,12 @@ try {
 			second.cachedTokens >= startCalls[0].promptTokens - 1,
 		`${second?.cachedTokens ?? 'no'} of ${second?.promptTokens ?? 'no'} cached`,
 	);
+	const routerSystem = first?.body.messages[0]?.content;
+	check(
+		"the Router is told Workers' questions are the operator's to answer",
+		typeof routerSystem === 'string' &&
+			routerSystem.includes("don't repeat or answer them yourself"),
+	);
 	const last = calls.at(-1);
 	const prefixTokens = Math.floor(prefix.length / 4);
 	check(

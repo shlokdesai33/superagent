@@ -48,7 +48,9 @@ const particle = startFakeParticle((request) => {
 				},
 			});
 		}
-		const asked = request.fresh.match(/task \w{4} asked · [^\n]*\n\s*(.*)/);
+		const asked = request.fresh.match(
+			/task \w{4} asked the operator · [^\n]*\n\s*(.*)/,
+		);
 		if (asked) {
 			calls.push({
 				name: 'reply',
