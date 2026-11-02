@@ -168,7 +168,7 @@ async function backgroundChecks(hex: string, version: string): Promise<void> {
 	const depth = colorDepth(env);
 	const theme = themeFor(name, depth, background);
 	const label = `${depth} on ${hex}`;
-	const tui = await openTui(agent.home, outside, env, hex);
+	const tui = await openTui(agent.home, outside, env, { background: hex });
 	try {
 		await tui.waitFor('answer');
 		await settle();

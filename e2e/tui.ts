@@ -1,11 +1,12 @@
 // Runs the real terminal UI in a pseudo-terminal made by `script`, so it
 // starts the way `superagent` does: in a folder, detecting its repository.
-import { join } from 'node:path';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { COLUMNS, ROWS, replayText } from './screen.ts';
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
 const WAIT_MS = 15_000;
-const COLUMNS = 100;
-const ROWS = 30;
 
 export type Tui = {
 	/** Where the output so far ends, for `waitFor` and `seen`. */
@@ -14,11 +15,21 @@ export type Tui = {
 	seen(from?: number): string;
 	/** Everything written since `from`, escape sequences included. */
 	raw(from?: number): string;
+	/**
+	 * The screen's rows as a terminal shows them, replaying what was written
+	 * since `from` (a mark taken before a full repaint, or the start). A wide
+	 * character takes two columns.
+	 */
+	screen(from?: number): string[];
 	waitFor(text: string, from?: number): Promise<void>;
 	/** Keys as the terminal sends them: `\t` is tab, `\r` enter. */
 	type(keys: string): Promise<void>;
+	/** Resizes the pseudo-terminal, which sends the UI a SIGWINCH. */
+	resize(columns: number, rows: number): Promise<void>;
 	quit(): Promise<void>;
 };
+
+export type TuiSize = { columns?: number; rows?: number };
 
 function plain(raw: string): string {
 	return (
@@ -40,11 +51,16 @@ export async function openTui(
 	home: string,
 	cwd: string,
 	env: Record<string, string | undefined> = {},
-	background?: string,
+	options: TuiSize & { background?: string } = {},
 ): Promise<Tui> {
+	const { background, ...size } = options;
+	let columns = size.columns ?? COLUMNS;
+	let rows = size.rows ?? ROWS;
 	// Like the harness, SUPERAGENT_BIN runs a compiled executable instead.
 	const superagent = Bun.env.SUPERAGENT_BIN ?? `bun ${CLI}`;
-	const command = `stty cols ${COLUMNS} rows ${ROWS}; exec ${superagent}`;
+	// The pseudo-terminal's name, for `resize`.
+	const ttyFile = join(mkdtempSync(join(tmpdir(), 'sa-tty-')), 'tty');
+	const command = `tty > ${ttyFile}; stty cols ${columns} rows ${rows}; exec ${superagent}`;
 	const environment: Record<string, string | undefined> = {
 		...Bun.env,
 		SUPERAGENT_HOME: home,
@@ -88,6 +104,7 @@ export async function openTui(
 		mark: () => raw.length,
 		seen: (from = 0) => plain(raw.slice(from)),
 		raw: (from = 0) => raw.slice(from),
+		screen: (from = 0) => replayText(raw.slice(from), columns, rows),
 		async waitFor(text, from = 0) {
 			const deadline = Date.now() + WAIT_MS;
 			while (!tui.seen(from).includes(text)) {
@@ -102,6 +119,27 @@ export async function openTui(
 			await send(keys);
 			await Bun.sleep(150);
 		},
+		async resize(newColumns, newRows) {
+			const tty = readFileSync(ttyFile, 'utf8').trim();
+			const flag = process.platform === 'darwin' ? '-f' : '-F';
+			const stty = Bun.spawnSync([
+				'stty',
+				flag,
+				tty,
+				'cols',
+				String(newColumns),
+				'rows',
+				String(newRows),
+			]);
+			if (stty.exitCode !== 0) {
+				throw new Error(
+					`stty couldn't resize ${tty}: ${stty.stderr.toString()}`,
+				);
+			}
+			columns = newColumns;
+			rows = newRows;
+			await Bun.sleep(300);
+		},
 		async quit() {
 			await send('q');
 			const exited = await Promise.race([
@@ -111,6 +149,7 @@ export async function openTui(
 			if (!exited) child.kill();
 			await child.exited;
 			await reading;
+			rmSync(dirname(ttyFile), { recursive: true, force: true });
 		},
 	};
 	await tui.waitFor('press / to ask');
