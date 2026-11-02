@@ -18,6 +18,11 @@ const DONE = 30;
 const ASKED = 'How is it going? (HI)';
 const REPLY =
 	'Thirty reports are tidied, the login question is waiting on you, and the Safari fix is waiting on CI, which usually takes about ten minutes on this repository.';
+// One row asked and a three-row reply at 80 columns: four rows, the body's
+// room at the 12-row minimum.
+const SHORT = 'And now? (FOUR)';
+const FOUR =
+	'The login question is answered and its task is back at work. The Safari fix still waits on CI, and every report is tidied, so nothing else needs you this afternoon.';
 const DOWN = '\x1b[B';
 const ESC = '\x1b';
 
@@ -57,6 +62,11 @@ const particle = startFakeParticle((request) => {
 				startTask('Settle the flaky login retries', 'Ask (ASKS).'),
 				startTask('Fix the Safari export crash', 'Wait (WAITS).'),
 			],
+		};
+	}
+	if (request.fresh.includes('(FOUR)')) {
+		return {
+			calls: [{ name: 'reply', args: { thread: 'console', text: FOUR } }],
 		};
 	}
 	if (request.fresh.includes('(HI)')) {
@@ -178,6 +188,94 @@ async function layoutChecks(columns: number, rows: number): Promise<void> {
 	}
 }
 
+/**
+ * NEEDS YOU empty and a latest exchange that fills the body at the 12-row
+ * minimum: the tasks keep their rows, the exchange scrolls with them, and ↓
+ * moves on through both.
+ */
+async function squeezedChecks(): Promise<void> {
+	const asking = [...agent.lines]
+		.toReversed()
+		.find(
+			(line): line is TaskLine =>
+				line.type === 'task' && line.task.status === 'needs_you',
+		);
+	const { handle, question } = asking?.task ?? {};
+	if (handle === undefined || !question)
+		throw new Error('no question to answer');
+	await agent.action({
+		type: 'answer_question',
+		handle,
+		questionId: question.id,
+		text: 'Three times.',
+	});
+	await agent.waitFor(
+		'the question answered',
+		(line): line is TaskLine =>
+			line.type === 'task' &&
+			line.task.handle === handle &&
+			line.task.status !== 'needs_you',
+	);
+	await agent.action({ type: 'send_console', text: SHORT });
+	await agent.waitFor(
+		'the four-row reply',
+		(line): line is MessageLine =>
+			line.type === 'message' && line.message.text === FOUR,
+	);
+
+	const wide = await openTui(agent.home, outside, env, {
+		columns: 80,
+		rows: 24,
+		until: 'ask',
+	});
+	try {
+		await settle();
+		const pinned = consoleRows(wide.screen())?.rows ?? [];
+		const asked = pinned.findIndex((row) => row.startsWith(`you    ${SHORT}`));
+		check(
+			'80×24: the exchange is four rows, one asked and three of reply',
+			asked !== -1 && pinned.length - asked === 4,
+			pinned.join(' / '),
+		);
+	} finally {
+		await wide.quit();
+	}
+
+	const tui = await openTui(agent.home, outside, env, {
+		columns: 80,
+		rows: 12,
+		until: 'ask',
+	});
+	try {
+		await settle();
+		const first = tui.screen();
+		check(
+			'80×12, nothing needing you: the tasks keep their rows beside a four-row exchange',
+			first.some((row) => /^(WORKING|DONE TODAY)/.test(row)) &&
+				first.some((row) => /^[◌⠋-⣿✓] \S+ {2}/.test(row)),
+			first.join(' / '),
+		);
+		let moved = false;
+		let reached = false;
+		for (let step = 0; step < 40 && !reached; step += 1) {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			await tui.type(DOWN);
+			const now = tui.screen();
+			if (now.join('\n') !== first.join('\n')) moved = true;
+			reached = squash(now.join(' ')).includes(
+				'nothing else needs you this afternoon.',
+			);
+		}
+		check(
+			'80×12: ↓ moves through the tasks and on to the end of the reply',
+			moved && reached,
+			tui.screen().join(' / '),
+		);
+	} finally {
+		await tui.quit();
+	}
+}
+
 try {
 	await agent.action({ type: 'send_console', text: 'tidy the reports (MANY)' });
 	await agent.until(
@@ -209,6 +307,7 @@ try {
 	);
 	await layoutChecks(80, 24);
 	await layoutChecks(120, 40);
+	await squeezedChecks();
 } catch (error) {
 	failures += 1;
 	process.stdout.write(

@@ -144,7 +144,10 @@ export function homeBody(
 	const exchange = blocks
 		.slice(lastYou === -1 ? Math.max(0, blocks.length - 1) : lastYou)
 		.flat();
-	const reserve = Math.min(2, needsLength);
+	// Tasks keep a label and a row: NEEDS YOU's first, else WORKING's or
+	// DONE TODAY's, so an exchange that fills the body still leaves them.
+	const anyTasks = lines.length > 0 || all.done.length > 0;
+	const reserve = needsLength > 0 ? Math.min(2, needsLength) : anyTasks ? 2 : 0;
 	const consoleMin = Math.min(
 		exchange.length,
 		Math.max(0, height - 1 - reserve),
