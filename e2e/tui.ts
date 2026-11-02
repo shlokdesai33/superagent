@@ -29,6 +29,8 @@ export type Tui = {
 	/** Text as a terminal pastes it, between bracketed-paste markers. */
 	paste(text: string): Promise<void>;
 	quit(): Promise<void>;
+	/** Resolves with the exit code when the UI exits. */
+	exited: Promise<number>;
 };
 
 export type TuiSize = {
@@ -108,6 +110,7 @@ export async function openTui(
 	})();
 
 	const tui: Tui = {
+		exited: child.exited,
 		mark: () => raw.length,
 		seen: (from = 0) => plain(raw.slice(from)),
 		raw: (from = 0) => raw.slice(from),
@@ -151,17 +154,24 @@ export async function openTui(
 			await Bun.sleep(300);
 		},
 		async quit() {
-			await send('q');
-			const exited = await Promise.race([
-				child.exited.then(() => true),
-				Bun.sleep(3_000).then(() => false),
-			]);
+			const exit = (ms: number) =>
+				Promise.race([
+					child.exited.then(() => true),
+					Bun.sleep(ms).then(() => false),
+				]);
+			await send('\x03');
+			// With a draft, the first ctrl-c asks and the second quits.
+			let exited = await exit(500);
+			if (!exited) {
+				await send('\x03');
+				exited = await exit(3_000);
+			}
 			if (!exited) child.kill();
 			await child.exited;
 			await reading;
 			rmSync(dirname(ttyFile), { recursive: true, force: true });
 		},
 	};
-	await tui.waitFor(size.until ?? 'press / to ask');
+	await tui.waitFor(size.until ?? '@handle to message a task');
 	return tui;
 }

@@ -232,7 +232,7 @@ try {
 		await tui.waitFor('blocker');
 		await tui.type('\r');
 		await tui.waitFor('STEPS');
-		await tui.type(`/${NOTE}`);
+		await tui.type(NOTE);
 		const mark = tui.mark();
 		const sentAt = Date.now();
 		await tui.type('\r');
