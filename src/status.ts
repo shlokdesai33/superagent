@@ -44,7 +44,7 @@ export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 	);
 
 	lines.push(
-		`Usage today: ${usage.calls} model ${usage.calls === 1 ? 'call' : 'calls'} · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens · about $${usage.costUsd.toFixed(2)} (estimate)`,
+		`Usage today: ${usage.calls} model ${usage.calls === 1 ? 'call' : 'calls'} · ${(usage.inputTokens + usage.outputTokens).toLocaleString('en-US')} tokens (${usage.cachedTokens.toLocaleString('en-US')} cached input) · about $${usage.costUsd.toFixed(2)} (estimate)`,
 		`Channels: ${health.channels
 			.map(
 				(channel) =>
