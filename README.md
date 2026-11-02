@@ -113,10 +113,3 @@ superagent stop
 rm ~/.local/bin/superagent
 rm -rf ~/.superagent
 ```
-
-## Troubleshooting
-
-- **Colors in macOS Terminal.** Nothing to set: superagent picks the colors Terminal.app can show, and a light or dark theme from its background.
-- **Particle rejected the key, or the account is out of credit.** It shows at the top of home under NEEDS YOU, with the fix. Work pauses and resumes on its own once the key or the credit is sorted.
-- **"The agent and this terminal are different versions".** The background agent is still on the old version after an update: run `superagent restart`.
-- **"superagent isn't running".** Run `superagent` or `superagent start`. If it can't start, it prints why; `superagent logs` has more.
