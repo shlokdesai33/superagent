@@ -159,6 +159,30 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 	});
 	lines.push(blank());
 
+	const { watchdog } = health;
+	// Checks run every minute; one this old means the Watchdog has stalled.
+	const late =
+		watchdog.lastCheckAt !== null && now - watchdog.lastCheckAt > 3 * 60_000;
+	lines.push(label('WATCHDOG'));
+	lines.push({
+		segs: [
+			late ? { t: '● ', fg: 'warn' } : { t: '● ', fg: 'faint' },
+			{
+				t:
+					watchdog.lastCheckAt === null
+						? 'starting'
+						: `checked ${ago(now - watchdog.lastCheckAt)}`,
+				fg: late ? 'fg' : 'faint',
+			},
+			sep,
+			{
+				t: `${watchdog.reviewsToday} ${plural(watchdog.reviewsToday, 'review')} today`,
+				fg: 'faint',
+			},
+		],
+	});
+	lines.push(blank());
+
 	const peak = Math.max(usage.inputTokens, usage.outputTokens);
 	const cachedShare =
 		usage.inputTokens === 0
