@@ -432,8 +432,7 @@ export class App {
 			this.showToast({
 				glyph: '✗',
 				subject: "Couldn't reach the agent",
-				detail:
-					error instanceof DaemonUnreachable ? error.detail : String(error),
+				detail: error instanceof DaemonUnreachable ? null : String(error),
 				ms: ERROR_TOAST_MS,
 			});
 			return;
@@ -630,7 +629,7 @@ export class App {
 			this.showToast({
 				glyph: '✗',
 				subject: 'Nothing to open',
-				detail: `${task.handle} follows no GitHub issue or PR`,
+				detail: `${task.handle} has no PR or issue`,
 				ms: ERROR_TOAST_MS,
 			});
 			return;
@@ -653,7 +652,7 @@ export class App {
 		this.showToast({
 			glyph: '✓',
 			subject: `Opened ${link.title}`,
-			detail: 'in your browser',
+			detail: null,
 			ms: TOAST_MS,
 		});
 	}

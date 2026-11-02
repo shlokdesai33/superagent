@@ -436,7 +436,7 @@ try {
 	const on = await githubIs('GitHub up', (channel) => channel.state === 'up');
 	check(
 		'logging in to gh turns GitHub on without a restart',
-		(githubChannel(on)?.detail ?? '').includes('@shlok via gh · 2 repos'),
+		(githubChannel(on)?.detail ?? '').includes('@shlok · 2 repos'),
 		describe(on),
 	);
 	const problems = githubProblems(on).map((problem) => problem.id);

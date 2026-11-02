@@ -127,7 +127,7 @@ export async function runAction(
 					ok: false,
 					code: 'in_progress',
 					subject: `Stopping ${handle}`,
-					detail: 'the first request is still running',
+					detail: null,
 				},
 			});
 			result = await pending;
@@ -184,9 +184,7 @@ async function sendConsole(
 		ok: true,
 		seq: seq ?? daemon.feed.seq,
 		subject: 'Sent',
-		detail: repo?.added
-			? `the Router decides what to do · added ${repo.name} to the agent's repositories`
-			: 'the Router decides what to do',
+		detail: repo?.added ? `added ${repo.name}` : null,
 	};
 }
 
@@ -216,7 +214,7 @@ function sendNote(
 		ok: true,
 		seq,
 		subject: `Sent to ${task.handle}`,
-		detail: ended ? 'it reopens' : 'it reads it after its current step',
+		detail: ended ? 'it reopens' : null,
 	};
 }
 
@@ -250,7 +248,7 @@ async function answerQuestion(
 			ok: false,
 			code: 'unknown_question',
 			subject: 'No such question',
-			detail: `${task.handle} has no question ${questionId}`,
+			detail: null,
 		};
 	}
 	if (question.state === 'answered') {
@@ -300,7 +298,7 @@ async function answerQuestion(
 		ok: true,
 		seq,
 		subject: `Answered ${task.handle}`,
-		detail: 'it continues from here',
+		detail: null,
 	};
 }
 
@@ -349,7 +347,7 @@ async function answerWatchdog(
 		ok: true,
 		seq,
 		subject: `Answered ${task.handle}`,
-		detail: 'it continues from here',
+		detail: null,
 	};
 }
 
@@ -368,7 +366,7 @@ async function stopTask(daemon: Daemon, handle: string): Promise<ActionResult> {
 					ok: true,
 					seq: daemon.feed.seq,
 					subject: `Stopped ${task.handle}`,
-					detail: 'its commands were ended',
+					detail: null,
 				}
 			: {
 					ok: false,
@@ -391,8 +389,8 @@ async function stopTask(daemon: Daemon, handle: string): Promise<ActionResult> {
 		return {
 			ok: true,
 			seq: daemon.feed.seq,
-			subject: `Stopped ${task.handle}`,
-			detail: 'dismissed',
+			subject: `Dismissed ${task.handle}`,
+			detail: null,
 		};
 	}
 	return {
@@ -414,8 +412,8 @@ function resumeTasks(daemon: Daemon, handles: string[] | null): ActionResult {
 		return {
 			ok: false,
 			code: 'nothing_failed',
-			subject: 'Nothing to resume',
-			detail: 'no failed tasks',
+			subject: 'No failed tasks',
+			detail: null,
 		};
 	}
 	return {
@@ -431,7 +429,7 @@ function empty(): ActionResult {
 		ok: false,
 		code: 'empty',
 		subject: 'Nothing to send',
-		detail: 'type a message first',
+		detail: null,
 	};
 }
 
@@ -440,7 +438,7 @@ function unknownTask(handle: string): ActionResult {
 		ok: false,
 		code: 'unknown_task',
 		subject: `No task ${handle}`,
-		detail: 'check the handle',
+		detail: null,
 	};
 }
 

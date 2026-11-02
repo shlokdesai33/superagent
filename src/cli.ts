@@ -25,29 +25,22 @@ import { runTui } from './tui/main.ts';
 
 const usage = `Usage: superagent [command] [options]
 
-superagent works in a background agent that keeps running when you close the
-terminal UI, until you stop it or restart the computer.
-
 Commands:
-  (none)          Open the terminal UI, starting the background agent first if
-                  it isn't running; prints the status when not in a terminal
-  start           Start the background agent
-  stop            Stop it; working tasks pause and resume on the next start
-  restart         Stop it and start it again
-  status          Print whether it's running, its tasks and its health
-  logs            Print its log; --follow keeps printing new lines
-  login particle  Ask for your Particle API key, check it and save it
-  daemon          Run the background agent in this terminal (for debugging);
-                  start runs this same agent in the background
+  (none)          Open the terminal UI
+  start           Start the agent in the background
+  stop            Stop the agent
+  restart         Restart the agent
+  status          Print the agent's status
+  logs            Print the agent's log
+  login particle  Save your Particle API key
+  daemon          Run the agent in this terminal (for debugging)
 
 Options:
-  --json            With status: print the raw snapshot JSON
-  -f, --follow      With logs: keep printing new lines until Ctrl-C
+  --json            With status: print JSON
+  -f, --follow      With logs: keep printing new lines
   --script-channel  With daemon: accept test events on POST /v1/events
   -h, --help        Show this help
-  -v, --version     Show the version
-
-The data folder is $SUPERAGENT_HOME, or ~/.superagent.`;
+  -v, --version     Show the version`;
 
 const LOG_LINES = 100;
 
@@ -112,9 +105,7 @@ async function main(): Promise<void> {
 		case 'login':
 			if (rest[0] !== 'particle') fail('Usage: superagent login particle');
 			else if (rest.length > 1) {
-				fail(
-					'superagent login particle takes no arguments; it asks for the key',
-				);
+				fail('superagent login particle takes no arguments');
 			} else await loginParticle();
 			break;
 		case 'daemon': {
@@ -138,7 +129,7 @@ async function terminalUi(): Promise<void> {
 	const snapshot = await runningAgent();
 	if (snapshot) {
 		console.log(
-			`superagent is still running in the background · ${working(snapshot)} · \`superagent stop\` stops it`,
+			`superagent is still running in the background${working(snapshot)}`,
 		);
 	}
 }
@@ -149,11 +140,10 @@ async function start(): Promise<void> {
 		printStartFailure(started);
 		return;
 	}
-	const { pid } = started.snapshot.agent;
 	console.log(
 		started.started
-			? `Started superagent in the background (pid ${pid}) · ${working(started.snapshot)}`
-			: `superagent is already running (pid ${pid}) · ${working(started.snapshot)}`,
+			? `Started superagent${working(started.snapshot)}`
+			: `superagent is already running${working(started.snapshot)}`,
 	);
 }
 
@@ -174,7 +164,7 @@ async function stop(): Promise<void> {
 	console.log(
 		count === 0
 			? 'Stopped superagent.'
-			: `Stopped superagent. ${count === 1 ? '1 working task is paused and resumes' : `${count} working tasks are paused and resume`} on the next start.`,
+			: `Stopped superagent. ${count === 1 ? '1 working task resumes' : `${count} working tasks resume`} on the next start.`,
 	);
 }
 
@@ -198,9 +188,7 @@ async function status(json: boolean): Promise<void> {
 		return;
 	}
 	console.log(
-		json
-			? JSON.stringify(snapshot, null, 2)
-			: formatStatus(snapshot, dataPaths()),
+		json ? JSON.stringify(snapshot, null, 2) : formatStatus(snapshot),
 	);
 }
 
@@ -214,9 +202,11 @@ function workingCount(snapshot: Snapshot): number {
 	return snapshot.tasks.filter((task) => task.status === 'working').length;
 }
 
+/** ` · 2 tasks working`, or nothing when none are. */
 function working(snapshot: Snapshot): string {
 	const count = workingCount(snapshot);
-	return count === 1 ? '1 task working' : `${count} tasks working`;
+	if (count === 0) return '';
+	return count === 1 ? ' · 1 task working' : ` · ${count} tasks working`;
 }
 
 /** The log's last lines, readable, then new ones as they come with `follow`. */
@@ -254,7 +244,7 @@ async function logs(follow: boolean): Promise<void> {
 		offset = Math.max(0, size - LOG_LINES * 400);
 	} catch {
 		if (!follow) {
-			console.error(`There's no log yet at ${path}`);
+			console.error("There's no log yet.");
 			process.exitCode = 1;
 			return;
 		}
@@ -314,8 +304,8 @@ async function loginParticle(): Promise<void> {
 	if (!looksLikeApiKey(key)) {
 		console.error(
 			key === ''
-				? 'No key given; nothing saved.'
-				: "That isn't a Particle API key (they start with pai-); nothing saved.",
+				? 'No key given.'
+				: "That isn't a Particle API key (they start with pai-).",
 		);
 		process.exitCode = 1;
 		return;
@@ -325,7 +315,7 @@ async function loginParticle(): Promise<void> {
 		baseUrl ? { apiKey: key, baseUrl } : { apiKey: key },
 	);
 	if (check.result === 'rejected') {
-		console.error('Particle rejected this key; nothing saved.');
+		console.error('Particle rejected this key.');
 		process.exitCode = 1;
 		return;
 	}
@@ -334,14 +324,12 @@ async function loginParticle(): Promise<void> {
 	writeKeyFile(paths.particleKey, key);
 	console.log(
 		check.result === 'valid'
-			? `Particle accepted the key. Saved it to ${paths.particleKey}`
-			: `Couldn't check the key with Particle (${check.problem}). Saved it to ${paths.particleKey}`,
+			? 'Saved the key.'
+			: `Couldn't check the key with Particle (${check.problem}). Saved it anyway.`,
 	);
-	console.log(
-		Bun.env[API_KEY_ENV]
-			? `${API_KEY_ENV} is set here and overrides the file while it is.`
-			: 'A running agent picks it up within a few seconds.',
-	);
+	if (Bun.env[API_KEY_ENV]) {
+		console.log(`${API_KEY_ENV} is set here and overrides the saved key.`);
+	}
 }
 
 function fail(message: string): void {
