@@ -730,6 +730,7 @@ export class App {
 			type: 'send_console',
 			text,
 			...(repo.path === null ? {} : { repo: repo.path }),
+			cwd: process.cwd(),
 		});
 	}
 

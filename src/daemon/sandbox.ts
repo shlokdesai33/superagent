@@ -3,12 +3,13 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
 	SandboxManager,
 	type SandboxRuntimeConfig,
@@ -298,12 +299,33 @@ function cacheProblem(path: string, create: boolean): string | null {
  */
 export async function sandboxCommand(
 	daemon: Daemon,
-	task: { repo: string | null; workDir: string },
+	task: { handle: string; repo: string | null; workDir: string },
 	tmpDir: string,
 	command: string,
 ): Promise<string[]> {
 	const gitDir =
 		task.repo === null ? null : await repositoryGitDir(daemon, task.repo);
+	const roots = [
+		...new Set(
+			[
+				task.workDir,
+				tmpDir,
+				'/tmp',
+				...cacheFolders(daemon),
+				...(gitDir ? [gitDir] : []),
+			].map(realPath),
+		),
+	];
+	if (!loggedRoots.has(task.handle)) {
+		loggedRoots.add(task.handle);
+		daemon.log('info', 'sandbox write roots', { task: task.handle, roots });
+		if (task.repo !== null && gitDir === null) {
+			daemon.log('warn', "repository's git folder not found; commits fail", {
+				task: task.handle,
+				repo: task.repo,
+			});
+		}
+	}
 	// sandbox-runtime points TMPDIR at a folder shared by every command.
 	const wrapped = await SandboxManager.wrapWithSandbox(
 		`export TMPDIR='${tmpDir.replaceAll("'", "'\\''")}'\n${command}`,
@@ -311,19 +333,34 @@ export async function sandboxCommand(
 		{
 			filesystem: {
 				denyRead: [],
-				allowWrite: [
-					task.workDir,
-					tmpDir,
-					'/tmp',
-					...cacheFolders(daemon),
-					...(gitDir ? [gitDir] : []),
-				],
+				// Literal, so a folder named like `[draft]` isn't read as a glob.
+				allowWrite: roots.map((path) => ({ path, literal: true as const })),
 				denyWrite: [],
 			},
 		},
 	);
 	recordBridges(daemon.paths.home);
 	return ['/bin/bash', '-c', wrapped];
+}
+
+const loggedRoots = new Set<string>();
+
+/**
+ * `path` with its symlinks resolved, also when its end doesn't exist yet.
+ * sandbox-runtime resolves only /tmp and /var to /private and keeps any
+ * other symlinked spelling as written: macOS's sandbox matches real paths,
+ * so such a write root allows nothing there, and bubblewrap drops it.
+ */
+function realPath(path: string): string {
+	let existing = path;
+	while (!existsSync(existing) && dirname(existing) !== existing) {
+		existing = dirname(existing);
+	}
+	try {
+		return join(realpathSync.native(existing), relative(existing, path));
+	} catch {
+		return path;
+	}
 }
 
 // On Linux, sandbox-runtime's host-side socat bridges are plain children of
@@ -384,9 +421,12 @@ function endCrashedBridges(home: string): void {
 	rmSync(file, { force: true });
 }
 
-const gitDirs = new Map<string, string | null>();
+const gitDirs = new Map<string, string>();
 
-/** The repository's shared git folder, where a worktree's commits go. */
+/**
+ * The repository's shared git folder, where a worktree's commits go. Only
+ * found ones are kept, so a failed lookup is tried again on the next command.
+ */
 async function repositoryGitDir(
 	daemon: Daemon,
 	repo: string,
@@ -401,7 +441,8 @@ async function repositoryGitDir(
 		'rev-parse',
 		'--git-common-dir',
 	]);
-	const dir = result.code === 0 ? resolve(path, result.stdout.trim()) : null;
+	if (result.code !== 0) return null;
+	const dir = resolve(path, result.stdout.trim());
 	gitDirs.set(path, dir);
 	return dir;
 }

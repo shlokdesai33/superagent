@@ -248,6 +248,11 @@ export type Action =
 			 * it isn't there yet.
 			 */
 			repo?: string | null;
+			/**
+			 * The folder the terminal UI was opened in, where the Router looks for
+			 * a repository the message names by folder name or relative path.
+			 */
+			cwd?: string | null;
 	  }
 	| { type: 'send_note'; handle: string; text: string }
 	| {

@@ -14,7 +14,7 @@ import {
 	prepareGitHubThread,
 	repoOfThreads,
 } from './github-threads.ts';
-import { defaultRepo } from './repos.ts';
+import { addNamedRepository, defaultRepo, eventFolder } from './repos.ts';
 import { createTask, endTask, reopenTask } from './tasks.ts';
 import {
 	type Args,
@@ -71,7 +71,7 @@ export const ROUTER_TOOLS: FunctionTool[] = [
 				'Threads it takes over, such as github:acme/app#42; the console stays with you',
 			),
 			repo: string(
-				'Default: its GitHub threads\' repository, else its event\'s default repository, else the only one. Another only when the message asks; "none" when not about code',
+				'Name, path or folder name; an unconfigured one is added. Default: its GitHub threads\' repository, else its event\'s default, else the only one. Another only when asked; "none" when not about code',
 			),
 			event: integer(
 				'The event it is for, 42 for #42; default: the latest. Needed when events have different default repositories',
@@ -203,13 +203,19 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 	let chosen: string | null;
 	if (repo === 'none') {
 		chosen = null;
-	} else if (repo !== null) {
-		if (!repos.includes(repo)) {
-			throw new ToolError(
-				`no repository ${JSON.stringify(repo)}; use one of ${[...repos, 'none'].join(', ')}`,
-			);
-		}
+	} else if (repo !== null && repos.includes(repo)) {
 		chosen = repo;
+	} else if (repo !== null) {
+		// Added as a send from inside it would, so its worktree, sandbox and
+		// GitHub threads work as for any configured repository.
+		const added = addNamedRepository(
+			daemon,
+			repo,
+			eventFolder(eventData(daemon, originEventId)),
+		);
+		if (!added.ok) throw new ToolError(added.detail);
+		chosen = added.name;
+		if (added.added) notes.push(`added ${added.name} to config.json`);
 	} else {
 		// GitHub threads name their repository; otherwise the one the operator's
 		// terminal was in when they sent the message.
@@ -242,6 +248,17 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 	};
 }
 
+function eventData(daemon: Daemon, id: number | null): string | null {
+	if (id === null) return null;
+	return (
+		daemon.db
+			.query<{ data: string | null }, [number]>(
+				'SELECT data FROM events WHERE id = ?',
+			)
+			.get(id)?.data ?? null
+	);
+}
+
 /**
  * The default repository of the event a task is for. Without `event`, the
  * batch's messages from people must agree on it, so a task never takes the
@@ -253,15 +270,7 @@ function defaultFor(
 	event: number | null,
 ): string | null {
 	const { db } = daemon;
-	if (event !== null) {
-		return defaultRepo(
-			db
-				.query<{ data: string | null }, [number]>(
-					'SELECT data FROM events WHERE id = ?',
-				)
-				.get(event)?.data ?? null,
-		);
-	}
+	if (event !== null) return defaultRepo(eventData(daemon, event));
 	const defaults = db
 		.query<{ id: number; data: string | null }, [number]>(
 			"SELECT id, data FROM events WHERE batch_id = ? AND channel != 'internal' ORDER BY id",

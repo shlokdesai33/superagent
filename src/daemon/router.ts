@@ -7,7 +7,7 @@ import type {
 	ToolCall,
 } from '../particle/types.ts';
 import { ACCOUNT_RETRY_MS, ModelError, callModel } from './model.ts';
-import { defaultRepo } from './repos.ts';
+import { defaultRepo, eventFolder } from './repos.ts';
 import { ROUTER_TOOLS, runRouterTool } from './router-tools.ts';
 import {
 	type Item,
@@ -557,10 +557,13 @@ function render(daemon: Daemon, events: EventRow[], withState: boolean): Item {
 				: '';
 		lines.push(indent(`${text}${spill}`));
 		const repo = defaultRepo(event.data);
+		const folder = eventFolder(event.data);
 		if (repo !== null) {
 			lines.push(
 				`  default repository: ${repo} (the operator's terminal is in it)`,
 			);
+		} else if (folder !== null) {
+			lines.push(`  terminal folder: ${folder}`);
 		}
 		const earlier = earlierMessages(db, event);
 		if (earlier) lines.push(`  earlier in this thread: ${earlier}`);

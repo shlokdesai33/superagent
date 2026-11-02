@@ -58,7 +58,7 @@ The first time, it asks for your Particle API key. Paste it and press `enter`. `
 
 **Hand over GitHub work.** Paste an issue or PR link, or say "fix #42". The task that takes it follows the thread: new comments, reviews, CI results and the merge go straight to it, and so does the PR it opens. Tasks push and open a PR only when you ask for one or they follow a GitHub issue or PR. The Router can reply on the issue, posted as you. `ctrl-o` in a task opens its PR or issue.
 
-**Pick the repository.** New tasks start in the repository you opened `superagent` in; the input box shows `new tasks in <repo>`. While writing, `tab` switches to another repository superagent knows, or none.
+**Pick the repository.** New tasks start in the repository you opened `superagent` in; the input box shows `new tasks in <repo>`. While writing, `tab` switches to another repository superagent knows, or none. A message can also name one: "in webapp, …" or "in ~/code/webapp, …". One superagent doesn't know yet is added, given by its path or by its folder's name when it's in the folder you opened `superagent` in or next to a repository it knows; when it can't be found, the Router asks for its path.
 
 ## Keys
 

@@ -14,6 +14,7 @@ import type { Daemon } from './state.ts';
 
 const FETCH_TIMEOUT_MS = 60_000;
 const GIT_TIMEOUT_MS = 30_000;
+const GIT_SYNC_TIMEOUT_MS = 5_000;
 const MAX_DIFF_CHARS = 256 * 1024;
 const WORKTREE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const LOG_RETENTION_MS = 30 * 24 * 60 * 60_000;
@@ -70,6 +71,31 @@ export async function git(
 		child.exited,
 	]);
 	return { code, stdout, stderr };
+}
+
+/** `git` without waiting on the event loop, for checks a Router tool makes inside its transaction. */
+export function gitSync(daemon: Daemon, args: string[]): GitResult {
+	try {
+		const child = Bun.spawnSync(['git', ...args], {
+			cwd: daemon.paths.home,
+			env: gitEnv(daemon.loginPath, daemon.secrets),
+			stdin: 'ignore',
+			stdout: 'pipe',
+			stderr: 'pipe',
+			timeout: GIT_SYNC_TIMEOUT_MS,
+		});
+		return {
+			code: child.exitCode ?? 1,
+			stdout: child.stdout.toString(),
+			stderr: child.stderr.toString(),
+		};
+	} catch (error) {
+		return {
+			code: 127,
+			stdout: '',
+			stderr: error instanceof Error ? error.message : String(error),
+		};
+	}
 }
 
 function firstLine(text: string): string {

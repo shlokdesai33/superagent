@@ -322,7 +322,7 @@ function writablePath(
 	const inside = relative(realpathSync(workDir), real);
 	if (inside === '' || inside.startsWith('..') || isAbsolute(inside)) {
 		throw new ToolError(
-			`${path} is outside your working folder; file tools write only inside it`,
+			`${path} is outside your working folder; file tools write only inside it, so give the path relative to ${workDir}`,
 		);
 	}
 	return target;

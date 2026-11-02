@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import type { Action, ActionResult } from '../protocol.ts';
 import { ingest } from './ingest.ts';
 import { useRepository } from './repos.ts';
@@ -76,11 +77,15 @@ export async function runAction(
 		case 'send_console': {
 			const text = 'text' in action ? action.text : undefined;
 			const repo = 'repo' in action ? action.repo : undefined;
+			const cwd = 'cwd' in action ? action.cwd : undefined;
 			if (typeof text !== 'string') return malformed('text must be a string');
 			if (repo !== undefined && repo !== null && typeof repo !== 'string') {
 				return malformed('repo must be a path or null');
 			}
-			result = await sendConsole(daemon, requestId, text, repo ?? null);
+			if (cwd !== undefined && cwd !== null && typeof cwd !== 'string') {
+				return malformed('cwd must be a path or null');
+			}
+			result = sendConsole(daemon, requestId, text, repo ?? null, cwd ?? null);
 			break;
 		}
 		case 'send_note': {
@@ -152,16 +157,18 @@ export async function runAction(
 	return { ok: true, result };
 }
 
-async function sendConsole(
+function sendConsole(
 	daemon: Daemon,
 	requestId: string,
 	text: string,
 	repoPath: string | null,
-): Promise<ActionResult> {
+	cwd: string | null,
+): ActionResult {
 	if (text.trim() === '') return empty();
 	// Sending from a repository confirms it, so one the agent doesn't know yet
 	// is added.
-	const repo = repoPath === null ? null : await useRepository(daemon, repoPath);
+	const repo = repoPath === null ? null : useRepository(daemon, repoPath);
+	const folder = cwd !== null && isAbsolute(cwd) ? cwd : null;
 	if (repo?.ok === false) {
 		return {
 			ok: false,
@@ -178,7 +185,14 @@ async function sendConsole(
 		author: { name: 'you', id: null, isBot: false, isSelf: false },
 		text,
 		mentionsAgent: true,
-		...(repo ? { data: { repo: repo.name } } : {}),
+		...(repo || folder
+			? {
+					data: {
+						...(repo ? { repo: repo.name } : {}),
+						...(folder ? { cwd: folder } : {}),
+					},
+				}
+			: {}),
 	});
 	return {
 		ok: true,
