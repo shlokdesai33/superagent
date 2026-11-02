@@ -11,6 +11,7 @@ import type {
 	RouterState,
 	Snapshot,
 	Usage,
+	Warning,
 } from '../protocol.ts';
 import type { Feed } from './feed.ts';
 import type { GitHubLive } from './github.ts';
@@ -56,6 +57,8 @@ export type Daemon = {
 	loginPath: string;
 	/** Commands are refused unless it's `on`. */
 	sandbox: SandboxStatus;
+	/** `user.name` and `user.email`, when git can't resolve them for commits. */
+	missingIdentity: string[];
 	/** Worker loops of active tasks, by task ID. */
 	workers: Map<number, WorkerLive>;
 	/** Commands still running, by step ID. */
@@ -248,17 +251,31 @@ export function health(daemon: Daemon): Health {
 			since: daemon.model.since ?? Date.now(),
 		});
 	}
+	const warnings: Warning[] = [];
 	const { sandbox } = daemon;
-	if (sandbox.state === 'unavailable') {
-		problems.push({
+	if (sandbox.state === 'off') {
+		warnings.push({
 			id: 'sandbox',
-			kind: 'sandbox',
-			text: sandbox.text,
+			text: `Commands run unsandboxed: ${sandbox.cause}`,
 			fix: sandbox.fix,
 			since: sandbox.since,
 		});
 	}
 	problems.push(...daemon.github.problems);
+	if (daemon.missingIdentity.length > 0) {
+		warnings.push({
+			id: 'git-identity',
+			text: `git has no ${daemon.missingIdentity.join(' or ')} set, so Worker commits will fail`,
+			fix: `${daemon.missingIdentity
+				.map((key) =>
+					key === 'user.name'
+						? 'git config --global user.name "Your Name"'
+						: 'git config --global user.email "you@example.com"',
+				)
+				.join(' && ')}, then restart the agent`,
+			since: daemon.agent.startedAt,
+		});
+	}
 	return {
 		channels: [
 			...[...daemon.channels].map(([name, lastEventAt]) => ({
@@ -276,6 +293,7 @@ export function health(daemon: Daemon): Health {
 		],
 		model: { name: MODEL, ...daemon.model, key: daemon.keySource },
 		problems,
+		warnings,
 		machine: daemon.machine,
 		sandbox: sandbox.state,
 	};

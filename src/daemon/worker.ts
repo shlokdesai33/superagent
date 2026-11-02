@@ -39,15 +39,28 @@ const NOTE_CHARS = 200;
 const SLOT = 'a free worker slot';
 const NUDGE = 'Call finish, ask or wait_for to say what happens next.';
 
-const SYSTEM_PROMPT = `You are a Worker of a local AI agent. You carry out one task on the operator's machine with your tools. The Router, another model, gave you the task and talks to people for you.
+const PROMPT_START = `You are a Worker of a local AI agent. You carry out one task on the operator's machine with your tools. The Router, another model, gave you the task and talks to people for you.
 
 - You never talk to people. Use report for progress the Router may want to pass on, and ask only when you need a decision from the operator.
 - Before each batch of tool calls, write one short line saying what you found or what you're about to do. The operator sees it as a step.
 - Commands run with bash in your working folder. run waits up to 30 seconds; a longer command keeps running in the background and its result arrives as a message, so you can keep working meanwhile.
-- Commands run in a sandbox that keeps their writes inside your working folder, $TMPDIR, /tmp, package and tool caches and, in a worktree, the repository's git folder, so git and package installs work as usual. Reads and the network are open.
-- File tools take paths relative to your working folder. write_file and edit_file only write inside it.
+`;
+
+const PROMPT_END = `- File tools take paths relative to your working folder. write_file and edit_file only write inside it.
 - New messages (notes from the operator or the Router, answers to your questions, finished commands) arrive between your steps. Take them into account.
 - Every response ends with tool calls. When you're waiting on something outside, call wait_for. When the task is complete, call finish with a one-line result (at most 80 characters) and, if useful, a markdown report.`;
+
+const SANDBOXED =
+	"- Commands run in a sandbox that keeps their writes inside your working folder, $TMPDIR, /tmp, package and tool caches and, in a worktree, the repository's git folder, so git and package installs work as usual. Reads and the network are open.";
+
+/** Fixed for the daemon's life, so it stays cached. */
+function systemPrompt(daemon: Daemon): string {
+	const sandbox =
+		daemon.sandbox.state === 'on'
+			? SANDBOXED
+			: `- Commands run unsandboxed on this machine (${daemon.sandbox.cause}), so nothing stops a command from changing files elsewhere. Keep writes inside your working folder and $TMPDIR.`;
+	return `${PROMPT_START}${sandbox}\n${PROMPT_END}`;
+}
 
 /** Makes `daemon.runWorker` start or wake Worker loops. */
 export function installWorkers(daemon: Daemon): void {
@@ -249,7 +262,7 @@ async function workerLoop(
 						prompt_cache_key: cacheKey,
 						tools: WORKER_TOOLS,
 						messages: [
-							...promptMessages(db, sessionId, SYSTEM_PROMPT),
+							...promptMessages(db, sessionId, systemPrompt(daemon)),
 							...pending,
 						],
 					},

@@ -251,21 +251,56 @@ export function saveRepos(path: string, repos: Config['repos']): void {
 	writeFileSync(path, `${JSON.stringify(raw, null, '\t')}\n`, { mode: 0o600 });
 }
 
-/** Fails when `git` or `bash` is missing, since Workers can't run without them. */
-export function gatherMachineFacts(): MachineFacts {
-	const missing = ['git', 'bash'].filter((tool) => Bun.which(tool) === null);
-	if (missing.length > 0) {
+/**
+ * Which tools are on `path`, the PATH commands and the daemon's git get.
+ * Fails without `bash`, which every command runs in, or a working `git`.
+ */
+export function gatherMachineFacts(path: string): MachineFacts {
+	if (Bun.which('bash', { PATH: path }) === null) {
 		throw new StartupError(
-			`The agent needs ${missing.join(' and ')} on PATH; install ${missing.length > 1 ? 'them' : 'it'} and start again`,
+			'The agent needs bash on PATH; install it and start again',
+		);
+	}
+	if (!installed('git', path)) {
+		const fix =
+			process.platform === 'darwin'
+				? 'xcode-select --install'
+				: installCommand(['git']);
+		throw new StartupError(
+			`The agent needs git on PATH. Install it (${fix}) and start again`,
 		);
 	}
 	return {
 		os: osName(),
 		arch: process.arch,
 		tools: Object.fromEntries(
-			MACHINE_TOOLS.map((tool) => [tool, Bun.which(tool) !== null]),
+			MACHINE_TOOLS.map((tool) => [tool, installed(tool, path)]),
 		),
 	};
+}
+
+// On macOS these exist in /usr/bin even without the Command Line Tools, as
+// stubs that open an install dialog and fail.
+const MACOS_STUBS = new Set(['/usr/bin/git', '/usr/bin/python3']);
+
+function installed(tool: string, path: string): boolean {
+	const found = Bun.which(tool, { PATH: path });
+	if (found === null) return false;
+	if (process.platform !== 'darwin' || !MACOS_STUBS.has(found)) return true;
+	return developerToolsInstalled();
+}
+
+let developerTools: boolean | null = null;
+
+/** Whether `xcode-select -p` finds the developer tools; it never opens the dialog. */
+function developerToolsInstalled(): boolean {
+	developerTools ??=
+		Bun.spawnSync(['/usr/bin/xcode-select', '-p'], {
+			stdin: 'ignore',
+			stdout: 'ignore',
+			stderr: 'ignore',
+		}).exitCode === 0;
+	return developerTools;
 }
 
 function osName(): string {
@@ -279,6 +314,21 @@ function osName(): string {
 		fields.get('PRETTY_NAME') ??
 		[fields.get('NAME'), fields.get('VERSION_ID')].filter(Boolean).join(' ');
 	return name || `Linux ${release()}`;
+}
+
+/** The command that installs `packages` on this Linux distribution. */
+export function installCommand(packages: string[]): string {
+	const fields = osRelease();
+	const family = `${fields.get('ID') ?? ''} ${fields.get('ID_LIKE') ?? ''}`;
+	const names = packages.join(' ');
+	if (/\b(debian|ubuntu)\b/.test(family)) return `sudo apt install ${names}`;
+	if (/\b(fedora|rhel|centos)\b/.test(family)) {
+		return `sudo dnf install ${names}`;
+	}
+	if (/\barch\b/.test(family)) return `sudo pacman -S ${names}`;
+	if (/\bsuse\b/.test(family)) return `sudo zypper install ${names}`;
+	if (/\balpine\b/.test(family)) return `sudo apk add ${names}`;
+	return `Install ${packages.join(', ')} with your package manager`;
 }
 
 /** The fields of `/etc/os-release`; empty when there's none. */

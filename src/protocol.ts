@@ -158,9 +158,11 @@ export type Health = {
 	};
 	/** Failed tasks are tasks, not problems. */
 	problems: Problem[];
+	/** Optional add-ons that are missing; the agent works without them. */
+	warnings: Warning[];
 	machine: MachineFacts;
-	/** `unavailable` comes with a `sandbox` problem, and commands are refused. Never `off`. */
-	sandbox: 'off' | 'on' | 'unavailable';
+	/** `off` comes with a `sandbox` warning: commands run unsandboxed. */
+	sandbox: 'on' | 'off';
 };
 
 /** `env` is `PARTICLE_API_KEY`, `file` the `particle-key` file in the data folder. */
@@ -175,9 +177,18 @@ export type MachineFacts = {
 export type Problem = {
 	/** Stable, for fades: `model`, `undelivered:812`. */
 	id: string;
-	kind: 'model' | 'channel' | 'undelivered' | 'sandbox';
+	kind: 'model' | 'channel' | 'undelivered';
 	text: string;
 	/** What to run or do to fix it, when the agent knows. */
+	fix: string | null;
+	since: number;
+};
+
+export type Warning = {
+	/** Stable: `sandbox`, `git-identity`. */
+	id: string;
+	text: string;
+	/** What to run or do to fix it. */
 	fix: string | null;
 	since: number;
 };

@@ -93,14 +93,12 @@ export async function runCommand(
 	command: string,
 	timeoutSeconds: number,
 ): Promise<string> {
-	const { db, sandbox } = daemon;
-	if (sandbox.state !== 'on') {
-		return `error: ${sandbox.text}. The operator has to fix that and restart the agent; the file tools still work.`;
-	}
+	const { db } = daemon;
+	const sandboxed = daemon.sandbox.state === 'on';
 	const startedAt = Date.now();
 	const folder = taskFolder(daemon, task.handle);
 	mkdirSync(join(folder, 'commands'), { recursive: true });
-	// A sandbox write root; tasks from before the sandbox may not have it.
+	// Its TMPDIR and a sandbox write root; older tasks may not have it.
 	const tmp = join(folder, 'tmp');
 	mkdirSync(tmp, { recursive: true });
 	const stepId = Number(
@@ -121,8 +119,10 @@ export async function runCommand(
 	let child: ReturnType<typeof spawn>;
 	let wrapped = false;
 	try {
-		const argv = await sandboxCommand(daemon, task, tmp, command);
-		wrapped = true;
+		const argv = sandboxed
+			? await sandboxCommand(daemon, task, tmp, command)
+			: ['/bin/bash', '-c', command];
+		wrapped = sandboxed;
 		child = spawn(argv, task.workDir, commandEnv(daemon, task.handle));
 	} catch (error) {
 		if (wrapped) SandboxManager.cleanupAfterCommand();
@@ -191,7 +191,7 @@ export async function runCommand(
 
 	entry.finished = (async () => {
 		await Promise.all([pump(child.stdout), pump(child.stderr), child.exited]);
-		SandboxManager.cleanupAfterCommand();
+		if (sandboxed) SandboxManager.cleanupAfterCommand();
 		clearTimeout(timeout);
 		if (killTimer) clearTimeout(killTimer);
 		if (truncated) await sink.write('\n[output cut at 10 MB]\n');

@@ -57,6 +57,10 @@ export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 		lines.push(`Problem: ${problem.text}`);
 		if (problem.fix) lines.push(`  Fix: ${problem.fix}`);
 	}
+	for (const warning of health.warnings) {
+		lines.push(`Warning: ${warning.text}`);
+		if (warning.fix) lines.push(`  Fix: ${warning.fix}`);
+	}
 	lines.push(`Sandbox: ${health.sandbox}`);
 
 	const tools = Object.entries(health.machine.tools);
