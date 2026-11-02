@@ -35,7 +35,7 @@ import {
 	toRouter,
 } from './state.ts';
 import type { Terminal } from './terminal.ts';
-import { THEMES, type ThemeName, themeFromOsc11 } from './theme.ts';
+import { type Theme, backgroundFromOsc11 } from './theme.ts';
 import { statusPhrase, view } from './view.ts';
 
 const IDLE_MS = 500;
@@ -71,7 +71,7 @@ export class App {
 	private finish: () => void = () => {};
 	readonly done: Promise<void>;
 
-	constructor(terminal: Terminal, theme: ThemeName, startedIn: string | null) {
+	constructor(terminal: Terminal, theme: Theme, startedIn: string | null) {
 		this.terminal = terminal;
 		this.model = {
 			connection: { state: 'connecting' },
@@ -79,7 +79,7 @@ export class App {
 		};
 		const now = Date.now();
 		this.ui = {
-			theme: THEMES[terminal.depth][theme],
+			theme,
 			screen: { name: 'home' },
 			selected: null,
 			selectedIndex: 0,
@@ -364,9 +364,15 @@ export class App {
 			return;
 		}
 		if (event.kind === 'background') {
-			const name = themeFromOsc11(event.reply);
-			if (name && name !== this.ui.theme.name) {
-				this.ui.theme = THEMES[this.terminal.depth][name];
+			const background = backgroundFromOsc11(event.reply);
+			const { bg } = this.ui.theme;
+			if (
+				background &&
+				(background[0] !== bg[0] ||
+					background[1] !== bg[1] ||
+					background[2] !== bg[2])
+			) {
+				this.ui.theme = this.terminal.themeFor(background);
 				this.terminal.invalidate();
 				this.render();
 			}
