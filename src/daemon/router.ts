@@ -108,20 +108,27 @@ export function startRouter(daemon: Daemon): RouterLoop {
 		lastPromptTokens(daemon.db, sessionId, 'router') > COMPACT_AT_PROMPT_TOKENS;
 	let woken: (() => void) | null = null;
 	daemon.router.wake = () => {
-		woken?.();
+		const wake = woken;
 		woken = null;
+		wake?.();
 	};
 	// `null` sleeps until woken. A timed sleep ignores wakes, so new events
-	// don't cut a pause or backoff short.
-	const sleep = (ms: number | null) =>
+	// don't cut a pause or backoff short, unless `endEarly` says to.
+	const sleep = (ms: number | null, endEarly: (() => boolean) | null = null) =>
 		new Promise<void>((resolve) => {
 			const done = () => {
 				if (timer) clearTimeout(timer);
 				signal.removeEventListener('abort', done);
+				if (woken === check) woken = null;
 				resolve();
+			};
+			const check = () => {
+				if (endEarly?.()) done();
+				else woken = check;
 			};
 			const timer = ms === null ? null : setTimeout(done, ms);
 			if (ms === null) woken = done;
+			else if (endEarly) woken = check;
 			signal.addEventListener('abort', done, { once: true });
 		});
 
@@ -269,7 +276,14 @@ export function startRouter(daemon: Daemon): RouterLoop {
 						retryInSeconds: delay / 1000,
 					},
 				);
-				await sleep(delay);
+				// After a transient failure, Particle answering again (a call or
+				// the probe) ends the backoff.
+				const transient =
+					error instanceof ModelError && error.failure === 'transient';
+				await sleep(
+					delay,
+					transient ? () => daemon.model.state === 'ok' : null,
+				);
 			}
 		}
 	})();

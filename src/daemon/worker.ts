@@ -33,11 +33,14 @@ import { WORKER_TOOLS, runWorkerTool } from './worker-tools.ts';
 const EFFORT = 'high';
 const MAX_COMPLETION_TOKENS = 32_000;
 const COMPACT_AT_PROMPT_TOKENS = 300_000;
-// A crude guard until the Watchdog exists.
 const STEP_LIMIT = 500;
 const ACCOUNT_RETRY_MS = 2 * 60_000;
+// Transient failures in a row, each after Particle was healthy again, before
+// the request itself is blamed and the task fails.
+const MAX_TRANSIENT_FAILURES = 3;
 const NOTE_CHARS = 200;
 const SLOT = 'a free worker slot';
+const UNREACHABLE = 'Particle (unreachable)';
 const NUDGE = 'Call finish, ask or wait_for to say what happens next.';
 
 const PROMPT_START = `You are a Worker of a local AI agent. You carry out one task on the operator's machine with your tools. The Router, another model, gave you the task and talks to people for you.
@@ -170,6 +173,7 @@ async function workerLoop(
 	let needsCompaction =
 		lastPromptTokens(db, sessionId, 'worker') > COMPACT_AT_PROMPT_TOKENS;
 	let worktreeChecked = false;
+	let transientFailures = 0;
 
 	while (!signal.aborted) {
 		const task = taskRow(db, live.taskId);
@@ -186,6 +190,13 @@ async function workerLoop(
 		}
 		if (daemon.particle === null) {
 			setBlocked(daemon, live, 'Particle (no API key)');
+			await sleep(null);
+			continue;
+		}
+		// Woken by any successful call or the probe; new messages don't make it
+		// try a Particle that's still down.
+		if (transientFailures > 0 && daemon.model.state !== 'ok') {
+			setBlocked(daemon, live, UNREACHABLE);
 			await sleep(null);
 			continue;
 		}
@@ -287,6 +298,21 @@ async function workerLoop(
 					await sleep(ACCOUNT_RETRY_MS);
 					continue;
 				}
+				if (
+					failure instanceof ModelError &&
+					failure.failure === 'transient' &&
+					transientFailures < MAX_TRANSIENT_FAILURES - 1
+				) {
+					// Particle is down or out of reach; the task waits, not fails.
+					transientFailures += 1;
+					setBlocked(daemon, live, UNREACHABLE);
+					daemon.log('warn', 'worker waits for Particle', {
+						task: live.handle,
+						error: failure.message,
+						failures: transientFailures,
+					});
+					continue;
+				}
 				endTask(daemon, live.taskId, {
 					state: 'failed',
 					failure:
@@ -297,6 +323,7 @@ async function workerLoop(
 				return;
 			}
 			setBlocked(daemon, live, null);
+			transientFailures = 0;
 			needsCompaction =
 				(result.usage?.prompt_tokens ?? 0) > COMPACT_AT_PROMPT_TOKENS;
 
