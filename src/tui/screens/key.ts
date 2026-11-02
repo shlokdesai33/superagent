@@ -1,4 +1,4 @@
-import { type Line, type Seg, width, wrap } from '../cells.ts';
+import { type Line, type Seg, truncate, width, wrap } from '../cells.ts';
 import type { Model } from '../model.ts';
 import { hint, rule, sep, spinner } from '../parts.ts';
 import type { KeyScreen } from '../state.ts';
@@ -9,7 +9,8 @@ const COLUMN = 60;
 const MASK = '•';
 /** Rows between the wordmark and the text. */
 const GAP = 2;
-const OUTCOME_LINES = 3;
+/** The `› ` of the input and the `✗ ` of an error; their rows wrap under the text. */
+const PREFIX = 2;
 
 type Text = {
 	title: Seg[][];
@@ -17,7 +18,8 @@ type Text = {
 	about: Seg[][];
 	/** A blank row above the input. */
 	blank: boolean;
-	input: Seg[];
+	/** The masked key, wrapped, on a `surface` band. */
+	input: Seg[][];
 	/** Always at least one row, so a result doesn't move the layout. */
 	outcome: Seg[][];
 };
@@ -27,7 +29,7 @@ function textHeight(text: Text): number {
 		text.title.length +
 		text.about.length +
 		(text.blank ? 1 : 0) +
-		1 +
+		text.input.length +
 		text.outcome.length
 	);
 }
@@ -68,8 +70,8 @@ export function keyLines(
 			title: prose([{ t: TITLE[screen.reason], fg: 'fg', b: true }]),
 			about,
 			blank: true,
-			input: inputSegs(screen, column, now),
-			outcome: wrap(outcomeSegs(screen, now), column, OUTCOME_LINES),
+			input: inputRows(screen, column, now),
+			outcome: outcomeRows(screen, column, now),
 		};
 	};
 
@@ -94,7 +96,7 @@ export function keyLines(
 		// the title, the blank above the input, what happens to the key, and
 		// the name, as far as they fit.
 		const full = textFor(column);
-		let spare = room - 1 - full.outcome.length;
+		let spare = room - full.input.length - full.outcome.length;
 		const keep = (lines: Seg[][]): Seg[][] => {
 			if (lines.length > spare) return [];
 			spare -= lines.length;
@@ -114,7 +116,7 @@ export function keyLines(
 		...text.title,
 		...text.about,
 		...(text.blank ? [[]] : []),
-		text.input,
+		...text.input,
 		...text.outcome,
 	];
 	const block: Line[] = [
@@ -139,48 +141,71 @@ function indent(segs: Seg[], columns: number): Line {
 	return { segs: columns > 0 ? [{ t: ' '.repeat(columns) }, ...segs] : segs };
 }
 
-/** The key as `•`s on a `surface` band across the column; never the key. */
-function inputSegs(screen: KeyScreen, column: number, now: number): Seg[] {
-	const count = Array.from(screen.text).length;
-	const room = Math.max(1, column - 4);
-	const mask = count <= room ? MASK.repeat(count) : `…${MASK.repeat(room - 1)}`;
+/**
+ * The key as `•`s on a `surface` band across the column, wrapping under the
+ * first row's text like anything typed; never the key.
+ */
+function inputRows(screen: KeyScreen, column: number, now: number): Seg[][] {
+	const band = (segs: Seg[]): Seg[] => {
+		const used = width(segs);
+		return used < column
+			? [...segs, { t: ' '.repeat(column - used), bg: 'surface' }]
+			: segs;
+	};
 	const cursor: Seg = {
 		t: screen.checking === null && Math.floor(now / 500) % 2 === 0 ? '▏' : ' ',
 		fg: 'accent',
 		bg: 'surface',
 	};
-	const segs: Seg[] = [{ t: '› ', fg: 'accent', bg: 'surface' }];
+	const prompt: Seg = { t: '› ', fg: 'accent', bg: 'surface' };
+	const count = Array.from(screen.text).length;
 	if (count === 0) {
-		segs.push(cursor, {
-			t: 'paste your key',
-			fg: 'faint',
-			i: true,
-			bg: 'surface',
-		});
-	} else segs.push({ t: mask, fg: 'dim', bg: 'surface' }, cursor);
-	const used = width(segs);
-	if (used < column) {
-		segs.push({ t: ' '.repeat(column - used), bg: 'surface' });
+		// The placeholder is fixed chrome: cut, not wrapped.
+		const placeholder = truncate(
+			[{ t: 'paste your key', fg: 'faint', i: true, bg: 'surface' }],
+			Math.max(0, column - PREFIX - 1),
+		);
+		return [band([prompt, cursor, ...placeholder])];
 	}
-	return segs;
+	const room = Math.max(1, column - PREFIX);
+	const chars = [...Array.from({ length: count }, () => MASK), cursor.t];
+	const rows: Seg[][] = [];
+	for (let start = 0; start < chars.length; start += room) {
+		const chunk = chars.slice(start, start + room);
+		const last = start + room >= chars.length;
+		const mask = (last ? chunk.slice(0, -1) : chunk).join('');
+		rows.push(
+			band([
+				rows.length === 0 ? prompt : { t: ' '.repeat(PREFIX), bg: 'surface' },
+				{ t: mask, fg: 'dim', bg: 'surface' },
+				...(last ? [cursor] : []),
+			]),
+		);
+	}
+	return rows;
 }
 
-function outcomeSegs(screen: KeyScreen, now: number): Seg[] {
-	if (screen.checking !== null) {
-		return [
-			{ t: `${spinner(now)} `, fg: 'accent' },
-			{ t: 'checking…', fg: 'faint' },
-		];
-	}
+/** The check in progress or the last failure, wrapped under its glyph; one empty row otherwise. */
+function outcomeRows(screen: KeyScreen, column: number, now: number): Seg[][] {
+	let glyph: Seg;
+	let text: Seg[];
 	const { error } = screen;
-	if (error === null) return [];
-	return [
-		{ t: '✗ ', fg: 'err' },
-		{ t: error.subject, fg: 'fg' },
-		...(error.detail
-			? [sep, { t: error.detail, fg: 'faint' } satisfies Seg]
-			: []),
-	];
+	if (screen.checking !== null) {
+		glyph = { t: `${spinner(now)} `, fg: 'accent' };
+		text = [{ t: 'checking…', fg: 'faint' }];
+	} else if (error !== null) {
+		glyph = { t: '✗ ', fg: 'err' };
+		text = [
+			{ t: error.subject, fg: 'fg' },
+			...(error.detail
+				? [sep, { t: error.detail, fg: 'faint' } satisfies Seg]
+				: []),
+		];
+	} else return [[]];
+	return wrap(text, Math.max(1, column - PREFIX)).map((segs, index) => [
+		index === 0 ? glyph : { t: ' '.repeat(PREFIX) },
+		...segs,
+	]);
 }
 
 /** Drops `ctrl-u`, then `ctrl-c`, until the hint fits. */
