@@ -235,18 +235,11 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 	} else {
 		// GitHub threads name their repository; otherwise the one the operator's
 		// terminal was in when they sent the message.
+		const fromThreads = repoOfThreads(daemon, threads);
 		const hinted =
-			originEventId === null
-				? null
-				: defaultRepo(
-						db
-							.query<{ data: string | null }, [number]>(
-								'SELECT data FROM events WHERE id = ?',
-							)
-							.get(originEventId)?.data ?? null,
-					);
+			fromThreads === null ? defaultFor(daemon, batchId, event) : null;
 		chosen =
-			repoOfThreads(daemon, threads) ??
+			fromThreads ??
 			(hinted !== null && repos.includes(hinted) ? hinted : null);
 		if (chosen === null && repos.length > 1) {
 			throw new ToolError(
@@ -269,6 +262,41 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 		messages: [],
 		action: `started ${handle}`,
 	};
+}
+
+/**
+ * The default repository of the event a task is for. Without `event`, the
+ * batch's messages from people must agree on it, so a task never takes the
+ * default of a message it isn't for.
+ */
+function defaultFor(
+	daemon: Daemon,
+	batchId: number,
+	event: number | null,
+): string | null {
+	const { db } = daemon;
+	if (event !== null) {
+		return defaultRepo(
+			db
+				.query<{ data: string | null }, [number]>(
+					'SELECT data FROM events WHERE id = ?',
+				)
+				.get(event)?.data ?? null,
+		);
+	}
+	const defaults = db
+		.query<{ id: number; data: string | null }, [number]>(
+			"SELECT id, data FROM events WHERE batch_id = ? AND channel != 'internal' ORDER BY id",
+		)
+		.all(batchId)
+		.map((row) => ({ id: row.id, repo: defaultRepo(row.data) }));
+	const distinct = new Set(defaults.map((entry) => entry.repo));
+	if (distinct.size > 1) {
+		throw new ToolError(
+			`the events in this batch have different default repositories (${defaults.map((entry) => `#${entry.id}: ${entry.repo ?? 'none'}`).join(', ')}); pass event, or repo`,
+		);
+	}
+	return defaults[0]?.repo ?? null;
 }
 
 function sendToTask(daemon: Daemon, args: Args): ToolOutcome {

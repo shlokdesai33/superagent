@@ -1,7 +1,8 @@
 // End to end: the terminal UI makes the repository it's opened in the default
 // for tasks from its messages. Opened outside one, nothing changes; inside
 // one, the repository is added and tasks start there unless the message names
-// another; tab clears it. Run with `bun run e2e`; it exits non-zero if a
+// another; tab clears it. Messages with different defaults decided together
+// need start_task's event. Run with `bun run e2e`; it exits non-zero if a
 // check fails.
 import { execFileSync } from 'node:child_process';
 import {
@@ -13,12 +14,14 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import type { FeedLine, TaskDetail, TaskSummary } from '../src/protocol.ts';
+import { writeKeyFile } from '../src/keys.ts';
 import { startFakeParticle } from './fake-particle.ts';
 import { startAgent } from './harness.ts';
 import { openTui } from './tui.ts';
 
 type TaskLine = Extract<FeedLine, { type: 'task' }>;
 type MessageLine = Extract<FeedLine, { type: 'message' }>;
+type HealthLine = Extract<FeedLine, { type: 'health' }>;
 
 const root = realpathSync(mkdtempSync('/tmp/sa-repos-'));
 function repository(path: string): string {
@@ -56,12 +59,35 @@ execFileSync('git', [
 
 // A Router that starts a task for each message, marked (R1), (R2)…, passing
 // repo only when the message names one, and asks when start_task can't pick.
+// Messages marked (B1), (B2)… get tasks without event, and again with it when
+// start_task says the batch's defaults differ.
+const batched = new Map<string, number>();
+const batchTask = (id: string, event?: number) => ({
+	name: 'start_task',
+	args: {
+		title: `Task ${id}`,
+		instructions: `Do ${id}.`,
+		threads: [],
+		...(event === undefined ? {} : { event }),
+	},
+});
 const particle = startFakeParticle((request) => {
 	if (request.session === 'compaction') return { content: 'Summary.' };
 	if (request.session === 'worker') {
 		return { calls: [{ name: 'finish', args: { result: 'Done' } }] };
 	}
 	const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+	for (const [, event, id] of request.fresh.matchAll(
+		/^#(\d+) · console\b.*\n.*\((B\d)\)$/gm,
+	)) {
+		if (id === undefined) continue;
+		batched.set(id, Number(event));
+		calls.push(batchTask(id));
+	}
+	if (request.results.some((result) => result.includes('different default'))) {
+		for (const [id, event] of batched) calls.push(batchTask(id, event));
+		batched.clear();
+	}
 	for (const [line, id] of request.fresh.matchAll(/^.*\((R\d)\)$/gm)) {
 		calls.push({
 			name: 'start_task',
@@ -91,9 +117,24 @@ function check(name: string, ok: boolean, detail = ''): void {
 }
 
 // `other` is configured, so today's default for a task is that one repository.
+// The key is in its file, so taking it away holds messages for one batch.
 const agent = await startAgent(particle.url, {
 	config: { repos: [{ name: 'other', path: other }] },
+	env: { PARTICLE_API_KEY: '' },
 });
+const keyFile = join(agent.home, 'particle-key');
+/** Waits for a health line after the `from`th feed line with the model in `state`. */
+const modelState = (state: string, from: number) =>
+	agent.waitFor(
+		`the model to be ${state}`,
+		(line): line is HealthLine =>
+			agent.lines.indexOf(line) >= from &&
+			line.type === 'health' &&
+			line.health.model.state === state,
+	);
+let from = agent.lines.length;
+writeKeyFile(keyFile, 'pai-e2e');
+await modelState('ok', from);
 
 const configRepos = (): Array<{ name: string; path: string }> => {
 	const value: unknown = JSON.parse(
@@ -263,6 +304,45 @@ try {
 	await tui.waitFor('new tasks in webapp');
 	check('in a linked worktree, new tasks go to its main repository', true);
 	await tui.quit();
+
+	// 7. Two messages with different defaults, decided in one batch: a task
+	//    takes the default of its own event, never of the batch's newest.
+	from = agent.lines.length;
+	rmSync(keyFile);
+	await modelState('paused', from);
+	await agent.action({
+		type: 'send_console',
+		text: 'fix the signup form (B1)',
+		repo: webapp,
+	});
+	await agent.action({
+		type: 'send_console',
+		text: 'bump the version (B2)',
+		repo: other,
+	});
+	writeKeyFile(keyFile, 'pai-e2e');
+	const [b1, b2] = await Promise.all([task('B1'), task('B2')]);
+	const together = particle.requests.find(
+		(r) =>
+			r.session === 'router' &&
+			r.fresh.includes('(B1)') &&
+			r.fresh.includes('(B2)'),
+	);
+	check('both messages are decided in one batch', together !== undefined);
+	check(
+		'without event, start_task asks which event when their defaults differ',
+		particle.requests.some((r) =>
+			r.results.some((result) =>
+				result.includes('different default repositories'),
+			),
+		),
+	);
+	check(
+		"with event, each task works in its own message's default",
+		(await detail(b1.handle)).workDir.includes('/worktrees/webapp/') &&
+			(await detail(b2.handle)).workDir.includes('/worktrees/other/'),
+		`${(await detail(b1.handle)).workDir} · ${(await detail(b2.handle)).workDir}`,
+	);
 } catch (error) {
 	failures += 1;
 	process.stdout.write(
