@@ -32,7 +32,7 @@ superagent login particle # ask for your Particle API key, check it and save it
 superagent daemon         # run the background agent in this terminal (for debugging); Ctrl-C stops it
 ```
 
-The background agent starts with the environment of the terminal it was started from, including its `PATH`, and works from the data folder, wherever you started it. Commands that need it say "superagent isn't running. Run `superagent start`." when it isn't. If it can't start, `superagent` and `superagent start` print why, from `output.log` in the data folder, which keeps whatever the agent printed outside its log.
+The background agent starts with the environment of the terminal it was started from, including its `PATH`, and works from the data folder, wherever you started it. Commands that need it say "superagent isn't running. Run `superagent start`." when it isn't, and after 5 seconds without an answer, as when it's frozen, that it isn't answering; `superagent stop` and `restart` still end it. If it can't start, `superagent` and `superagent start` print why, from `output.log` in the data folder, which keeps whatever the agent printed outside its log.
 
 ### Uninstall
 
