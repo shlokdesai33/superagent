@@ -53,10 +53,10 @@ bun src/cli.ts daemon         # run the background agent in this terminal (for d
 
 The terminal UI connects to the agent for the same data folder and reconnects by itself when it goes away. It picks a light or dark theme from the terminal's background; press `?` for its keys.
 
-The agent keeps everything in one data folder that only you can read, `~/.superagent` unless `SUPERAGENT_HOME` is set: `config.json` (mode `0600`), the Particle key `particle-key` (mode `0600`), the socket `agent.sock`, the lock `daemon.pid`, the SQLite state `state.db`, its log `daemon.log` and `output.log`, what a background agent printed outside its log (startup errors and crashes). Clients talk HTTP over the socket, sending `Superagent-Protocol: 1`:
+The agent keeps everything in one data folder that only you can read, `~/.superagent` unless `SUPERAGENT_HOME` is set: `config.json` (mode `0600`), the Particle key `particle-key` (mode `0600`), the socket `agent.sock`, the lock `daemon.pid`, the SQLite state `state.db`, its log `daemon.log` and `output.log`, what a background agent printed outside its log (startup errors and crashes). Clients talk HTTP over the socket, sending `Superagent-Protocol: 2`:
 
 ```sh
-curl -N --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
+curl -N --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 2' \
   http://superagent/v1/feed
 ```
 
@@ -65,7 +65,7 @@ curl -N --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
 `superagent daemon --script-channel` turns on `POST /v1/events`, which injects a message on a test channel, `script`, the same way GitHub events arrive. It's for tests and development:
 
 ```sh
-curl --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
+curl --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 2' \
   http://superagent/v1/events -d '{"externalId":"evt-17","thread":{"key":"support/77","title":"#support","url":null},
   "author":{"id":"u-bob","name":"bob","isBot":false},"text":"@superagent export is broken","mentionsAgent":true}'
 ```
