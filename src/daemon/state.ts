@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import { realpathSync } from 'node:fs';
 import type { DataPaths } from '../home.ts';
 import { MODEL, type ParticleClient } from '../particle/client.ts';
 import type {
@@ -378,7 +379,20 @@ export function health(daemon: Daemon): Health {
 					)
 					.get(dayStart(Date.now()))?.count ?? 0,
 		},
+		repos: daemon.config.repos.map((repo) => ({
+			name: repo.name,
+			path: canonical(repo.path),
+		})),
 	};
+}
+
+/** `path` with its symlinks resolved, or as given when it doesn't exist. */
+export function canonical(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
 }
 
 export function dayStart(now: number): number {

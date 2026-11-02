@@ -26,10 +26,13 @@ import { healthBody } from './screens/health.ts';
 import { homeBody } from './screens/home.ts';
 import { keysBody } from './screens/keys.ts';
 import { taskBody } from './screens/task.ts';
-import { FADE_MS, type Ui } from './state.ts';
+import { repoChoices, repoName } from './repo.ts';
+import { FADE_MS, type Ui, toRouter } from './state.ts';
 import { type Rgb, type Theme, blend } from './theme.ts';
 
 const MIN_COLUMNS = 40;
+/** Columns left to type in before the destination preview drops the Router. */
+const MIN_TYPING = 40;
 const MIN_ROWS = 12;
 const FLASH_MS = 650;
 const SWEEP_MS = 1_000;
@@ -450,11 +453,26 @@ export function destination(ui: Ui): string {
 	return 'the Router decides what to do';
 }
 
+/** `new tasks in <repo>` while console messages name a default repository. */
+function newTasksIn(model: Model, ui: Ui): string | null {
+	const { path } = ui.repo;
+	if (path === null || model.live === null) return null;
+	// An agent from before `health.repos` sends none.
+	return `new tasks in ${repoName(path, model.live.health.repos ?? [])}`;
+}
+
 function inputLine(model: Model, ui: Ui, content: number, now: number): Line {
 	const offline = model.connection.state !== 'live';
+	const repo = offline ? null : newTasksIn(model, ui);
+	let to = destination(ui);
+	if (repo !== null && toRouter(ui)) {
+		const full = `the Router decides · ${repo}`;
+		// Narrow terminals keep room to type.
+		to = content - width(full) >= MIN_TYPING ? full : repo;
+	}
 	const preview: Seg[] = [
 		{ t: '→ ', fg: 'accent' },
-		{ t: destination(ui), fg: 'faint' },
+		{ t: to, fg: 'faint' },
 	];
 	if (ui.typing) {
 		const text = ui.typing.text.replaceAll(/\s/g, ' ');
@@ -475,13 +493,17 @@ function inputLine(model: Model, ui: Ui, content: number, now: number): Line {
 		: ui.screen.name === 'task'
 			? 'press / to write to this task'
 			: 'press / to ask, or start with @ to message a task';
-	return {
-		segs: [
-			{ t: '› ', fg: offline ? 'faint' : 'accent' },
-			{ t: placeholder, fg: 'faint', i: true },
-		],
-		...(ui.screen.name === 'task' && !offline ? { right: preview } : {}),
-	};
+	const segs: Seg[] = [
+		{ t: '› ', fg: offline ? 'faint' : 'accent' },
+		{ t: placeholder, fg: 'faint', i: true },
+	];
+	if (ui.screen.name === 'task') {
+		return { segs, ...(offline ? {} : { right: preview }) };
+	}
+	// Shown only when the placeholder still fits beside it.
+	return repo !== null && width(segs) + 2 + width(repo) <= content
+		? { segs, right: [{ t: repo, fg: 'faint' }] }
+		: { segs };
 }
 
 /** The end of `text` that fits in `room` columns. */
@@ -501,10 +523,15 @@ function tail(text: string, room: number): string {
 
 function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 	if (ui.typing) {
-		return hint([
-			['enter', 'send'],
-			['esc', 'cancel'],
-		]);
+		const pairs: Array<[string, string]> = [['enter', 'send']];
+		if (
+			toRouter(ui) &&
+			repoChoices(ui.repo.startedIn, model.live?.health.repos ?? []).length > 0
+		) {
+			pairs.push(['tab', 'change repo']);
+		}
+		pairs.push(['esc', 'cancel']);
+		return fitHint(pairs, content, ['tab']);
 	}
 	if (ui.confirmStop) {
 		const task = model.live?.tasks.get(ui.confirmStop);

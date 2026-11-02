@@ -169,7 +169,12 @@ export type Health = {
 		/** Its model calls since local midnight. */
 		reviewsToday: number;
 	};
+	/** Where code tasks can work, from `config.json`, in its order. */
+	repos: Repository[];
 };
+
+/** `path` has its symlinks resolved, like `git rev-parse --show-toplevel`. */
+export type Repository = { name: string; path: string };
 
 /** `env` is `PARTICLE_API_KEY`, `file` the `particle-key` file in the data folder. */
 export type KeySource = 'env' | 'file' | 'missing';
@@ -219,7 +224,16 @@ export type TaskDetail = {
 export type ActionRequest = { requestId: string; action: Action };
 
 export type Action =
-	| { type: 'send_console'; text: string }
+	| {
+			type: 'send_console';
+			text: string;
+			/**
+			 * The top of a git repository, where tasks the Router starts from this
+			 * message work unless it names another. Added to `config.json` when
+			 * it isn't there yet.
+			 */
+			repo?: string | null;
+	  }
 	| { type: 'send_note'; handle: string; text: string }
 	| {
 			type: 'answer_question';

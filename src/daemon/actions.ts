@@ -1,5 +1,6 @@
 import type { Action, ActionResult } from '../protocol.ts';
 import { ingest } from './ingest.ts';
+import { useRepository } from './repos.ts';
 import type { Daemon } from './state.ts';
 import { taskByHandle } from './task-feed.ts';
 import {
@@ -74,8 +75,12 @@ export async function runAction(
 	switch (action.type) {
 		case 'send_console': {
 			const text = 'text' in action ? action.text : undefined;
+			const repo = 'repo' in action ? action.repo : undefined;
 			if (typeof text !== 'string') return malformed('text must be a string');
-			result = sendConsole(daemon, requestId, text);
+			if (repo !== undefined && repo !== null && typeof repo !== 'string') {
+				return malformed('repo must be a path or null');
+			}
+			result = await sendConsole(daemon, requestId, text, repo ?? null);
 			break;
 		}
 		case 'send_note': {
@@ -141,17 +146,22 @@ export async function runAction(
 	return { ok: true, result };
 }
 
-function sendConsole(
+async function sendConsole(
 	daemon: Daemon,
 	requestId: string,
 	text: string,
-): ActionResult {
-	if (text.trim() === '') {
+	repoPath: string | null,
+): Promise<ActionResult> {
+	if (text.trim() === '') return empty();
+	// Sending from a repository confirms it, so one the agent doesn't know yet
+	// is added.
+	const repo = repoPath === null ? null : await useRepository(daemon, repoPath);
+	if (repo?.ok === false) {
 		return {
 			ok: false,
-			code: 'empty',
-			subject: 'Nothing to send',
-			detail: 'type a message first',
+			code: 'bad_repo',
+			subject: 'Not sent',
+			detail: `${repo.detail} · tab changes the repository`,
 		};
 	}
 	const seq = ingest(daemon, {
@@ -162,12 +172,15 @@ function sendConsole(
 		author: { name: 'you', id: null, isBot: false, isSelf: false },
 		text,
 		mentionsAgent: true,
+		...(repo ? { data: { repo: repo.name } } : {}),
 	});
 	return {
 		ok: true,
 		seq: seq ?? daemon.feed.seq,
 		subject: 'Sent',
-		detail: 'the Router decides what to do',
+		detail: repo?.added
+			? `the Router decides what to do · added ${repo.name} to the agent's repositories`
+			: 'the Router decides what to do',
 	};
 }
 

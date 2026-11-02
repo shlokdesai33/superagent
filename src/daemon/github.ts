@@ -119,6 +119,8 @@ export type GitHubClient = GitHubApi & {
 	pulse: () => { at: number | null; waitMs: number; rateLimited: boolean };
 	/** Ends the poller's wait, so the next round starts now. */
 	kick: () => void;
+	/** Checks the configured repositories again now, after one is added. */
+	recheck: () => void;
 };
 
 /**
@@ -596,6 +598,10 @@ export function startGitHub(
 					rate.reset * 1000 > Date.now()),
 		}),
 		kick: () => cutWait?.(),
+		recheck: () => {
+			checked = false;
+			cutWait?.();
+		},
 	};
 }
 

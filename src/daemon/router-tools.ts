@@ -14,6 +14,7 @@ import {
 	prepareGitHubThread,
 	repoOfThreads,
 } from './github-threads.ts';
+import { defaultRepo } from './repos.ts';
 import { createTask, endTask, reopenTask } from './tasks.ts';
 import {
 	type Args,
@@ -74,7 +75,7 @@ export const ROUTER_TOOLS: FunctionTool[] = [
 					'IDs of the threads the task takes over, such as github:acme/app#42 for a GitHub issue; the console stays with you',
 			},
 			repo: string(
-				'A repository from the batch message, for code work; "none" for a scratch folder. Omitted: the only repository, or the one its GitHub threads are on',
+				'A repository from the batch message, for code work; "none" for a scratch folder. Omitted: the one its GitHub threads are on, else its event\'s default repository, else the only repository',
 			),
 			event: integer(
 				'The event the task comes from, 42 for #42; default: the latest in this batch',
@@ -231,15 +232,21 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 			);
 		}
 		chosen = repo;
-	} else if (repos.length > 1) {
-		chosen = repoOfThreads(daemon, threads);
-		if (chosen === null) {
+	} else {
+		// GitHub threads name their repository; otherwise the one the operator's
+		// terminal was in when they sent the message.
+		const fromThreads = repoOfThreads(daemon, threads);
+		const hinted =
+			fromThreads === null ? defaultFor(daemon, batchId, event) : null;
+		chosen =
+			fromThreads ??
+			(hinted !== null && repos.includes(hinted) ? hinted : null);
+		if (chosen === null && repos.length > 1) {
 			throw new ToolError(
 				`several repositories are configured; pass repo: one of ${[...repos, 'none'].join(', ')}`,
 			);
 		}
-	} else {
-		chosen = repos[0] ?? null;
+		chosen ??= repos[0] ?? null;
 	}
 
 	const { handle } = createTask(daemon, {
@@ -255,6 +262,41 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 		messages: [],
 		action: `started ${handle}`,
 	};
+}
+
+/**
+ * The default repository of the event a task is for. Without `event`, the
+ * batch's messages from people must agree on it, so a task never takes the
+ * default of a message it isn't for.
+ */
+function defaultFor(
+	daemon: Daemon,
+	batchId: number,
+	event: number | null,
+): string | null {
+	const { db } = daemon;
+	if (event !== null) {
+		return defaultRepo(
+			db
+				.query<{ data: string | null }, [number]>(
+					'SELECT data FROM events WHERE id = ?',
+				)
+				.get(event)?.data ?? null,
+		);
+	}
+	const defaults = db
+		.query<{ id: number; data: string | null }, [number]>(
+			"SELECT id, data FROM events WHERE batch_id = ? AND channel != 'internal' ORDER BY id",
+		)
+		.all(batchId)
+		.map((row) => ({ id: row.id, repo: defaultRepo(row.data) }));
+	const distinct = new Set(defaults.map((entry) => entry.repo));
+	if (distinct.size > 1) {
+		throw new ToolError(
+			`the events in this batch have different default repositories (${defaults.map((entry) => `#${entry.id}: ${entry.repo ?? 'none'}`).join(', ')}); pass event, or repo`,
+		);
+	}
+	return defaults[0]?.repo ?? null;
 }
 
 function sendToTask(daemon: Daemon, args: Args): ToolOutcome {

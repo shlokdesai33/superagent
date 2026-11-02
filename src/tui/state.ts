@@ -67,7 +67,22 @@ export type Ui = {
 	appeared: Map<string, number>;
 	status: StatusPhraseChange;
 	details: Map<string, DetailState>;
+	/**
+	 * The repository console messages name as the default for new tasks:
+	 * `startedIn`, the one the UI was opened in, until tab changes it.
+	 * `null` names none, as when the UI is opened outside a repository.
+	 */
+	repo: { startedIn: string | null; path: string | null };
 };
+
+/** Whether what's being typed goes to the Router, so the default repository applies. */
+export function toRouter(ui: Ui): boolean {
+	return (
+		ui.typing?.mode === 'free' &&
+		ui.screen.name !== 'task' &&
+		!/^\s*@/.test(ui.typing.text)
+	);
+}
 
 export const FADE_MS = 320;
 
