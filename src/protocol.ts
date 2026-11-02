@@ -124,6 +124,13 @@ export type RouterState = {
 	/** Events in the mailbox, to be decided together next. */
 	waiting: number;
 	last: { text: string; at: number } | null;
+	/**
+	 * Why the Router isn't deciding its waiting events: no Particle key, or a
+	 * failure it's waiting out until `until` (`null`: until a key is saved).
+	 */
+	held: { reason: string; until: number | null } | null;
+	/** Console messages still in the mailbox, the last 50, oldest first. */
+	pending: number[];
 };
 
 /** Since local midnight. Costs are estimates. */
