@@ -214,13 +214,15 @@ export async function runCommand(
 			`UPDATE steps SET status = $status, ended_at = $endedAt, exit_code = $exitCode, pgid = NULL
 			WHERE id = $id`,
 		).run({ status, endedAt, exitCode, id: stepId });
-		// Running the same command to the same end again isn't progress.
+		// Running the same command to the same end again isn't progress. An
+		// earlier run counts while it ended (or started, if still running) after
+		// the last mark, which its own end may have set.
 		const repeated = db
 			.query<unknown, Params>(
 				`SELECT 1 FROM steps s JOIN tasks t ON t.id = s.task_id
 				WHERE s.task_id = $taskId AND s.kind = 'command' AND s.id != $id
 					AND s.command = $command AND s.exit_code IS $exitCode
-					AND s.started_at >= COALESCE(t.last_progress_at, 0)
+					AND COALESCE(s.ended_at, s.started_at) >= COALESCE(t.last_progress_at, 0)
 				LIMIT 1`,
 			)
 			.get({ taskId: task.id, id: stepId, command, exitCode });

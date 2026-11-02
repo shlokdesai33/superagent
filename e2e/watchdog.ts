@@ -33,6 +33,12 @@ const workers: Record<string, (request: FakeRequest) => FakeReply> = {
 		content: 'Looking again.',
 		calls: [{ name: 'read_file', args: { path: 'notes.txt' } }],
 	}),
+	// Runs the same failing command forever: reruns aren't progress. It takes
+	// a little time, so runs don't share a millisecond with the last mark.
+	retester: () => ({
+		content: 'Trying the test again.',
+		calls: [{ name: 'run', args: { command: 'sleep 0.02; exit 1' } }],
+	}),
 	// Edits a file every call (progress), then finishes after 170 calls.
 	editor: (request) =>
 		request.called.length >= 170
@@ -482,6 +488,62 @@ try {
 		},
 		/^runaway:/,
 	);
+
+	await scenario(
+		'Rerunning the same failing command',
+		async (agent) => {
+			await agent.action({ type: 'send_console', text: 'please run retester' });
+			const paused = await taskLine(
+				agent,
+				'the retester paused',
+				(task) => task.title === 'retester' && task.status === 'needs_you',
+			);
+			check(
+				'rerunning a command to the same failure is not progress: the backstop pauses it',
+				paused.question?.text.startsWith('Watchdog:') === true &&
+					workerCalls(paused.handle) >= 150,
+				`${workerCalls(paused.handle)} calls`,
+			);
+			await agent.action({ type: 'stop_task', handle: paused.handle });
+		},
+		/^runaway:/,
+	);
+
+	await scenario("An upgrade doesn't pause busy tasks", async (agent) => {
+		await agent.action({ type: 'send_console', text: 'please run waiter' });
+		const waiting = await taskLine(
+			agent,
+			'the waiter waiting for a note',
+			(task) => task.title === 'waiter' && task.waitingOn === 'a note',
+		);
+		// As if the task had made 200 calls under the version before progress
+		// was tracked: roll back the migration that added it.
+		await agent.crash();
+		const db = new Database(join(agent.home, 'state.db'));
+		const version =
+			db.query<{ user_version: number }, []>('PRAGMA user_version').get()
+				?.user_version ?? 0;
+		db.run('UPDATE tasks SET model_calls = 200 WHERE handle = ?', [
+			waiting.handle,
+		]);
+		db.run('ALTER TABLE tasks DROP COLUMN progress_calls');
+		db.run('ALTER TABLE questions DROP COLUMN asked_by');
+		db.run(`PRAGMA user_version = ${version - 1}`);
+		db.close();
+		await agent.restart();
+		const before = watchdogLines(agent).length;
+		await agent.until(
+			'a few checks after the upgrade',
+			async () => watchdogLines(agent).length,
+			(count) => count >= before + 4,
+		);
+		const detail = await taskDetail(agent, waiting.handle);
+		check(
+			"a task with 200 calls before the upgrade isn't paused after it",
+			detail.task.status === 'waiting',
+			detail.task.status,
+		);
+	});
 
 	await scenario('Edits are progress', async (agent) => {
 		await agent.action({ type: 'send_console', text: 'please run editor' });
