@@ -7,13 +7,15 @@ export class ToolError extends Error {
 
 export type Args = Record<string, unknown>;
 
-export const string = (description: string) => ({
-	type: 'string',
-	description,
-});
-export const integer = (description: string) => ({
-	type: 'integer',
-	description,
+// Every schema is sent on every call: leave out a description the name
+// already says.
+const typed = (type: string, description?: string): JsonObject =>
+	description === undefined ? { type } : { type, description };
+export const string = (description?: string) => typed('string', description);
+export const integer = (description?: string) => typed('integer', description);
+export const strings = (description?: string): JsonObject => ({
+	...typed('array', description),
+	items: { type: 'string' },
 });
 
 export function tool(
@@ -27,7 +29,10 @@ export function tool(
 		function: {
 			name,
 			description,
-			parameters: { type: 'object', properties, required },
+			parameters:
+				required.length > 0
+					? { type: 'object', properties, required }
+					: { type: 'object', properties },
 		},
 	};
 }

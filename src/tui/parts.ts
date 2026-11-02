@@ -21,11 +21,10 @@ export function rule(columns: number): Line {
 	return { segs: [{ t: '─'.repeat(Math.max(0, columns)), fg: 'ghost' }] };
 }
 
-/** `NEEDS YOU  1`, with an optional faint note after it. */
-export function label(name: string, count?: number, note?: string): Line {
+/** `NEEDS YOU  1`. */
+export function label(name: string, count?: number): Line {
 	const segs: Seg[] = [{ t: name, fg: 'faint' }];
 	if (count !== undefined) segs.push({ t: `  ${count}`, fg: 'dim' });
-	if (note) segs.push({ t: `   ${note}`, fg: 'faint' });
 	return { segs };
 }
 
@@ -34,15 +33,6 @@ export function hint(pairs: Array<[string, string]>): Seg[] {
 	return pairs.flatMap(([key, word], index) => [
 		...(index > 0 ? [sep] : []),
 		{ t: key, fg: 'dim', b: true },
-		{ t: ` ${word}`, fg: 'faint' },
-	]);
-}
-
-/** `[enter] answer   [o] open`, for the selected row. */
-export function bracketed(pairs: Array<[string, string]>): Seg[] {
-	return pairs.flatMap(([key, word], index) => [
-		...(index > 0 ? [{ t: '   ' }] : []),
-		{ t: `[${key}]`, fg: 'dim', b: true },
 		{ t: ` ${word}`, fg: 'faint' },
 	]);
 }
