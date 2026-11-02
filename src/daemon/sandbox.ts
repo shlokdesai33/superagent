@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import {
 	SandboxManager,
 	type SandboxRuntimeConfig,
@@ -213,28 +213,23 @@ function installCommand(packages: string[]): string {
 }
 
 // Package and tool caches in your home folder, so installs and builds work.
-// One whose tool is on your PATH (or with no tool) is created when missing,
-// since the tool can't create it from inside the sandbox.
-const CACHES: Array<[tool: string | null, folder: string]> = [
-	[null, '.cache'],
-	['npm', '.npm'],
-	['bun', '.bun/install/cache'],
-	['pnpm', '.local/share/pnpm'],
-	['yarn', '.yarn/berry'],
-	['go', 'go/pkg/mod'],
-	['cargo', '.cargo/registry'],
-	['cargo', '.cargo/git'],
-	['mvn', '.m2/repository'],
-	['gradle', '.gradle'],
-	...(process.platform === 'darwin'
-		? [
-				[null, 'Library/Caches'] satisfies [null, string],
-				['pnpm', 'Library/pnpm'] satisfies [string, string],
-			]
-		: []),
+// Only ones that exist are writable, so no folder appears for a tool you
+// don't use; ~/.cache, where most tools keep theirs, is created when missing.
+const CACHES = [
+	'.cache',
+	'.npm',
+	'.bun/install/cache',
+	'.local/share/pnpm',
+	'.yarn/berry',
+	'go/pkg/mod',
+	'.cargo/registry',
+	'.cargo/git',
+	'.m2/repository',
+	'.gradle',
+	...(process.platform === 'darwin' ? ['Library/Caches', 'Library/pnpm'] : []),
 ];
 
-// Where you've moved a tool's cache, it's used instead.
+// Where you've moved a tool's cache, it's used instead, and created if needed.
 const CACHE_ENV = [
 	'XDG_CACHE_HOME',
 	'npm_config_cache',
@@ -247,18 +242,53 @@ const CACHE_ENV = [
 	'GOCACHE',
 ];
 
-function cacheFolders(loginPath: string): string[] {
+const skippedCaches = new Set<string>();
+
+/** The cache folders commands may write; a bad one is skipped, never fatal. */
+function cacheFolders(daemon: Daemon): string[] {
 	const home = homedir();
-	const folders = [
-		...CACHES.filter(
-			([tool]) => tool === null || Bun.which(tool, { PATH: loginPath }),
-		).map(([, folder]) => join(home, folder)),
-		...CACHE_ENV.map((name) => Bun.env[name]).filter(
-			(folder): folder is string => Boolean(folder),
-		),
+	const wanted: Array<{ path: string; create: boolean }> = [
+		...CACHES.map((folder) => ({
+			path: join(home, folder),
+			create: folder === '.cache',
+		})),
+		...CACHE_ENV.map((name) => Bun.env[name])
+			.filter((path): path is string => Boolean(path))
+			.map((path) => ({ path, create: true })),
 	];
-	for (const folder of folders) mkdirSync(folder, { recursive: true });
+	const folders: string[] = [];
+	for (const { path, create } of wanted) {
+		const problem = cacheProblem(path, create);
+		if (problem === null) {
+			folders.push(path);
+		} else if (problem !== 'missing' && !skippedCaches.has(path)) {
+			skippedCaches.add(path);
+			daemon.log('warn', 'cache folder not writable by commands', {
+				path,
+				reason: problem,
+			});
+		}
+	}
 	return folders;
+}
+
+/** `null` when `path` is a usable folder, `missing` when it's absent and not ours to create. */
+function cacheProblem(path: string, create: boolean): string | null {
+	if (!isAbsolute(path)) return "it isn't an absolute path";
+	let found;
+	try {
+		found = statSync(path, { throwIfNoEntry: false });
+	} catch (error) {
+		return error instanceof Error ? error.message : String(error);
+	}
+	if (found) return found.isDirectory() ? null : "it isn't a folder";
+	if (!create) return 'missing';
+	try {
+		mkdirSync(path, { recursive: true });
+		return null;
+	} catch (error) {
+		return `couldn't create it (${error instanceof Error ? error.message : String(error)})`;
+	}
 }
 
 /**
@@ -286,7 +316,7 @@ export async function sandboxCommand(
 					task.workDir,
 					tmpDir,
 					'/tmp',
-					...cacheFolders(daemon.loginPath),
+					...cacheFolders(daemon),
 					...(gitDir ? [gitDir] : []),
 				],
 				denyWrite: [],
