@@ -282,10 +282,12 @@ export function startRouter(daemon: Daemon): RouterLoop {
 				// probe) ends the backoff.
 				const transient =
 					error instanceof ModelError && error.failure === 'transient';
+				daemon.router.backoffUntil = Date.now() + delay;
 				await sleep(
 					delay,
 					transient ? () => daemon.model.state !== 'error' : null,
 				);
+				daemon.router.backoffUntil = null;
 			}
 		}
 	})();

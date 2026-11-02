@@ -191,6 +191,24 @@ ALTER TABLE messages ADD COLUMN external_id TEXT;
 ALTER TABLE messages ADD COLUMN reply_to INTEGER REFERENCES events(id);
 `,
 	'ALTER TABLE github_cursors ADD COLUMN page INTEGER;',
+	`
+CREATE TABLE watchdog_findings (
+	id           INTEGER PRIMARY KEY,
+	key          TEXT NOT NULL,
+	task_id      INTEGER REFERENCES tasks(id),
+	state        TEXT NOT NULL,
+	opened_at    INTEGER NOT NULL,
+	seen_at      INTEGER NOT NULL,
+	resolved_at  INTEGER,
+	problem_kind TEXT,
+	text         TEXT,
+	fix          TEXT,
+	stage        TEXT,
+	snooze_calls INTEGER,
+	snooze_until INTEGER
+);
+CREATE UNIQUE INDEX watchdog_open ON watchdog_findings (key) WHERE state = 'open';
+`,
 ];
 
 // Letters and digits without look-alikes (no i, l, o, 0 or 1).

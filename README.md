@@ -45,38 +45,6 @@ rm ~/.local/bin/superagent
 rm -rf ~/.superagent
 ```
 
-## Development
-
-Requires [Bun](https://bun.com) 1.4.4 (pinned in `.bun-version`).
-
-```sh
-bun install            # install dependencies
-bun run check          # typecheck, lint and format check
-bun run typecheck      # tsc (TypeScript 7)
-bun run lint           # oxlint, with type-aware rules
-bun run format         # oxfmt --write; check:format only checks
-bun src/cli.ts --help  # run the CLI from source
-bun run e2e            # drive a real daemon end to end against a fake Particle server
-bun run build          # single-file executables for every platform, in dist/
-```
-
-`bun run build` compiles `src/cli.ts` with `bun build --compile` into `dist/superagent-darwin-arm64`, `-darwin-x64`, `-linux-x64` and `-linux-arm64`; `bun run build linux-x64` builds only the ones named. Each is self-contained, with Bun, SQLite and sandbox-runtime inside. `SUPERAGENT_BIN=dist/superagent-linux-x64 bun run e2e` runs the end-to-end checks against a built executable instead of the source.
-
-### Releasing
-
-There's no CI: releases are made from the owner's machine, best a Mac. Raise `"version"` in `package.json`, merge it to main, then with a clean checkout of main and `gh` logged in:
-
-```sh
-bun run release --dry-run   # build everything and check it, without publishing
-bun run release             # build, then publish GitHub Release v<version>
-```
-
-It builds the four executables, signs the macOS ones ad hoc with `codesign` when run on a Mac, writes `<name>.sha256` for each and a combined `SHA256SUMS`, and uploads them with `install.sh` to a release tagged `v<version>` on the current commit, with generated notes. It refuses a dirty tree, a commit that isn't on main, and a version already released.
-
-Run `bun run check` before opening a PR, and list its results in the PR description.
-
-There are no unit tests. `e2e/` drives the real daemon the way the TUI does: `e2e/harness.ts` starts `superagent daemon --script-channel` on a fresh `/tmp/sa-…` data folder and talks to it over its socket, and `e2e/fake-particle.ts` is a Particle server whose answers each scenario scripts, told apart by `prompt_cache_key`. `e2e/threads.ts` covers thread ownership, filtering, release and reopen, and questions answered on a thread; it prints one line per check and exits non-zero if any fails. `e2e/repos.ts` covers the terminal UI's default repository, opening the real UI inside and outside a repository in a pseudo-terminal made by `script` (`e2e/tui.ts`). Set `E2E_VERBOSE=1` to see the daemon's log and `E2E_KEEP=1` to keep its data folder.
-
 ## Running from source
 
 ```sh

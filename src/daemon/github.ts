@@ -115,6 +115,10 @@ type Rate = { limit: number; remaining: number; reset: number };
 
 export type GitHubClient = GitHubApi & {
 	stop: () => Promise<void>;
+	/** When the poller last finished a round, and how long it then waits. */
+	pulse: () => { at: number | null; waitMs: number; rateLimited: boolean };
+	/** Ends the poller's wait, so the next round starts now. */
+	kick: () => void;
 	/** Checks the configured repositories again now, after one is added. */
 	recheck: () => void;
 };
@@ -539,6 +543,8 @@ export function startGitHub(
 		cutWait?.();
 	}, TICK_MS);
 
+	let pulseAt: number | null = null;
+	let waitMs = TICK_MS;
 	const loop = (async () => {
 		let slow = 1;
 		while (!stop.signal.aborted) {
@@ -560,12 +566,11 @@ export function startGitHub(
 					: 1;
 			const cut = new AbortController();
 			cutWait = () => cut.abort();
+			waitMs = Math.min(TICK_MS * slow, MAX_TICK_MS);
+			pulseAt = Date.now();
 			try {
 				// oxlint-disable-next-line eslint/no-await-in-loop
-				await sleep(
-					Math.min(TICK_MS * slow, MAX_TICK_MS),
-					AbortSignal.any([stop.signal, cut.signal]),
-				);
+				await sleep(waitMs, AbortSignal.any([stop.signal, cut.signal]));
 			} catch {
 				if (stop.signal.aborted) break;
 			}
@@ -582,6 +587,17 @@ export function startGitHub(
 			await loop;
 			await queue;
 		},
+		pulse: () => ({
+			at: pulseAt,
+			waitMs,
+			// The 429 wait, or the pause `send` takes when little quota is left.
+			rateLimited:
+				waitUntil > Date.now() ||
+				(rate !== null &&
+					rate.remaining < PAUSE_BELOW &&
+					rate.reset * 1000 > Date.now()),
+		}),
+		kick: () => cutWait?.(),
 		recheck: () => {
 			checked = false;
 			cutWait?.();

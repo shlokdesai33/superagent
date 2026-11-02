@@ -163,6 +163,12 @@ export type Health = {
 	machine: MachineFacts;
 	/** `off` comes with a `sandbox` warning: commands run unsandboxed. */
 	sandbox: 'on' | 'off';
+	watchdog: {
+		/** The Watchdog's last round of checks; `null` before the first. */
+		lastCheckAt: number | null;
+		/** Its model calls since local midnight. */
+		reviewsToday: number;
+	};
 	/** Where code tasks can work, from `config.json`, in its order. */
 	repos: Repository[];
 };
@@ -180,9 +186,10 @@ export type MachineFacts = {
 };
 
 export type Problem = {
-	/** Stable, for fades: `model`, `undelivered:812`. */
+	/** Stable, for fades: `model`, `undelivered:812`, `router:stalled`. */
 	id: string;
-	kind: 'model' | 'channel' | 'undelivered';
+	/** `task` and `agent` come from the Watchdog. */
+	kind: 'model' | 'channel' | 'undelivered' | 'task' | 'agent';
 	text: string;
 	/** What to run or do to fix it, when the agent knows. */
 	fix: string | null;
