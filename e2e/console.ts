@@ -220,10 +220,10 @@ try {
 		},
 	);
 	await tui.type('\x1b');
-	await tui.waitFor('press / to ask');
+	await tui.waitFor('@handle to message a task');
 	let from = agent.lines.length;
 	let mark = tui.mark();
-	await tui.type('/hello there (OK1)\r');
+	await tui.type('hello there (OK1)\r');
 	await tui.waitFor('└ waiting · No Particle API key', mark);
 	check('without a key, the message says it waits for one', true);
 	const noKey = await held(from, 'No Particle API key');
@@ -244,7 +244,7 @@ try {
 	particle.account.refused = 402;
 	from = agent.lines.length;
 	mark = tui.mark();
-	await tui.type('/fix the login bug (OK2)\r');
+	await tui.type('fix the login bug (OK2)\r');
 	const noCredit = await modelProblem(
 		from,
 		'the out-of-credit problem',
