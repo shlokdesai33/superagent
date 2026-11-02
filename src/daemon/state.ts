@@ -203,6 +203,7 @@ export function setModelHealth(
 ): void {
 	const current = daemon.model;
 	if (current.state === state && current.detail === detail) return;
+	const recovered = current.state === 'error' && state !== 'error';
 	daemon.model = {
 		state,
 		detail,
@@ -214,6 +215,12 @@ export function setModelHealth(
 					: Date.now(),
 	};
 	daemon.feed.publish({ type: 'health', health: health(daemon) });
+	// Workers waiting out a Particle outage and the Router's backoff carry on:
+	// with a working model, or into the account-error handling.
+	if (recovered) {
+		daemon.router.wake();
+		for (const live of daemon.workers.values()) live.wake();
+	}
 }
 
 export function usageSince(db: Database, since: number): Usage {

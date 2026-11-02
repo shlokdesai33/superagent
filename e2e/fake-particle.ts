@@ -18,12 +18,18 @@ export type FakeRequest = {
 export type FakeReply = {
 	content?: string;
 	calls?: Array<{ name: string; args: Record<string, unknown> }>;
+	/** The stream ends without a finish reason or `[DONE]`: a dropped connection. */
+	broken?: boolean;
 };
 
 export type FakeParticle = {
 	/** For `PARTICLE_BASE_URL`. */
 	url: string;
 	requests: FakeRequest[];
+	/** `GET /models`, which the daemon's probe asks while Particle fails. */
+	models: { available: boolean; requests: number };
+	/** Every request gets a `401`, as for a revoked key. */
+	auth: { rejected: boolean };
 	stop(): void;
 };
 
@@ -31,10 +37,45 @@ export function startFakeParticle(
 	respond: (request: FakeRequest) => FakeReply,
 ): FakeParticle {
 	const requests: FakeRequest[] = [];
+	const models = { available: true, requests: 0 };
+	const auth = { rejected: false };
 	let count = 0;
 	const server = Bun.serve({
 		port: 0,
 		async fetch(request) {
+			if (auth.rejected) {
+				return Response.json(
+					{
+						error: {
+							message: 'Invalid API key',
+							type: 'authentication_error',
+							code: 'invalid_api_key',
+						},
+					},
+					{ status: 401 },
+				);
+			}
+			if (
+				request.method === 'GET' &&
+				new URL(request.url).pathname === '/v1/models'
+			) {
+				models.requests += 1;
+				return models.available
+					? Response.json({
+							object: 'list',
+							data: [{ id: 'particle-1', object: 'model' }],
+						})
+					: Response.json(
+							{
+								error: {
+									message: 'unavailable',
+									type: 'server_error',
+									code: 'model_unavailable',
+								},
+							},
+							{ status: 503 },
+						);
+			}
 			const body: unknown = await request.json();
 			if (!isChatRequest(body)) {
 				return new Response('expected a Chat Completions request', {
@@ -64,6 +105,8 @@ export function startFakeParticle(
 	return {
 		url: `http://127.0.0.1:${server.port}/v1`,
 		requests,
+		models,
+		auth,
 		stop: () => {
 			void server.stop(true);
 		},
@@ -164,6 +207,17 @@ function stream(id: string, body: ChatRequest, reply: FakeReply): Response {
 				},
 			],
 		});
+	}
+	if (reply.broken) {
+		return new Response(
+			frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(''),
+			{
+				headers: {
+					'Content-Type': 'text/event-stream',
+					'x-particle-request-id': id,
+				},
+			},
+		);
 	}
 	const prompt = Math.ceil(JSON.stringify(body.messages).length / 4);
 	frames.push(

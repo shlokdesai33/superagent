@@ -3,12 +3,14 @@ import {
 	type ChatResult,
 	type ParticleClient,
 	ParticleError,
+	checkApiKey,
 	createParticleClient,
 } from '../particle/client.ts';
 import { estimateCostUsd } from '../particle/cost.ts';
 import type { ChatRequest } from '../particle/types.ts';
 import type { KeySource } from '../protocol.ts';
 import { readKeyFile } from '../keys.ts';
+import { watchdogMs } from './scale.ts';
 import { addSecrets } from './secrets.ts';
 import {
 	type Daemon,
@@ -22,6 +24,7 @@ import {
 const MAX_CALLS_IN_FLIGHT = 6;
 
 const KEY_POLL_MS = 2_000;
+const PROBE_MS = watchdogMs(2 * 60_000);
 
 export const NO_API_KEY = `No Particle API key: run superagent login particle, or set ${API_KEY_ENV}`;
 
@@ -114,10 +117,48 @@ export function refreshParticleKey(daemon: Daemon): void {
 	}
 }
 
-/** Re-reads the key every 2 seconds, so a model paused without one resumes. */
+/**
+ * Re-reads the key every 2 seconds, so a model paused without one resumes,
+ * and probes Particle every 2 minutes while it's failing.
+ */
 export function watchParticleKey(daemon: Daemon): () => void {
 	const timer = setInterval(() => refreshParticleKey(daemon), KEY_POLL_MS);
-	return () => clearInterval(timer);
+	let probing = false;
+	const probe = setInterval(() => {
+		if (probing) return;
+		probing = true;
+		void probeParticle(daemon).finally(() => {
+			probing = false;
+		});
+	}, PROBE_MS);
+	return () => {
+		clearInterval(timer);
+		clearInterval(probe);
+	};
+}
+
+/**
+ * While Particle is failing and nothing has succeeded, asks `GET /models`,
+ * which spends no tokens or credits. Leaving `error` wakes the Workers waiting
+ * on Particle and the Router's backoff (`setModelHealth`).
+ */
+async function probeParticle(daemon: Daemon): Promise<void> {
+	const { particleKey } = daemon;
+	if (particleKey === null || daemon.model.state !== 'error') return;
+	const baseUrl = Bun.env.PARTICLE_BASE_URL;
+	const check = await checkApiKey(
+		baseUrl ? { apiKey: particleKey, baseUrl } : { apiKey: particleKey },
+	);
+	// A call may have settled it, or the key changed, while the probe ran.
+	if (daemon.model.state !== 'error' || daemon.particleKey !== particleKey) {
+		return;
+	}
+	if (check.result === 'valid') {
+		daemon.log('info', 'Particle answers again');
+		setModelHealth(daemon, 'ok', null);
+	} else if (check.result === 'rejected') {
+		setModelHealth(daemon, 'paused', 'Particle rejected the API key');
+	}
 }
 
 export type ModelCall = {
