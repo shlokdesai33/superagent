@@ -9,7 +9,7 @@ const BAR = 32;
 const KEY: Record<Health['model']['key'], string> = {
 	env: 'from PARTICLE_API_KEY',
 	file: 'from the particle-key file in the data folder',
-	missing: 'missing · run superagent login particle',
+	missing: 'missing · press p to add one',
 };
 
 const SANDBOX: Record<Health['sandbox'], string> = {

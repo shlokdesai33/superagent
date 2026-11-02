@@ -14,6 +14,7 @@ import { watchdogMs } from './scale.ts';
 import { addSecrets } from './secrets.ts';
 import {
 	type Daemon,
+	KEY_REJECTED,
 	type Params,
 	health,
 	setModelHealth,
@@ -26,7 +27,7 @@ const MAX_CALLS_IN_FLIGHT = 6;
 const KEY_POLL_MS = 2_000;
 const PROBE_MS = watchdogMs(2 * 60_000);
 
-export const NO_API_KEY = `No Particle API key: run superagent login particle, or set ${API_KEY_ENV}`;
+export const NO_API_KEY = `No Particle API key: paste one in superagent, run superagent login particle, or set ${API_KEY_ENV}`;
 
 /**
  * - `account`: fixed by the person (401, 402, 403); every loop pauses.
@@ -79,8 +80,8 @@ export function particleClient(apiKey: string): ParticleClient {
 
 /**
  * Reads the key again. A changed key replaces the client for the next call;
- * a key appearing resumes the model and wakes the Router and Workers, and one
- * disappearing pauses it.
+ * a key appearing, or replacing one the model paused on, resumes the model
+ * and wakes the Router and Workers, and one disappearing pauses it.
  */
 export function refreshParticleKey(daemon: Daemon): void {
 	const { key, source, found, problem } = findParticleKey(
@@ -92,6 +93,7 @@ export function refreshParticleKey(daemon: Daemon): void {
 		return;
 	}
 	const had = daemon.particleKey !== null;
+	const resumes = key !== null && (!had || daemon.model.state === 'paused');
 	daemon.particleKey = key;
 	daemon.keySource = source;
 	daemon.particle = key === null ? null : particleClient(key);
@@ -106,15 +108,39 @@ export function refreshParticleKey(daemon: Daemon): void {
 	);
 	const before = daemon.model;
 	if (key === null) setModelHealth(daemon, 'paused', problem ?? NO_API_KEY);
-	else if (!had) setModelHealth(daemon, 'ok', null);
+	else if (resumes) setModelHealth(daemon, 'ok', null);
 	// `setModelHealth` publishes only a changed state; the key source changed.
 	if (daemon.model === before) {
 		daemon.feed.publish({ type: 'health', health: health(daemon) });
 	}
-	if (key !== null && !had) {
+	if (resumes) {
 		daemon.router.wake();
 		for (const live of daemon.workers.values()) live.wake();
 	}
+}
+
+/**
+ * Asks Particle about the key the agent starts with, so a revoked key shows
+ * before the first model call. Only a rejection changes anything.
+ */
+export async function checkStartingKey(daemon: Daemon): Promise<void> {
+	const { particleKey } = daemon;
+	if (particleKey === null) return;
+	const baseUrl = Bun.env.PARTICLE_BASE_URL;
+	const check = await checkApiKey(
+		baseUrl ? { apiKey: particleKey, baseUrl } : { apiKey: particleKey },
+	);
+	// A call may have settled it, or the key changed, while the check ran.
+	if (
+		check.result !== 'rejected' ||
+		daemon.stopping ||
+		daemon.particleKey !== particleKey ||
+		daemon.model.state !== 'ok'
+	) {
+		return;
+	}
+	daemon.log('warn', KEY_REJECTED, { source: daemon.keySource });
+	setModelHealth(daemon, 'paused', KEY_REJECTED);
 }
 
 /**
@@ -157,7 +183,7 @@ async function probeParticle(daemon: Daemon): Promise<void> {
 		daemon.log('info', 'Particle answers again');
 		setModelHealth(daemon, 'ok', null);
 	} else if (check.result === 'rejected') {
-		setModelHealth(daemon, 'paused', 'Particle rejected the API key');
+		setModelHealth(daemon, 'paused', KEY_REJECTED);
 	}
 }
 
@@ -368,7 +394,7 @@ function errorText(error: unknown): string {
 /** What the TUI shows as the model's health. */
 function describe(error: unknown, text: string): string {
 	if (error instanceof ParticleError) {
-		if (error.status === 401) return 'Particle rejected the API key';
+		if (error.status === 401) return KEY_REJECTED;
 		if (error.status === 402) return 'Particle account is out of credits';
 		if (error.status === 403) {
 			return "Particle's API key isn't allowed to use chat completions";

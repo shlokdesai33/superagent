@@ -155,6 +155,8 @@ export type Health = {
 		since: number | null;
 		/** Where the Particle key comes from; never the key itself. */
 		key: KeySource;
+		/** Particle rejected the key in use; a new key resumes the model. */
+		keyRejected: boolean;
 	};
 	/** Failed tasks are tasks, not problems. */
 	problems: Problem[];

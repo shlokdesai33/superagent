@@ -30,8 +30,11 @@ export type FakeParticle = {
 	requests: FakeRequest[];
 	/** `GET /models`, which the daemon's probe asks while Particle fails. */
 	models: { available: boolean; requests: number };
-	/** Every request gets a `401`, as for a revoked key. */
-	auth: { rejected: boolean };
+	/**
+	 * `rejected`: every request gets a `401`, as for a revoked key.
+	 * `rejectedKeys`: requests with one of these keys do.
+	 */
+	auth: { rejected: boolean; rejectedKeys: Set<string> };
 	stop(): void;
 };
 
@@ -40,12 +43,14 @@ export function startFakeParticle(
 ): FakeParticle {
 	const requests: FakeRequest[] = [];
 	const models = { available: true, requests: 0 };
-	const auth = { rejected: false };
+	const auth = { rejected: false, rejectedKeys: new Set<string>() };
 	let count = 0;
 	const server = Bun.serve({
 		port: 0,
 		async fetch(request) {
-			if (auth.rejected) {
+			const key =
+				request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '';
+			if (auth.rejected || auth.rejectedKeys.has(key)) {
 				return Response.json(
 					{
 						error: {
