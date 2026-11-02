@@ -41,6 +41,7 @@ const CHANNEL_OFF_MS = watchdogMs(30 * 60_000);
 const SLOT_WAIT_MS = watchdogMs(30 * 60_000);
 const CHURN_WINDOW_MS = watchdogMs(60 * 60_000);
 const CHURN_CALLS = 120;
+const CHURN_CALLS_PER_EVENT = 4;
 // Unscaled: restarts take real time, even in tests.
 const CRASH_WINDOW_MS = 60 * 60_000;
 const CRASHES = 3;
@@ -378,17 +379,25 @@ const router: Check = {
 	run: (round) => {
 		const { daemon, now, tickMs } = round;
 		const { batch, backoffUntil } = daemon.router;
-		const calls =
-			daemon.db
-				.query<{ count: number }, [number]>(
-					"SELECT COUNT(*) AS count FROM model_calls WHERE purpose = 'router' AND started_at >= ?",
-				)
-				.get(now - CHURN_WINDOW_MS)?.count ?? 0;
-		if (calls >= CHURN_CALLS) {
+		const since = now - CHURN_WINDOW_MS;
+		const count = (sql: string) =>
+			daemon.db.query<{ count: number }, [number]>(sql).get(since)?.count ?? 0;
+		const calls = count(
+			"SELECT COUNT(*) AS count FROM model_calls WHERE purpose = 'router' AND started_at >= ?",
+		);
+		// A busy hour of real work is a call or two per event; churn is calls
+		// its events don't explain.
+		const events =
+			calls >= CHURN_CALLS
+				? count(
+						"SELECT COUNT(*) AS count FROM events WHERE route = 'router' AND received_at >= ?",
+					)
+				: 0;
+		if (calls >= CHURN_CALLS && calls > CHURN_CALLS_PER_EVENT * events) {
 			round.report(
 				round.hold('router:churn'),
 				'agent',
-				`The Router made ${calls} calls in the last hour`,
+				`The Router made ${calls} calls for ${events} ${events === 1 ? 'event' : 'events'} in the last hour`,
 				'see daemon.log for the events it was deciding',
 			);
 		}

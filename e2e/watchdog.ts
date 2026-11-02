@@ -357,6 +357,31 @@ const watchdogLines = (agent: Agent) =>
 			line.type === 'health' && line.health.watchdog.lastCheckAt !== null,
 	);
 
+/** Records Router calls and events as if they came in just now. */
+const seedRouter = (agent: Agent, calls: number, events: number) => {
+	const db = new Database(join(agent.home, 'state.db'));
+	const now = Date.now();
+	db.transaction(() => {
+		for (let index = 0; index < calls; index++) {
+			db.run(
+				"INSERT INTO model_calls (purpose, effort, started_at, ended_at) VALUES ('router', 'high', ?, ?)",
+				[now, now],
+			);
+		}
+		for (let index = 0; index < events; index++) {
+			db.run(
+				"INSERT INTO events (received_at, channel, kind, author, text, route, consumed_at) VALUES (?, 'script', 'message', 'e2e', 'seeded', 'router', ?)",
+				[now, now],
+			);
+		}
+	})();
+	db.close();
+};
+const churn = (agent: Agent) =>
+	[...problems(agent).values()].find((problem) =>
+		problem.text.startsWith('The Router made'),
+	);
+
 try {
 	await scenario('Quiet', async (agent) => {
 		await agent.action({ type: 'send_console', text: 'please run quick' });
@@ -393,6 +418,40 @@ try {
 				last.watchdog.reviewsToday === 0,
 		);
 	});
+
+	await scenario('A busy Router is not churning', async (agent) => {
+		seedRouter(agent, 130, 100);
+		const from = watchdogLines(agent).length;
+		await agent.until(
+			'the Watchdog to check a few times',
+			async () => watchdogLines(agent).length,
+			(count) => count >= from + 5,
+		);
+		check(
+			'130 Router calls for 100 events in an hour are no problem',
+			churn(agent) === undefined,
+			churn(agent)?.text,
+		);
+	});
+
+	await scenario(
+		'A churning Router',
+		async (agent) => {
+			seedRouter(agent, 130, 10);
+			await agent.until(
+				'the churn problem',
+				async () => churn(agent),
+				(found) => found !== undefined,
+			);
+			check(
+				'130 Router calls for 10 events are a problem that says both',
+				churn(agent)?.text ===
+					'The Router made 130 calls for 10 events in the last hour',
+				churn(agent)?.text,
+			);
+		},
+		{ allowed: /^router:churn$/ },
+	);
 
 	await scenario('A sleep before the first check', async (agent) => {
 		// The first check runs 2 ticks (120 ms) after start; stop the daemon
