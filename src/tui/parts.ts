@@ -28,7 +28,7 @@ export function label(name: string, count?: number): Line {
 	return { segs };
 }
 
-/** `j/k move · enter open`: keys bold `dim`, words `faint`. */
+/** `↑↓ move · enter open`: keys bold `dim`, words `faint`. */
 export function hint(pairs: Array<[string, string]>): Seg[] {
 	return pairs.flatMap(([key, word], index) => [
 		...(index > 0 ? [sep] : []),
@@ -65,4 +65,13 @@ export function figure(value: string, unit: string): Seg[] {
 /** Collapses whitespace, for one-line previews. */
 export function oneLine(text: string): string {
 	return text.replaceAll(/\s+/g, ' ').trim();
+}
+
+/** Text shown in full: its line breaks kept, at most one blank line in a row. */
+export function paragraphs(text: string): string {
+	return text
+		.replaceAll(/\r\n?/g, '\n')
+		.replaceAll(/[^\S\n]+$/gm, '')
+		.replaceAll(/\n{3,}/g, '\n\n')
+		.trim();
 }

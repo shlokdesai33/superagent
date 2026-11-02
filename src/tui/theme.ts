@@ -137,6 +137,93 @@ function build(name: ThemeName, depth: ColorDepth): Theme {
 	};
 }
 
+// How far each surface steps from the background (tui-design.md §5).
+const STEPS: Record<
+	ThemeName,
+	{ surface: number; flash: number; soft: number; word: number }
+> = {
+	dark: { surface: 0.07, flash: 0.16, soft: 0.16, word: 0.32 },
+	light: { surface: 0.055, flash: 0.1, soft: 0.1, word: 0.24 },
+};
+const GHOST_STEP = 0.3;
+const MIN_CONTRAST = 4.5;
+/** The least a 256-colour surface may differ from the background. */
+const MIN_SURFACE_STEP = 1.06;
+const WORDS = ['fg', 'dim', 'faint', 'accent', 'ok', 'warn', 'err'] as const;
+
+/**
+ * The theme for the terminal's own background, which the screen keeps:
+ * surfaces step from it as the design's step from its `bg`, and each word
+ * colour moves toward white (dark) or black (light) until it reads at 4.5:1
+ * on it and on `surface`. With no reported background, the design's palette.
+ */
+export function themeFor(
+	name: ThemeName,
+	depth: ColorDepth,
+	background: Rgb | null,
+): Theme {
+	const base = THEMES[depth][name];
+	if (background === null) return base;
+	const snap = (rgb: Rgb): Rgb =>
+		depth === '256' ? xterm256(nearest256(rgb)) : rgb;
+	const steps = STEPS[name];
+	const extreme: Rgb = name === 'dark' ? [255, 255, 255] : [0, 0, 0];
+
+	let k = steps.surface;
+	let surface = snap(blend(background, base.fg, k));
+	while (contrast(surface, background) < MIN_SURFACE_STEP && k < 0.5) {
+		k += 0.01;
+		surface = snap(blend(background, base.fg, k));
+	}
+	const readable = (color: Rgb): Rgb => {
+		for (let t = 0; t <= 1; t += 0.02) {
+			const candidate = snap(blend(color, extreme, t));
+			if (
+				contrast(candidate, background) >= MIN_CONTRAST &&
+				contrast(candidate, surface) >= MIN_CONTRAST
+			) {
+				return candidate;
+			}
+		}
+		return snap(extreme);
+	};
+	const theme: Theme = { ...base, bg: background, surface };
+	for (const role of WORDS) theme[role] = readable(base[role]);
+	// A tint toward `to`, backed off toward the background until `words` read on it.
+	const tint = (to: Rgb, amount: number, words: Rgb[]): Rgb => {
+		for (let t = amount; t > 0; t -= 0.02) {
+			const candidate = snap(blend(background, to, t));
+			if (words.every((word) => contrast(word, candidate) >= MIN_CONTRAST)) {
+				return candidate;
+			}
+		}
+		return surface;
+	};
+	theme.ghost = snap(blend(background, theme.fg, GHOST_STEP));
+	theme.flash = snap(blend(background, theme.accent, steps.flash));
+	theme.okSoft = tint(theme.ok, steps.soft, [theme.fg, theme.ok]);
+	theme.errSoft = tint(theme.err, steps.soft, [theme.fg, theme.err]);
+	theme.okWord = tint(theme.ok, steps.word, [theme.fg]);
+	theme.errWord = tint(theme.err, steps.word, [theme.fg]);
+	return theme;
+}
+
+/** The WCAG contrast ratio of two colours. */
+export function contrast(a: Rgb, b: Rgb): number {
+	const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].toSorted(
+		(x, y) => y - x,
+	);
+	return ((hi ?? 0) + 0.05) / ((lo ?? 0) + 0.05);
+}
+
+function relativeLuminance(rgb: Rgb): number {
+	const [r, g, b] = rgb.map((value) => {
+		const s = value / 255;
+		return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+	});
+	return 0.2126 * (r ?? 0) + 0.7152 * (g ?? 0) + 0.0722 * (b ?? 0);
+}
+
 function hexToRgb(hex: string): Rgb {
 	const value = Number.parseInt(hex.slice(1), 16);
 	return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
@@ -238,17 +325,24 @@ export function blend(a: Rgb, b: Rgb, t: number): Rgb {
 }
 
 /**
- * The theme for a background colour from an OSC 11 reply such as
- * `rgb:1616/1616/1b1b`, or `null` when it can't be read.
+ * The background colour from an OSC 11 reply such as `rgb:1616/1616/1b1b`,
+ * or `null` when it can't be read.
  */
-export function themeFromOsc11(reply: string): ThemeName | null {
+export function backgroundFromOsc11(reply: string): Rgb | null {
 	const match = reply.match(
 		/rgba?:([0-9a-f]{1,4})\/([0-9a-f]{1,4})\/([0-9a-f]{1,4})/i,
 	);
 	if (!match) return null;
-	const [r, g, b] = [match[1], match[2], match[3]].map(
-		(part = '0') => Number.parseInt(part, 16) / (16 ** part.length - 1),
+	const [r = 0, g = 0, b = 0] = [match[1], match[2], match[3]].map(
+		(part = '0') =>
+			Math.round((Number.parseInt(part, 16) / (16 ** part.length - 1)) * 255),
 	);
+	return [r, g, b];
+}
+
+/** Light for a background above half luminance, else dark. */
+export function themeOf(background: Rgb): ThemeName {
+	const [r, g, b] = background.map((value) => value / 255);
 	return luminance(r ?? 0, g ?? 0, b ?? 0) > 0.5 ? 'light' : 'dark';
 }
 

@@ -9,9 +9,9 @@ import {
 	type Seg,
 	fit,
 	fitStart,
+	hang,
 	truncate,
 	width,
-	wrap,
 } from '../cells.ts';
 import { age, ago, duration } from '../format.ts';
 import { type Live, type Section, sections } from '../model.ts';
@@ -23,6 +23,7 @@ import {
 	label,
 	oneLine,
 	origin,
+	paragraphs,
 	spinner,
 } from '../parts.ts';
 import { FADE_MS, type Ui } from '../state.ts';
@@ -44,6 +45,8 @@ export function homeBody(
 	content: number,
 	wide: boolean,
 	now: number,
+	/** Body rows on screen. */
+	height: number,
 ): { lines: Line[]; animating: boolean } {
 	const ctx: Context = { ui, content, wide, now };
 	const all = sections(live);
@@ -132,16 +135,24 @@ export function homeBody(
 	}
 
 	if (live.console.length > 0) {
-		section(() => {
-			lines.push(label('CONSOLE'));
-			for (const message of live.console.slice(-CONSOLE_SHOWN)) {
-				lines.push(...consoleRows(message, ctx));
-				// An agent from before `held` sends neither field.
-				const { held, pending } = live.router;
-				if (held && pending?.includes(message.id)) {
-					lines.push(...heldRows(held, ctx));
-				}
+		// The newest message always shows in full; older ones only while they
+		// fit under the sections above, so a long reply isn't pushed off screen.
+		const room = height - lines.length - (lines.length > 0 ? 2 : 1);
+		const shown: Line[][] = [];
+		let used = 0;
+		for (const message of live.console.slice(-CONSOLE_SHOWN).toReversed()) {
+			const rows = consoleRows(message, ctx);
+			// An agent from before `held` sends neither field.
+			const { held, pending } = live.router;
+			if (held && pending?.includes(message.id)) {
+				rows.push(...heldRows(held, ctx));
 			}
+			if (shown.length > 0 && used + rows.length > room) break;
+			shown.unshift(rows);
+			used += rows.length;
+		}
+		section(() => {
+			lines.push(label('CONSOLE'), ...shown.flat());
 		});
 	}
 
@@ -228,24 +239,14 @@ function needsRows(
 		),
 	];
 	if (task.question) {
-		const room = Math.min(MEASURE, ctx.content) - 4;
-		const question = wrap(
-			[{ t: oneLine(task.question.text), fg: 'fg', i: true }],
-			room,
-			2,
+		const question = hang(
+			[{ t: '  └ ', fg: 'ghost' }],
+			[{ t: paragraphs(task.question.text), fg: 'fg', i: true }],
+			Math.min(MEASURE, ctx.content),
 		);
-		question.forEach((segs, index) => {
-			lines.push(
-				row(
-					key,
-					ctx,
-					[{ t: index === 0 ? '  └ ' : '    ', fg: 'ghost' }, ...segs],
-					undefined,
-					fade,
-					ghost,
-				),
-			);
-		});
+		for (const { segs } of question) {
+			lines.push(row(key, ctx, segs, undefined, fade, ghost));
+		}
 	}
 	return lines;
 }
@@ -396,10 +397,9 @@ function heldRows(
 	held: NonNullable<RouterState['held']>,
 	ctx: Context,
 ): Line[] {
-	const room = Math.min(MEASURE, ctx.content) - 9;
 	const segs: Seg[] = [
 		{ t: 'waiting · ', fg: 'faint' },
-		{ t: oneLine(held.reason), fg: 'warn' },
+		{ t: paragraphs(held.reason), fg: 'warn' },
 	];
 	if (held.until !== null) {
 		segs.push({
@@ -407,27 +407,22 @@ function heldRows(
 			fg: 'faint',
 		});
 	}
-	return wrap(segs, room, 2).map((line, index) => ({
-		segs: [
-			{ t: ' '.repeat(7) },
-			{ t: index === 0 ? '└ ' : '  ', fg: 'ghost' },
-			...line,
-		],
-	}));
+	return hang(
+		[{ t: ' '.repeat(7) }, { t: '└ ', fg: 'ghost' }],
+		segs,
+		Math.min(MEASURE, ctx.content),
+	);
 }
 
 function consoleRows(message: Message, ctx: Context): Line[] {
-	const room = Math.min(MEASURE, ctx.content) - 7;
-	const text = wrap([{ t: oneLine(message.text), fg: 'fg' }], room, 3);
-	return text.map((segs, index) => ({
-		segs: [
-			index === 0
-				? {
-						t: fit(message.author, 7),
-						fg: message.author === 'you' ? 'accent' : 'dim',
-					}
-				: { t: ' '.repeat(7) },
-			...segs,
+	return hang(
+		[
+			{
+				t: fit(message.author, 7),
+				fg: message.author === 'you' ? 'accent' : 'dim',
+			},
 		],
-	}));
+		[{ t: paragraphs(message.text), fg: 'fg' }],
+		Math.min(MEASURE, ctx.content),
+	);
 }

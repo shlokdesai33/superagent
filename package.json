@@ -1,6 +1,6 @@
 {
 	"name": "superagent",
-	"version": "0.1.2",
+	"version": "0.1.3",
 	"private": true,
 	"license": "MIT",
 	"bin": {
@@ -11,7 +11,7 @@
 		"build": "bun scripts/build.ts",
 		"check": "bun run typecheck && bun run lint && bun run check:format",
 		"check:format": "oxfmt --check .",
-		"e2e": "bun e2e/router-prompt.ts && bun e2e/threads.ts && bun e2e/github.ts && bun e2e/watchdog.ts && bun e2e/install.ts && bun e2e/repos.ts && bun e2e/colors.ts && bun e2e/console.ts",
+		"e2e": "bun e2e/router-prompt.ts && bun e2e/threads.ts && bun e2e/github.ts && bun e2e/watchdog.ts && bun e2e/commands.ts && bun e2e/install.ts && bun e2e/repos.ts && bun e2e/colors.ts && bun e2e/console.ts && bun e2e/long-text.ts && bun e2e/key.ts && bun e2e/lifecycle.ts && bun e2e/input.ts",
 		"clean": "git clean -dfX --exclude='!.env' --exclude='!.env.*'",
 		"format": "oxfmt --write .",
 		"lint": "oxlint",

@@ -4,7 +4,7 @@ import type { Database } from 'bun:sqlite';
 import { existsSync, mkdirSync } from 'node:fs';
 import type { ChatResult } from '../particle/client.ts';
 import type { AssistantMessage, ToolCall } from '../particle/types.ts';
-import { stopCommand } from './commands.ts';
+import { releaseCommands, stopCommand } from './commands.ts';
 import { prepareWorktree } from './git.ts';
 import { githubIntros } from './github-threads.ts';
 import { ACCOUNT_RETRY_MS, ModelError, callModel, pausedOn } from './model.ts';
@@ -17,7 +17,15 @@ import {
 	repairTranscript,
 	userItem,
 } from './session.ts';
-import { type Daemon, type Params, type WorkerLive, cut } from './state.ts';
+import {
+	type Daemon,
+	MESSAGE_COLUMNS,
+	type MessageRow,
+	type Params,
+	type WorkerLive,
+	cut,
+	toMessage,
+} from './state.ts';
 import {
 	type TaskRow,
 	publishStep,
@@ -46,7 +54,8 @@ const PROMPT_START = `You are a Worker of a local AI agent. You carry out one ta
 
 - You never talk to people. Use report for progress the Router may want to pass on, and ask only when you need a decision from the operator.
 - Before each batch of tool calls, write one short line saying what you found or what you're about to do. The operator sees it as a step.
-- Commands run with bash in your working folder. run waits up to 30 seconds; a longer command keeps running in the background and its result arrives as a message, so you can keep working meanwhile.
+- Commands run with bash in your working folder. run waits up to 30 seconds; a longer command keeps running in the background and its result arrives as a message, so you can keep working meanwhile. A new message ends the wait early the same way.
+- Commands have no terminal and an empty stdin, so a prompt gets end of input and usually fails: pass --yes or the tool's non-interactive flag. Run browsers headless.
 `;
 
 const PROMPT_END = `- File tools take paths relative to your working folder. write_file and edit_file only write inside it.
@@ -55,7 +64,7 @@ const PROMPT_END = `- File tools take paths relative to your working folder. wri
 - Every response ends with tool calls. When you're waiting on something outside, call wait_for. When the task is complete, call finish with a one-line result (at most 80 characters) and, if useful, a markdown report.`;
 
 const SANDBOXED =
-	"- Commands run in a sandbox that keeps their writes inside your working folder, $TMPDIR, /tmp, package and tool caches and, in a worktree, the repository's git folder, so git and package installs work as usual. Reads and the network are open.";
+	"- Commands run in a sandbox that keeps their writes inside your working folder, $TMPDIR, /tmp, package and tool caches and, in a worktree, the repository's git folder, so git and package installs work as usual. Reads and the network are open. A tool that keeps its state in your home folder can't write it: point it at $TMPDIR, such as a browser's --user-data-dir.";
 
 /** Fixed for the daemon's life, so it stays cached. */
 function systemPrompt(daemon: Daemon): string {
@@ -68,7 +77,18 @@ function systemPrompt(daemon: Daemon): string {
 
 /** Makes `daemon.runWorker` start or wake Worker loops. */
 export function installWorkers(daemon: Daemon): void {
-	daemon.runWorker = (taskId) => runWorker(daemon, taskId);
+	daemon.runWorker = (taskId, options) => {
+		if (options?.message) heard(daemon, taskId);
+		runWorker(daemon, taskId);
+	};
+}
+
+/** A message for a busy Worker: it stops waiting on its command and reads the message next. */
+function heard(daemon: Daemon, taskId: number): void {
+	const live = daemon.workers.get(taskId);
+	if (!live) return;
+	live.heard = true;
+	releaseCommands(daemon, taskId);
 }
 
 /** Starts the loops of every active task, after recovery. */
@@ -117,6 +137,7 @@ function runWorker(daemon: Daemon, taskId: number): void {
 		asleep: false,
 		turn: false,
 		blockedOn: null,
+		heard: false,
 		loop: Promise.resolve(),
 	};
 	// `null` sleeps until woken; a timed sleep (a pause) ignores wakes.
@@ -185,7 +206,8 @@ async function workerLoop(
 		// A tool that threw, or a stop, can leave calls without results.
 		repairTranscript(db, sessionId, 'not run: the agent hit an error');
 		const first = lastRole(db, sessionId) === null;
-		const inbox = inboxEvents(db, live.taskId);
+		live.heard = false;
+		let inbox = inboxEvents(db, live.taskId);
 		// After wait_for, only a new message is a reason to go on.
 		const owed = task.waitingOn === null && lastRole(db, sessionId) === 'tool';
 		if (!first && inbox.length === 0 && !owed && !nudge) {
@@ -247,6 +269,9 @@ async function workerLoop(
 		const intros = await githubIntros(daemon, live.taskId);
 		if (signal.aborted) return;
 		if (!(await takeSlot(daemon, live))) return;
+		// Messages that came while it waited for a slot join this call.
+		live.heard = false;
+		inbox = inboxEvents(db, live.taskId);
 
 		try {
 			const input = [
@@ -361,6 +386,10 @@ async function workerLoop(
 					WHERE id = $id`,
 				).run({ at, consumed: inbox.length, id: live.taskId });
 			})();
+			publishRead(
+				daemon,
+				inbox.map((event) => event.id),
+			);
 
 			const text = result.message.content?.trim();
 			if (text && calls.length > 0) noteStep(daemon, live.taskId, text);
@@ -389,6 +418,24 @@ async function runTools(
 	const { db } = daemon;
 	for (const [index, call] of calls.entries()) {
 		if (live.controller.signal.aborted) return;
+		// They were chosen before the message; it comes first.
+		if (live.heard) {
+			daemon.log('info', 'worker turn cut short by a message', {
+				task: task.handle,
+				skipped: calls.length - index,
+			});
+			appendItems(
+				db,
+				sessionId,
+				calls.slice(index).map((rest) => ({
+					role: 'tool',
+					tool_call_id: rest.id,
+					content:
+						'not run: a new message arrived first, in your next input. Call it again if you still need it.',
+				})),
+			);
+			return;
+		}
 		const outcome = await runWorkerTool(
 			daemon,
 			{
@@ -549,6 +596,18 @@ function noteStep(daemon: Daemon, taskId: number, text: string): void {
 	publishStep(daemon, id);
 }
 
+/** Publishes the messages of events the Worker just read, so clients show them read. */
+function publishRead(daemon: Daemon, eventIds: number[]): void {
+	if (eventIds.length === 0) return;
+	for (const row of daemon.db
+		.query<MessageRow, [string]>(
+			`SELECT ${MESSAGE_COLUMNS} WHERE m.event_id IN (SELECT value FROM json_each(?))`,
+		)
+		.all(JSON.stringify(eventIds))) {
+		daemon.feed.publish({ type: 'message', message: toMessage(row) });
+	}
+}
+
 type InboxEvent = {
 	id: number;
 	at: number;
@@ -641,7 +700,6 @@ function brief(
 			WHERE tt.task_id = ?`,
 		)
 		.all(task.id);
-	const tools = Object.entries(daemon.machine.tools);
 	const parts = [
 		`You are the Worker for task ${task.handle}: ${task.title}`,
 		`Instructions from the Router:\n${details?.instructions ?? ''}`,
@@ -658,13 +716,7 @@ function brief(
 		task.repo === null
 			? `Working folder: ${task.workDir}. It's a scratch folder for this task, not a repository.`
 			: `Working folder: ${task.workDir}. It's a git worktree of the ${task.repo} repository (${daemon.config.repos.find((repo) => repo.name === task.repo)?.path ?? 'no longer in config.json'}) on your own branch, ${task.branch ?? ''}; commit your work there.${worktreeNote ? ` ${worktreeNote}` : ''}`,
-		`Machine: ${daemon.machine.os} · ${daemon.machine.arch} · on PATH: ${tools
-			.filter(([, found]) => found)
-			.map(([name]) => name)
-			.join(', ')} · missing: ${tools
-			.filter(([, found]) => !found)
-			.map(([name]) => name)
-			.join(', ')}`,
+		`Machine: ${daemon.machine.os} · ${daemon.machine.arch}`,
 	);
 	return parts.join('\n\n');
 }

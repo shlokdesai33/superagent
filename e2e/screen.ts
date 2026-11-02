@@ -10,7 +10,7 @@ export type ScreenCell = {
 	/** The 256-colour index, when set with `38;5;n` / `48;5;n`. */
 	fg: number | null;
 	bg: number | null;
-	/** The colour shown, at either depth. */
+	/** The colour shown, at either depth; `null` is the terminal's own. */
 	fgRgb: Rgb | null;
 	bgRgb: Rgb | null;
 	bold: boolean;
@@ -67,6 +67,8 @@ export function replay(raw: string): Screen {
 					else if (code === '1') pen = { ...pen, bold: true };
 					else if (code === '3') pen = { ...pen, italic: true };
 					else if (code === '4') continue;
+					else if (code === '39') pen = { ...pen, fg: null, fgRgb: null };
+					else if (code === '49') pen = { ...pen, bg: null, bgRgb: null };
 					else if (layer && codes[k + 1] === '5') {
 						const index = Number(codes[k + 2]);
 						if (!(index >= 16 && index <= 255))
@@ -108,6 +110,50 @@ export function replay(raw: string): Screen {
 		column += 1;
 	}
 	return { cells, foreign };
+}
+
+const segmenter = new Intl.Segmenter('en', { granularity: 'grapheme' });
+
+/**
+ * The rows' text at any size, without colours: cursor moves and clears on a
+ * grid without autowrap, as the UI sets it, where a wide character (CJK,
+ * emoji) takes two columns.
+ */
+export function replayText(
+	raw: string,
+	columns: number,
+	rows: number,
+): string[] {
+	const grid = Array.from({ length: rows }, () =>
+		Array<string>(columns).fill(' '),
+	);
+	let row = 0;
+	let column = 0;
+	const token =
+		// oxlint-disable-next-line no-control-regex
+		/\x1b\[([0-?]*)[ -/]*([@-~])|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b.|([^\x1b]+)/gs;
+	for (const match of raw.matchAll(token)) {
+		const [, params = '', final, printed] = match;
+		if (printed !== undefined) {
+			for (const { segment } of segmenter.segment(printed)) {
+				if (segment < ' ') continue;
+				const w = Math.max(1, Math.min(2, Bun.stringWidth(segment)));
+				const line = grid[row];
+				if (line && column + w <= columns) {
+					line[column] = segment;
+					if (w === 2) line[column + 1] = '';
+				}
+				column += w;
+			}
+		} else if (final === 'H') {
+			const [y = '1', x = '1'] = params.split(';');
+			row = Number(y || 1) - 1;
+			column = Number(x || 1) - 1;
+		} else if (final === 'J' && params === '2') {
+			for (const line of grid) line.fill(' ');
+		}
+	}
+	return grid.map((line) => line.join(''));
 }
 
 /** A cell as Terminal.app before macOS 26 shows it. */
@@ -157,6 +203,8 @@ export function replayOldTerminal(raw: string): OldTerminalCell[][] {
 					} else if (code === 0) pen = blank();
 					else if (code === 2) pen = { ...pen, faint: true };
 					else if (code === 22) pen = { ...pen, faint: false };
+					else if (code === 39) pen = { ...pen, fg: 'default' };
+					else if (code === 49) pen = { ...pen, bg: 'default' };
 					else if (code >= 30 && code <= 37)
 						pen = { ...pen, fg: `ansi ${code}` };
 					else if (code >= 40 && code <= 47)
