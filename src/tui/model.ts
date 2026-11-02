@@ -234,14 +234,14 @@ export function placeOf(
 export type Item =
 	| { key: string; kind: 'problem'; problem: Problem }
 	| { key: string; kind: 'task'; task: TaskSummary }
-	/** DONE TODAY's `+ N more` row, for the rows it hides. */
+	/** DONE's `+ N more` row, for the rows it hides. */
 	| { key: string; kind: 'more'; hidden: number };
 
 export const MORE_KEY = 'more:done';
 
 /**
  * The home screen's selectable items, top to bottom. `doneShown`: how many
- * DONE TODAY rows home shows before its `+ N more` row; `null` for all.
+ * DONE rows home shows before its `+ N more` row; `null` for all.
  */
 export function homeItems(live: Live, doneShown: number | null): Item[] {
 	const all = sections(live);

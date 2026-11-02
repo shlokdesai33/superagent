@@ -224,7 +224,7 @@ try {
 	let from = agent.lines.length;
 	let mark = tui.mark();
 	await tui.type('hello there (OK1)\r');
-	await tui.waitFor('└ waiting · No Particle API key', mark);
+	await tui.waitFor('       waiting · No Particle API key', mark);
 	check('without a key, the message says it waits for one', true);
 	const noKey = await held(from, 'No Particle API key');
 	check(
@@ -266,25 +266,25 @@ try {
 	await tui.waitFor('! Particle account is out of credit', mark);
 	check('the home screen lists it under NEEDS YOU and in the header', true);
 	await tui.waitFor(
-		'└ waiting · Particle account is out of credit · tries again in',
+		'       waiting · Particle account is out of credit · tries again in',
 		mark,
 	);
 	check('the waiting message says why and when it is tried again', true);
 	const narrow = tui.mark();
 	await tui.resize(40, 30);
 	const rows = tui.screen(narrow);
-	const first = rows.findIndex((row) => row.startsWith('       └ waiting'));
+	const first = rows.findIndex((row) => row.startsWith('       waiting'));
 	const block = first === -1 ? [] : [rows[first] ?? ''];
 	for (const row of first === -1 ? [] : rows.slice(first + 1)) {
-		if (!/^ {9}\S/.test(row)) break;
+		if (!/^ {7}\S/.test(row)) break;
 		block.push(row);
 	}
 	const shown = block
-		.map((row) => row.slice(9).trim())
+		.map((row) => row.slice(7).trim())
 		.join(' ')
 		.replaceAll(/\s+/g, ' ');
 	check(
-		'at 40 columns the waiting line wraps in full under └, nothing cut',
+		'at 40 columns the waiting line wraps in full under the message, nothing cut',
 		block.length > 1 &&
 			/^waiting · Particle account is out of credit · tries again in \d/.test(
 				shown,

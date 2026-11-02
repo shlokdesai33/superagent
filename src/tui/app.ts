@@ -837,7 +837,7 @@ export class App {
 		this.ui.scroll.page = 0;
 	}
 
-	/** `+ N more`: every DONE TODAY row, the selection on the first it hid. */
+	/** `+ N more`: every DONE row, the selection on the first it hid. */
 	private expandDone(): void {
 		const live = this.model.live;
 		if (!live) return;
@@ -848,7 +848,7 @@ export class App {
 	}
 
 	/**
-	 * Esc with nothing typed: DONE TODAY folds back to `+ N more`, and the keys
+	 * Esc with nothing typed: DONE folds back to `+ N more`, and the keys
 	 * screen goes back where it came from.
 	 */
 	private back(): void {

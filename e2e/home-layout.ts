@@ -1,5 +1,5 @@
 // End to end: home keeps the console pinned above the input, newest at the
-// bottom. With 30 tasks done today, DONE TODAY folds to its newest rows and a
+// bottom. With 30 tasks done today, DONE folds to its newest rows and a
 // `+ N more` row, the latest console exchange shows in full right above the
 // input at 80×24 and 120×40, and enter on `+ N more` shows every done task.
 // Run with `bun run e2e`; it exits non-zero if a check fails.
@@ -131,11 +131,13 @@ async function layoutChecks(columns: number, rows: number): Promise<void> {
 		const hidden = Number(more?.match(/\d+/)?.[0] ?? 0);
 		const doneRows = screen.filter((row) => /^✓ \S+ +Tidy report/.test(row));
 		check(
-			`${size}: DONE TODAY folds to its newest rows and "+ N more", above the console`,
+			`${size}: DONE (today's tasks) folds to its newest rows and "+ N more", above the console`,
 			more !== undefined &&
 				doneRows.length >= 1 &&
 				doneRows.length + hidden === DONE &&
 				screen.indexOf(more) < (pinned?.from ?? 0) &&
+				screen.some((row) => /^DONE {2}30\s*$/.test(row)) &&
+				!screen.some((row) => row.includes('DONE TODAY')) &&
 				screen.some((row) => row.startsWith('NEEDS YOU')) &&
 				screen.some((row) => row.startsWith('WORKING')),
 			`${doneRows.length} shown + ${hidden} more`,
@@ -178,7 +180,7 @@ async function layoutChecks(columns: number, rows: number): Promise<void> {
 		await settle();
 		screen = tui.screen();
 		check(
-			`${size}: esc folds DONE TODAY back, with "+ N more" selected`,
+			`${size}: esc folds DONE back, with "+ N more" selected`,
 			screen.some((row) => /^\+ \d+ more/.test(row)) &&
 				(screen.at(-1) ?? '').includes('enter show all'),
 			screen.at(-1),
@@ -251,7 +253,7 @@ async function squeezedChecks(): Promise<void> {
 		const first = tui.screen();
 		check(
 			'80×12, nothing needing you: the tasks keep their rows beside a four-row exchange',
-			first.some((row) => /^(WORKING|DONE TODAY)/.test(row)) &&
+			first.some((row) => /^(WORKING|DONE)/.test(row)) &&
 				first.some((row) => /^[◌⠋-⣿✓] \S+ {2}/.test(row)),
 			first.join(' / '),
 		);

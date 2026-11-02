@@ -54,7 +54,7 @@ The first time, it asks for your Particle API key. Paste it and press `enter`. `
 
 - **NEEDS YOU**: questions from tasks, failed tasks and problems. When nothing needs you, it's gone and the header reads `all calm`.
 - **WORKING**: tasks running or waiting on CI, a review or a reply, with what each is doing now.
-- **DONE TODAY**: finished and stopped tasks, with their result: the newest few, then `+ N more`, which `enter` opens.
+- **DONE**: tasks finished or stopped today, with their result: the newest few, then `+ N more`, which `enter` opens.
 - **The console**: your messages and the Router's replies, under a rule above the input box, newest at the bottom.
 
 **Open a task.** Select it with `↑` `↓` and press `enter` to see its steps, conversation and report. `esc` goes back.

@@ -73,7 +73,7 @@ export type Frame = {
 	overflow: Overflow;
 	/** Where each row of the draft on screen starts, for ↑ / ↓ in it. */
 	draftRows: number[];
-	/** On home: DONE TODAY's rows that fit before `+ N more`. */
+	/** On home: DONE's rows that fit before `+ N more`. */
 	doneFits: number | null;
 };
 

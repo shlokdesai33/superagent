@@ -29,7 +29,7 @@ import {
 } from '../parts.ts';
 import { FADE_MS, type Ui } from '../state.ts';
 
-/** DONE TODAY rows shown before its `+ N more`, when they fit. */
+/** DONE rows shown before its `+ N more`, when they fit. */
 const DONE_FEW = 5;
 
 type Context = {
@@ -129,7 +129,7 @@ export function homeBody(
 
 	// The console's latest exchange (your last message and what came after
 	// it) always shows in full, NEEDS YOU keeps its label and first row, and
-	// DONE TODAY folds to what's left.
+	// DONE folds to what's left.
 	const blocks = live.console.map((message) => {
 		const rows = consoleRows(message, ctx);
 		// An agent from before `held` sends neither field.
@@ -145,7 +145,7 @@ export function homeBody(
 		.slice(lastYou === -1 ? Math.max(0, blocks.length - 1) : lastYou)
 		.flat();
 	// Tasks keep a label and a row: NEEDS YOU's first, else WORKING's or
-	// DONE TODAY's, so an exchange that fills the body still leaves them.
+	// DONE's, so an exchange that fills the body still leaves them.
 	const anyTasks = lines.length > 0 || all.done.length > 0;
 	const reserve = needsLength > 0 ? Math.min(2, needsLength) : anyTasks ? 2 : 0;
 	const consoleMin = Math.min(
@@ -162,7 +162,7 @@ export function homeBody(
 		const shown = ui.done.expanded ? all.done : all.done.slice(0, doneFits);
 		const hidden = all.done.length - shown.length;
 		section(() => {
-			lines.push(label('DONE TODAY', all.done.length));
+			lines.push(label('DONE', all.done.length));
 			lines.push(
 				...withGhosts('done', shown, (task, fade, ghost) => [
 					doneRow(task, ctx, fade, ghost),
@@ -209,7 +209,7 @@ export function homeBody(
 	};
 }
 
-/** DONE TODAY rows that fit in `room` with their `+ N more`: at most a few, at least one. */
+/** DONE rows that fit in `room` with their `+ N more`: at most a few, at least one. */
 function fitDone(count: number, room: number): number {
 	if (count <= Math.min(room, DONE_FEW + 1)) return count;
 	return Math.max(1, Math.min(DONE_FEW, room - 1));
@@ -304,8 +304,9 @@ function needsRows(
 		),
 	];
 	if (task.question) {
+		// Under the title, without a connector glyph.
 		const question = hang(
-			[{ t: '  └ ', fg: 'ghost' }],
+			[{ t: ' '.repeat(8) }],
 			[{ t: paragraphs(task.question.text), fg: 'fg', i: true }],
 			Math.min(MEASURE, ctx.content),
 		);
@@ -472,11 +473,7 @@ function heldRows(
 			fg: 'faint',
 		});
 	}
-	return hang(
-		[{ t: ' '.repeat(7) }, { t: '└ ', fg: 'ghost' }],
-		segs,
-		Math.min(MEASURE, ctx.content),
-	);
+	return hang([{ t: ' '.repeat(7) }], segs, Math.min(MEASURE, ctx.content));
 }
 
 function consoleRows(message: Message, ctx: Context): Line[] {

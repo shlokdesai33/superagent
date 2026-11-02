@@ -41,7 +41,7 @@ export function emptyTyping(): Typing {
 	return { mode: 'free', handle: null, questionId: null, text: '', cursor: 0 };
 }
 
-/** How many DONE TODAY rows home shows, or `null` for all of them. */
+/** How many DONE rows home shows, or `null` for all of them. */
 export function doneShown(ui: Ui): number | null {
 	return ui.done.expanded ? null : ui.done.fits;
 }
@@ -109,7 +109,7 @@ export type Ui = {
 	/** From the last frame. */
 	overflow: Overflow;
 	/**
-	 * DONE TODAY on home: `fits`, how many of its rows fit before `+ N more`,
+	 * DONE on home: `fits`, how many of its rows fit before `+ N more`,
 	 * from the last frame; `expanded` once enter on that row shows them all.
 	 */
 	done: { fits: number | null; expanded: boolean };
