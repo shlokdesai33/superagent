@@ -18,6 +18,16 @@ const MAX_DIFF_CHARS = 256 * 1024;
 const WORKTREE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const LOG_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60_000;
+// The agent's own commits: a missing identity or a signing requirement in the
+// user's config would fail them.
+const AGENT_COMMIT = [
+	'-c',
+	'commit.gpgsign=false',
+	'-c',
+	'user.name=superagent',
+	'-c',
+	'user.email=superagent@localhost',
+];
 
 export type GitResult = { code: number; stdout: string; stderr: string };
 
@@ -199,10 +209,38 @@ async function chooseBase(
 	const run = (args: string[], timeoutMs?: number) =>
 		git(daemon, ['-C', path, ...args], timeoutMs ? { timeoutMs } : {});
 	const head = async (why: string) => {
-		const sha = firstLine((await run(['rev-parse', '--short', 'HEAD'])).stdout);
+		const sha = firstLine(
+			(
+				await run([
+					'rev-parse',
+					'--verify',
+					'--quiet',
+					'--short',
+					'HEAD^{commit}',
+				])
+			).stdout,
+		);
+		if (sha) {
+			return {
+				ref: 'HEAD',
+				note: `${why}, so your branch starts from the repository's current HEAD (${sha}).`,
+			};
+		}
+		// A worktree needs a commit to start from; this one is on no branch but
+		// the task's. `git worktree add --orphan` would need git 2.42.
+		const tree = firstLine((await run(['mktree'])).stdout);
+		const root = await run([
+			...AGENT_COMMIT,
+			'commit-tree',
+			'--no-gpg-sign',
+			tree,
+			'-m',
+			'superagent: start from an empty repository',
+		]);
+		if (root.code !== 0) throw new Error(firstLine(root.stderr));
 		return {
-			ref: 'HEAD',
-			note: `${why}, so your branch starts from the repository's current HEAD (${sha || 'unknown'}).`,
+			ref: firstLine(root.stdout),
+			note: `${why}, and it has no commits yet, so your branch starts from an empty commit.`,
 		};
 	};
 
@@ -515,13 +553,7 @@ async function saveToBranch(
 		if ((await branchTree()) === snapshot) return { ok: true, commit: null };
 
 		const commit = await run([
-			// A signing requirement in the user's config would fail the save.
-			'-c',
-			'commit.gpgsign=false',
-			'-c',
-			'user.name=superagent',
-			'-c',
-			'user.email=superagent@localhost',
+			...AGENT_COMMIT,
 			'commit-tree',
 			'--no-gpg-sign',
 			'-p',

@@ -65,7 +65,7 @@ The first time, it asks for your Particle API key. Paste it and press `enter`. `
 
 **Stop a task.** Press `ctrl-x` twice on the selected task, or in its view. On a failed task this dismisses it; `ctrl-r` on health (`ctrl-t`) resumes failed tasks instead.
 
-**Hand over GitHub work.** Paste an issue or PR link, or say "fix #42". The task that takes it follows the thread: new comments, reviews, CI results and the merge go straight to it, and so does the PR it opens. The Router can reply on the issue, posted as you. `ctrl-o` in a task opens its PR or issue.
+**Hand over GitHub work.** Paste an issue or PR link, or say "fix #42". The task that takes it follows the thread: new comments, reviews, CI results and the merge go straight to it, and so does the PR it opens. Tasks push and open a PR only when you ask for one or they follow a GitHub issue or PR. The Router can reply on the issue, posted as you. `ctrl-o` in a task opens its PR or issue.
 
 **Pick the repository.** New tasks start in the repository you opened `superagent` in; the input box shows `new tasks in <repo>`. While writing, `tab` switches to another repository superagent knows, or none.
 
