@@ -13,6 +13,10 @@ export type FakeRequest = {
 	results: string[];
 	/** Names of every tool called so far in this session. */
 	called: string[];
+	/** What `usage` reports: the prompt at 4 characters a token. */
+	promptTokens: number;
+	/** The prefix shared with the session's previous prompt, as Particle's cache would serve it. */
+	cachedTokens: number;
 };
 
 export type FakeReply = {
@@ -60,13 +64,14 @@ export function startFakeParticle(
 	const models = { available: true, requests: 0 };
 	const auth = { rejected: false, rejectedKeys: new Set<string>() };
 	const account: FakeParticle['account'] = { refused: null };
+	const lastPrompt = new Map<string, string>();
 	let count = 0;
 	const server = Bun.serve({
 		port: 0,
 		async fetch(request) {
-			const key =
+			const apiKey =
 				request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '';
-			if (auth.rejected || auth.rejectedKeys.has(key)) {
+			if (auth.rejected || auth.rejectedKeys.has(apiKey)) {
 				return Response.json(
 					{
 						error: {
@@ -126,11 +131,19 @@ export function startFakeParticle(
 					{ status: 400, headers: { 'x-particle-request-id': id } },
 				);
 			}
-			const fake = describe(body);
+			// Like a chat template: tool schemas render ahead of the messages.
+			const prompt = `${JSON.stringify(body.tools ?? [])}${JSON.stringify(body.messages)}`;
+			const key = body.prompt_cache_key ?? '';
+			const cached = sharedPrefix(lastPrompt.get(key) ?? '', prompt);
+			lastPrompt.set(key, prompt);
+			const fake = describe(body, {
+				promptTokens: Math.ceil(prompt.length / 4),
+				cachedTokens: Math.floor(cached / 4),
+			});
 			requests.push(fake);
 			const reply = respond(fake);
 			if (reply.delayMs) await Bun.sleep(reply.delayMs);
-			return stream(id, body, reply);
+			return stream(id, fake, reply);
 		},
 	});
 	return {
@@ -163,7 +176,17 @@ function text(message: Message): string {
 		.join('');
 }
 
-function describe(body: ChatRequest): FakeRequest {
+function sharedPrefix(a: string, b: string): number {
+	const length = Math.min(a.length, b.length);
+	let index = 0;
+	while (index < length && a[index] === b[index]) index += 1;
+	return index;
+}
+
+function describe(
+	body: ChatRequest,
+	usage: { promptTokens: number; cachedTokens: number },
+): FakeRequest {
 	const key = body.prompt_cache_key ?? '';
 	const handle = key.startsWith('task-') ? key.slice('task-'.length) : null;
 	const messages = body.messages;
@@ -192,6 +215,7 @@ function describe(body: ChatRequest): FakeRequest {
 				? (message.tool_calls ?? []).map((call) => call.function.name)
 				: [],
 		),
+		...usage,
 	};
 }
 
@@ -211,7 +235,7 @@ function unansweredCalls(messages: Message[]): string[] {
 	return missing;
 }
 
-function stream(id: string, body: ChatRequest, reply: FakeReply): Response {
+function stream(id: string, request: FakeRequest, reply: FakeReply): Response {
 	const base = { id, service_tier: 'default' };
 	const calls = reply.calls ?? [];
 	const frames: unknown[] = [];
@@ -258,7 +282,7 @@ function stream(id: string, body: ChatRequest, reply: FakeReply): Response {
 			},
 		);
 	}
-	const prompt = Math.ceil(JSON.stringify(body.messages).length / 4);
+	const prompt = request.promptTokens;
 	frames.push(
 		{
 			...base,
@@ -277,6 +301,7 @@ function stream(id: string, body: ChatRequest, reply: FakeReply): Response {
 				prompt_tokens: prompt,
 				completion_tokens: 20,
 				total_tokens: prompt + 20,
+				prompt_tokens_details: { cached_tokens: request.cachedTokens },
 			},
 		},
 	);
