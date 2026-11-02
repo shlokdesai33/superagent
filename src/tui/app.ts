@@ -91,7 +91,8 @@ export class App {
 			screen: { name: 'home' },
 			selected: null,
 			selectedIndex: 0,
-			scroll: { home: 0, page: 0 },
+			scroll: { home: 0, page: 0, free: false },
+			overflow: { above: false, below: false },
 			typing: null,
 			confirmStop: null,
 			toast: null,
@@ -726,6 +727,17 @@ export class App {
 		const items = homeItems(live);
 		this.syncSelection();
 		if (down || up) {
+			const { scroll, overflow } = this.ui;
+			if (down && overflow.below) {
+				scroll.free = true;
+				scroll.home += down;
+				return;
+			}
+			if (up && overflow.above && (scroll.free || items.length === 0)) {
+				scroll.home = Math.max(0, scroll.home - up);
+				return;
+			}
+			scroll.free = false;
 			const index = Math.max(
 				0,
 				Math.min(items.length - 1, this.ui.selectedIndex + down - up),
@@ -796,6 +808,7 @@ export class App {
 		);
 		if (this.ui.screen.name === 'home') this.ui.scroll.home = output.scroll;
 		else this.ui.scroll.page = output.scroll;
+		this.ui.overflow = output.overflow;
 		this.terminal.draw(output.rows);
 
 		let next = output.animating ? FRAME_MS : IDLE_MS - (now % IDLE_MS);

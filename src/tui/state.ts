@@ -62,6 +62,12 @@ export type StatusPhraseChange = {
 	previous: Seg[] | null;
 };
 
+/**
+ * Home rows out of view: `above`, the selected item's top or its section
+ * label; `below`, the rest of the selected item, or anything after the last.
+ */
+export type Overflow = { above: boolean; below: boolean };
+
 export type DetailState = {
 	state: 'loading' | 'ready' | 'missing';
 	detail: TaskDetail | null;
@@ -75,8 +81,13 @@ export type Ui = {
 	/** The selected home item's key, kept across updates. */
 	selected: string | null;
 	selectedIndex: number;
-	/** First body row shown, per screen. */
-	scroll: { home: number; page: number };
+	/**
+	 * First body row shown, per screen. `free` while j/k scroll home through
+	 * rows the selection doesn't reach: a tall item, or what's below the last.
+	 */
+	scroll: { home: number; page: number; free: boolean };
+	/** From the last frame. */
+	overflow: Overflow;
 	typing: Typing | null;
 	confirmStop: string | null;
 	toast: Toast | null;

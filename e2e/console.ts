@@ -211,9 +211,14 @@ const held = (from: number, reason: string) =>
 try {
 	// 1. Without a key the message says why it waits, until a key is saved.
 	//    The UI opens on the key screen; esc skips it for home.
-	const tui = await openTui(agent.home, outside, {
-		until: 'Paste your Particle API key',
-	});
+	const tui = await openTui(
+		agent.home,
+		outside,
+		{},
+		{
+			until: 'Paste your Particle API key',
+		},
+	);
 	await tui.type('\x1b');
 	await tui.waitFor('press / to ask');
 	let from = agent.lines.length;
@@ -265,6 +270,29 @@ try {
 		mark,
 	);
 	check('the waiting message says why and when it is tried again', true);
+	const narrow = tui.mark();
+	await tui.resize(40, 30);
+	const rows = tui.screen(narrow);
+	const first = rows.findIndex((row) => row.startsWith('       └ waiting'));
+	const block = first === -1 ? [] : [rows[first] ?? ''];
+	for (const row of first === -1 ? [] : rows.slice(first + 1)) {
+		if (!/^ {9}\S/.test(row)) break;
+		block.push(row);
+	}
+	const shown = block
+		.map((row) => row.slice(9).trim())
+		.join(' ')
+		.replaceAll(/\s+/g, ' ');
+	check(
+		'at 40 columns the waiting line wraps in full under └, nothing cut',
+		block.length > 1 &&
+			/^waiting · Particle account is out of credit · tries again in \d/.test(
+				shown,
+			) &&
+			!shown.includes('…'),
+		rows.join('\n'),
+	);
+	await tui.resize(100, 30);
 	const log = readFileSync(join(agent.home, 'daemon.log'), 'utf8');
 	check(
 		'the log names the failed call and its code',

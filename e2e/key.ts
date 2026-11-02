@@ -70,8 +70,7 @@ const fileMode = (): number | null => {
 
 try {
 	// 1. No key: the welcome screen, not home.
-	const tui = await openTui(agent.home, outside, {
-		env: tuiEnv,
+	const tui = await openTui(agent.home, outside, tuiEnv, {
 		until: 'Paste your Particle API key',
 	});
 	const first = tui.screen();
@@ -87,8 +86,7 @@ try {
 		[40, 12],
 		[100, 16],
 	] as const) {
-		const small = await openTui(agent.home, outside, {
-			env: tuiEnv,
+		const small = await openTui(agent.home, outside, tuiEnv, {
 			columns,
 			rows,
 			until: 'enter save',

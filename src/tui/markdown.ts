@@ -1,12 +1,4 @@
-import {
-	type Color,
-	type Line,
-	type Seg,
-	fit,
-	truncate,
-	width,
-	wrap,
-} from './cells.ts';
+import { type Color, type Line, type Seg, fit, width, wrap } from './cells.ts';
 
 const INLINE =
 	/`([^`]+)`|\[([^\]]+)\]\((\S+?)\)|(https?:\/\/[^\s<>()]+)|\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\s][^*]*)\*/g;
@@ -74,10 +66,13 @@ export function markdown(text: string, columns: number): Line[] {
 				Math.max(1, columns - 4),
 			);
 			for (const c of code) {
-				push([
-					{ t: '  ' },
-					{ t: ` ${fit(c, inner)} `, fg: 'fg', bg: 'surface' },
-				]);
+				for (const piece of wrap([{ t: c }], inner)) {
+					const shown = piece.map((seg) => seg.t).join('');
+					push([
+						{ t: '  ' },
+						{ t: ` ${fit(shown, inner)} `, fg: 'fg', bg: 'surface' },
+					]);
+				}
 			}
 			continue;
 		}
@@ -167,25 +162,51 @@ function cells(row: string): string[] {
 		.map((cell) => cell.trim());
 }
 
-/** No border; a `ghost` rule under the header row. */
+/**
+ * No border; a `ghost` rule under the header row. When the table is wider
+ * than `columns`, the widest columns narrow and their cells wrap.
+ */
 function table(rows: string[][], columns: number): Line[] {
 	const count = Math.max(...rows.map((r) => r.length));
-	const widths = Array.from({ length: count }, (_, c) =>
-		Math.max(...rows.map((r) => width(r[c] ?? ''))),
+	const natural = Array.from({ length: count }, (_, c) =>
+		Math.max(1, ...rows.map((r) => width(inline(r[c] ?? '', { fg: 'fg' })))),
 	);
+	const widths = narrow(natural, Math.max(count, columns - 2 * (count - 1)));
 	const total = widths.reduce((n, w) => n + w, 0) + 2 * (count - 1);
-	const lines: Line[] = rows.map((r) => ({
-		segs: truncate(
-			widths.flatMap((w, c) => {
-				const cell = inline(fit(r[c] ?? '', w), { fg: 'fg' });
-				if (c > 0) cell.unshift({ t: '  ' });
-				return cell;
-			}),
-			columns,
-		),
-	}));
-	lines.splice(1, 0, {
-		segs: [{ t: '─'.repeat(Math.min(total, columns)), fg: 'ghost' }],
-	});
+	const lines: Line[] = [];
+	for (const r of rows) {
+		const wrapped = widths.map((w, c) =>
+			wrap(inline(r[c] ?? '', { fg: 'fg' }), w),
+		);
+		const height = Math.max(...wrapped.map((cell) => cell.length));
+		for (let k = 0; k < height; k += 1) {
+			const segs: Seg[] = [];
+			widths.forEach((w, c) => {
+				const part = wrapped[c]?.[k] ?? [];
+				if (c > 0) segs.push({ t: '  ' });
+				segs.push(...part, { t: ' '.repeat(Math.max(0, w - width(part))) });
+			});
+			lines.push({ segs });
+		}
+		if (lines.length === height) {
+			lines.push({
+				segs: [{ t: '─'.repeat(Math.min(total, columns)), fg: 'ghost' }],
+			});
+		}
+	}
 	return lines;
+}
+
+/** Column widths that fit `room`: narrow columns keep theirs, the rest share. */
+function narrow(natural: number[], room: number): number[] {
+	if (natural.reduce((n, w) => n + w, 0) <= room) return natural;
+	const out = [...natural];
+	const order = natural.map((w, c) => ({ w, c })).toSorted((a, b) => a.w - b.w);
+	let left = room;
+	order.forEach(({ w, c }, index) => {
+		const share = Math.max(1, Math.floor(left / (order.length - index)));
+		out[c] = Math.min(w, share);
+		left -= out[c] ?? 0;
+	});
+	return out;
 }

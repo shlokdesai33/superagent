@@ -118,7 +118,7 @@ async function consoleChecks(name: ThemeName, version: string): Promise<void> {
 	const env = appleTerminal(name, version);
 	const depth = colorDepth(env);
 	const theme = THEMES[depth][name];
-	const tui = await openTui(agent.home, outside, { env });
+	const tui = await openTui(agent.home, outside, env);
 	try {
 		await tui.waitFor(LONG_TAIL);
 		await settle();
@@ -178,9 +178,7 @@ async function consoleChecks(name: ThemeName, version: string): Promise<void> {
 async function themeChecks(name: ThemeName, handle: string): Promise<void> {
 	const theme = THEMES['256'][name];
 	const index = (role: Role) => nearest256(theme[role]);
-	const tui: Tui = await openTui(agent.home, outside, {
-		env: appleTerminal(name),
-	});
+	const tui: Tui = await openTui(agent.home, outside, appleTerminal(name));
 	try {
 		await tui.waitFor('answer');
 		await settle();
@@ -356,9 +354,11 @@ try {
 		}
 	}
 
-	const modern = await openTui(agent.home, outside, {
-		env: appleTerminal('dark', '470'),
-	});
+	const modern = await openTui(
+		agent.home,
+		outside,
+		appleTerminal('dark', '470'),
+	);
 	try {
 		await modern.type('/x');
 		await modern.waitFor('→ the Router');
