@@ -142,16 +142,17 @@ export function startRouter(daemon: Daemon): RouterLoop {
 		const { id: batchId } = opened;
 		const actions: string[] = [];
 		const failures: string[] = [];
-		const fromConsole = consoleMessages(opened.events);
+		const fromConsole = consoleMessages(daemon.db, opened.events);
 		let nudged = false;
+		let callLimit = MAX_CALLS_PER_BATCH;
 		let pending: Item[] = [];
 		try {
 			pending.push(userItem(render(daemon, opened.events, true)));
-			for (let call = 1; call <= MAX_CALLS_PER_BATCH; call++) {
+			for (let call = 1; call <= callLimit; call++) {
 				if (call > 1) {
 					const drained = takeEvents(daemon.db, batchId, BATCH_EVENTS);
 					if (drained.length > 0) {
-						fromConsole.push(...consoleMessages(drained));
+						fromConsole.push(...consoleMessages(daemon.db, drained));
 						pending.push(userItem(render(daemon, drained, false)));
 						if (daemon.router.batch) {
 							daemon.router.batch.size += drained.length;
@@ -222,9 +223,11 @@ export function startRouter(daemon: Daemon): RouterLoop {
 						pending = [userItem(CUT_OFF_NUDGE)];
 						continue;
 					}
-					// The operator asked for something; once, say silence isn't an answer.
+					// The operator asked for something; once, say silence isn't an
+					// answer, with a call of its own even after the last allowed one.
 					if (!nudged && actions.length === 0 && fromConsole.length > 0) {
 						nudged = true;
+						if (call === callLimit) callLimit += 1;
 						daemon.log('info', 'router nudged to answer the console', {
 							batch: batchId,
 							events: fromConsole,
@@ -347,11 +350,29 @@ function mailboxSize(db: Database): number {
 	);
 }
 
-/** A batch's console messages from the operator, by event number. */
-function consoleMessages(events: EventRow[]): number[] {
+/**
+ * A batch's console messages from the operator, by event number, leaving out
+ * those an interrupted attempt already acted on: it may have answered them.
+ */
+function consoleMessages(db: Database, events: EventRow[]): number[] {
 	return events
-		.filter((event) => event.channel === 'console' && event.kind === 'message')
+		.filter(
+			(event) =>
+				event.channel === 'console' &&
+				event.kind === 'message' &&
+				(event.batchId === null || !actedIn(db, event.batchId)),
+		)
 		.map((event) => event.id);
+}
+
+/** Whether a batch, or an interrupted one before it with the same events, replied or acted. */
+function actedIn(db: Database, batchId: number): boolean {
+	const row = db
+		.query<{ summary: string | null }, [number]>(
+			'SELECT summary FROM router_batches WHERE id = ?',
+		)
+		.get(batchId);
+	return row !== null && row.summary !== null;
 }
 
 /**
@@ -369,6 +390,16 @@ function runTool(
 		appendItems(daemon.db, sessionId, [
 			{ role: 'tool', tool_call_id: call.id, content: ran.result },
 		]);
+		// With the action itself, so an attempt interrupted after it (by a
+		// crash or Particle) is known to have acted.
+		if (ran.action !== null) {
+			daemon.db
+				.query<unknown, Params>(
+					`UPDATE router_batches SET summary = COALESCE(summary || ' · ', '') || $action
+					WHERE id = $id`,
+				)
+				.run({ action: ran.action, id: batchId });
+		}
 		return ran;
 	})();
 	daemon.log('info', 'router tool', {
@@ -450,6 +481,16 @@ function takeEvents(db: Database, batchId: number, limit: number): EventRow[] {
 		);
 		const at = Date.now();
 		for (const event of events) stamp.run({ batchId, at, id: event.id });
+		// What an interrupted attempt did carries over, in case this one is
+		// interrupted too.
+		const inherit = db.query<unknown, Params>(
+			`UPDATE router_batches SET summary = COALESCE(summary,
+				(SELECT summary FROM router_batches WHERE id = $earlier))
+			WHERE id = $batchId`,
+		);
+		for (const earlier of new Set(events.map((event) => event.batchId))) {
+			if (earlier !== null) inherit.run({ earlier, batchId });
+		}
 		return events;
 	})();
 }

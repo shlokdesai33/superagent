@@ -30,19 +30,51 @@ const NUDGE =
 // A Router that answers messages marked (OK…), stays silent on (QUIET) until
 // told, and never answers (NEVER), whose start_task has no title. (SPLIT…)
 // messages get start_task without event, then a question once told.
+// (DUP) is answered, then Particle refuses the next call, so the batch is put
+// back; retried, the Router sees the reply was sent and stays silent. (LONG)
+// reads 9 times and is silent on the 10th, the last allowed call.
 const marks = new Map<number, string>();
+const answered = new Set<string>();
+let longReads = 0;
 const particle = startFakeParticle((request) => {
 	if (request.session === 'compaction') return { content: 'Summary.' };
 	if (request.session !== 'router') {
 		return { calls: [{ name: 'finish', args: { result: 'Done' } }] };
 	}
-	const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+	const events: Array<[number, string]> = [];
 	for (const [, event, mark] of request.fresh.matchAll(
 		/^#(\d+) · console\b.*\n.*\((\w+)\)$/gm,
 	)) {
 		if (event === undefined || mark === undefined) continue;
 		marks.set(Number(event), mark);
-		if (mark.startsWith('OK')) {
+		events.push([Number(event), mark]);
+	}
+	const read = { name: 'list_tasks', args: {} };
+	if (longReads > 0 && longReads < 9 && request.results.length > 0) {
+		longReads += 1;
+		return { calls: [read] };
+	}
+	if (request.fresh.includes('(DUP)')) {
+		if (request.fresh.includes('An earlier attempt to decide these')) {
+			return { content: 'Already answered.' };
+		}
+		particle.account.refused = 402;
+		return {
+			calls: [
+				{ name: 'reply', args: { thread: 'console', text: 'Got it (DUP).' } },
+				read,
+			],
+		};
+	}
+	if (request.fresh.includes('(LONG)')) {
+		longReads = 1;
+		return { calls: [read] };
+	}
+	const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+	for (const [, mark] of events) {
+		// Like a model told which replies an interrupted attempt sent.
+		if (mark.startsWith('OK') && !answered.has(mark)) {
+			answered.add(mark);
 			calls.push({
 				name: 'reply',
 				args: { thread: 'console', text: `Got it (${mark}).` },
@@ -62,7 +94,12 @@ const particle = startFakeParticle((request) => {
 	const nudged = request.fresh.match(NUDGE)?.[1];
 	for (const [, id] of nudged?.matchAll(/#(\d+)/g) ?? []) {
 		const mark = marks.get(Number(id));
-		if (mark === 'QUIET') {
+		if (mark === 'DUP' || mark === 'LONG') {
+			calls.push({
+				name: 'reply',
+				args: { thread: 'console', text: `Told to answer (${mark}).` },
+			});
+		} else if (mark === 'QUIET') {
 			calls.push({
 				name: 'reply',
 				args: { thread: 'console', text: 'Sorry, on it (QUIET).' },
@@ -133,8 +170,9 @@ const modelProblem = (from: number, what: string, text: string) =>
 	);
 const problemOf = (line: HealthLine, id: string): Problem | undefined =>
 	line.health.problems.find((problem) => problem.id === id);
-const recovered = (from: number) =>
-	agent.waitFor(
+/** The model ok again, and the batch that answered done, before the fake changes. */
+const recovered = async (from: number) => {
+	await agent.waitFor(
 		'the model to be ok again',
 		(line): line is HealthLine =>
 			after(from)(line) &&
@@ -142,6 +180,16 @@ const recovered = (from: number) =>
 			line.health.model.state === 'ok' &&
 			problemOf(line, 'model') === undefined,
 	);
+	await agent.waitFor(
+		'the Router to finish deciding',
+		(line): line is RouterLine =>
+			after(from)(line) &&
+			line.type === 'router' &&
+			!line.router.deciding &&
+			line.router.waiting === 0 &&
+			line.router.held === null,
+	);
+};
 const reply = (text: string) =>
 	agent.waitFor(
 		`the reply "${text}"`,
@@ -330,7 +378,53 @@ try {
 		silent.router.last?.text,
 	);
 
-	// 7. The Router's own error (here a corrupt event) is a problem too,
+	// 7. An attempt that replied, then lost Particle, isn't nudged when it's
+	//    decided again: the reply was sent, so a second one would repeat it.
+	from = agent.lines.length;
+	const before = silent.router.last?.at ?? 0;
+	await agent.action({ type: 'send_console', text: 'ping (DUP)' });
+	await reply('Got it (DUP).');
+	await held(from, 'out of credit');
+	particle.account.refused = null;
+	const retried = await agent.waitFor(
+		'the put-back batch to be decided again',
+		(line): line is RouterLine =>
+			line.type === 'router' &&
+			line.router.last !== null &&
+			line.router.last.at > before,
+	);
+	const dupEvent = [...marks].find(([, name]) => name === 'DUP')?.[0];
+	check(
+		'decided again, a message answered before the interruption gets no nudge',
+		!particle.requests.some(
+			(request) =>
+				request.fresh.match(NUDGE)?.[1]?.includes(`#${dupEvent}`) === true,
+		) &&
+			!agent.lines.some(
+				(line) =>
+					line.type === 'message' &&
+					line.message.text === 'Told to answer (DUP).',
+			),
+		retried.router.last?.text,
+	);
+	check(
+		'and it was answered exactly once',
+		agent.lines.filter(
+			(line) =>
+				line.type === 'message' && line.message.text === 'Got it (DUP).',
+		).length === 1,
+	);
+
+	// 8. Silent on the last allowed call, the Router still gets its nudge.
+	await agent.action({ type: 'send_console', text: 'read a lot (LONG)' });
+	await reply('Told to answer (LONG).');
+	check(
+		'a Router silent on its last allowed call is still told to answer',
+		longReads === 9,
+		`${longReads} reads`,
+	);
+
+	// 9. The Router's own error (here a corrupt event) is a problem too,
 	//    instead of a line in the log.
 	const db = new Database(join(agent.home, 'state.db'));
 	db.run('PRAGMA busy_timeout = 5000');
