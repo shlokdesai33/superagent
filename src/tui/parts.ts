@@ -76,3 +76,12 @@ export function figure(value: string, unit: string): Seg[] {
 export function oneLine(text: string): string {
 	return text.replaceAll(/\s+/g, ' ').trim();
 }
+
+/** Text shown in full: its line breaks kept, at most one blank line in a row. */
+export function paragraphs(text: string): string {
+	return text
+		.replaceAll(/\r\n?/g, '\n')
+		.replaceAll(/[^\S\n]+$/gm, '')
+		.replaceAll(/\n{3,}/g, '\n\n')
+		.trim();
+}

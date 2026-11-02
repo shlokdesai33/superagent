@@ -1,5 +1,5 @@
 import type { Message, Step, TaskSummary } from '../../protocol.ts';
-import { type Line, type Seg, fit, wrap } from '../cells.ts';
+import { type Line, type Seg, fit, hang, wrap } from '../cells.ts';
 import { diffLines } from '../diff.ts';
 import { ago, clock, duration } from '../format.ts';
 import { markdown } from '../markdown.ts';
@@ -10,6 +10,7 @@ import {
 	chip,
 	label,
 	oneLine,
+	paragraphs,
 	sep,
 	spinner,
 } from '../parts.ts';
@@ -21,6 +22,8 @@ export function taskBody(
 	handle: string,
 	content: number,
 	now: number,
+	/** The header had to cut the title short. */
+	titleCut: boolean,
 ): { lines: Line[]; animating: boolean } {
 	const state = ui.details.get(handle);
 	const detail = state?.detail ?? null;
@@ -42,30 +45,38 @@ export function taskBody(
 	}
 	const measure = Math.min(MEASURE, content);
 	const steps = mergedSteps(detail, live.steps.get(handle));
-	const lines: Line[] = [statusLine(task, now), blank()];
+	const lines: Line[] = [];
+	if (titleCut) {
+		for (const segs of wrap(
+			[{ t: oneLine(task.title), fg: 'fg', b: true }],
+			measure,
+		)) {
+			lines.push({ segs });
+		}
+	}
+	lines.push(...statusLines(task, now, measure), blank());
 	let animating = task.status === 'working';
 
 	if (task.status === 'needs_you' && task.question) {
 		lines.push(label('QUESTION'));
-		wrap(
-			[{ t: oneLine(task.question.text), fg: 'fg', i: true }],
-			measure - 4,
-			3,
-		).forEach((segs, index) => {
-			lines.push({
-				segs: [{ t: index === 0 ? '  └ ' : '    ', fg: 'ghost' }, ...segs],
-			});
-		});
+		lines.push(
+			...hang(
+				[{ t: '  └ ', fg: 'ghost' }],
+				[{ t: paragraphs(task.question.text), fg: 'fg', i: true }],
+				measure,
+			),
+		);
 		if (task.question.options && task.question.options.length > 0) {
-			lines.push({
-				segs: [
-					{ t: '    ' },
-					...task.question.options.flatMap((option, index) => [
+			lines.push(
+				...hang(
+					[{ t: '    ' }],
+					task.question.options.flatMap((option, index) => [
 						...(index > 0 ? [sep] : []),
 						{ t: oneLine(option), fg: 'dim' } satisfies Seg,
 					]),
-				],
-			});
+					measure,
+				),
+			);
 		}
 		if (task.question.context) {
 			lines.push(blank());
@@ -78,24 +89,28 @@ export function taskBody(
 
 	if (task.status === 'working' && task.now) {
 		lines.push(label('NOW'));
-		lines.push({
-			segs: [
-				{ t: `${spinner(now)} `, fg: 'accent' },
-				task.now.command
-					? chip(oneLine(task.now.command))
-					: { t: oneLine(task.now.text), fg: 'fg' },
-			],
-			right: [{ t: duration(now - task.now.startedAt), fg: 'faint' }],
-		});
+		lines.push(
+			...hang(
+				[{ t: `${spinner(now)} `, fg: 'accent' }],
+				[
+					task.now.command
+						? chip(paragraphs(task.now.command))
+						: { t: paragraphs(task.now.text), fg: 'fg' },
+				],
+				content,
+				[{ t: duration(now - task.now.startedAt), fg: 'faint' }],
+			),
+		);
 		lines.push(blank());
 	} else if (task.status === 'waiting') {
 		lines.push(label('NOW'));
-		lines.push({
-			segs: [
-				{ t: '◌ ', fg: 'faint' },
-				{ t: `waiting on ${task.waitingOn ?? 'a message'}`, fg: 'fg' },
-			],
-		});
+		lines.push(
+			...hang(
+				[{ t: '◌ ', fg: 'faint' }],
+				[{ t: `waiting on ${task.waitingOn ?? 'a message'}`, fg: 'fg' }],
+				content,
+			),
+		);
 		lines.push(blank());
 	}
 
@@ -103,7 +118,7 @@ export function taskBody(
 		lines.push(label('STEPS'));
 		for (const step of steps) {
 			if (step.status === 'running') animating = true;
-			lines.push(stepRow(step, now));
+			lines.push(...stepRows(step, content, now));
 			const diff = step.hasDiff ? state?.diffs.get(step.id) : undefined;
 			if (typeof diff === 'string') lines.push(...diffLines(diff, content));
 		}
@@ -138,7 +153,7 @@ export function taskBody(
 	return { lines, animating };
 }
 
-function statusLine(task: TaskSummary, now: number): Line {
+function statusLines(task: TaskSummary, now: number, measure: number): Line[] {
 	const words: Record<TaskSummary['status'], string> = {
 		working: 'working',
 		waiting: `waiting on ${task.waitingOn ?? 'a message'}`,
@@ -180,10 +195,10 @@ function statusLine(task: TaskSummary, now: number): Line {
 			});
 		});
 	}
-	return { segs };
+	return wrap(segs, measure).map((line) => ({ segs: line }));
 }
 
-function stepRow(step: Step, now: number): Line {
+function stepRows(step: Step, content: number, now: number): Line[] {
 	const glyph: Seg =
 		step.status === 'running'
 			? { t: `${spinner(now)} `, fg: 'accent' }
@@ -195,8 +210,7 @@ function stepRow(step: Step, now: number): Line {
 	const text =
 		step.kind === 'command' ? (step.command ?? step.text) : step.text;
 	const segs: Seg[] = [
-		glyph,
-		{ t: oneLine(text), fg: step.status === 'running' ? 'fg' : 'dim' },
+		{ t: paragraphs(text), fg: step.status === 'running' ? 'fg' : 'dim' },
 	];
 	if (step.additions !== null || step.deletions !== null) {
 		segs.push(
@@ -209,12 +223,9 @@ function stepRow(step: Step, now: number): Line {
 	if (step.status === 'failed' && step.exitCode !== null) {
 		segs.push(sep, { t: `exit ${step.exitCode}`, fg: 'faint' });
 	}
-	return {
-		segs,
-		right: [
-			{ t: duration((step.endedAt ?? now) - step.startedAt), fg: 'faint' },
-		],
-	};
+	return hang([glyph], segs, content, [
+		{ t: duration((step.endedAt ?? now) - step.startedAt), fg: 'faint' },
+	]);
 }
 
 function mergedConversation(
@@ -232,20 +243,16 @@ function mergedConversation(
 }
 
 function messageRows(message: Message, measure: number): Line[] {
-	const room = Math.max(1, measure - 22);
-	const text = wrap([{ t: message.text, fg: 'fg' }], room, 12);
-	return text.map((segs, index) => ({
-		segs:
-			index === 0
-				? [
-						{ t: `${clock(message.at)}  `, fg: 'faint' },
-						{ t: fit(message.channel, 8), fg: 'faint' },
-						{
-							t: fit(message.author, 7),
-							fg: message.author === 'you' ? 'accent' : 'dim',
-						},
-						...segs,
-					]
-				: [{ t: ' '.repeat(22) }, ...segs],
-	}));
+	return hang(
+		[
+			{ t: `${clock(message.at)}  `, fg: 'faint' },
+			{ t: fit(message.channel, 8), fg: 'faint' },
+			{
+				t: fit(message.author, 7),
+				fg: message.author === 'you' ? 'accent' : 'dim',
+			},
+		],
+		[{ t: paragraphs(message.text), fg: 'fg' }],
+		measure,
+	);
 }

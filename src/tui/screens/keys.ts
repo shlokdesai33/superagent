@@ -1,4 +1,4 @@
-import { type Line, fit } from '../cells.ts';
+import { type Line, fit, hang } from '../cells.ts';
 
 const KEYS: Array<[string, string]> = [
 	['j k  ↓ ↑', 'move the selection, or scroll'],
@@ -18,32 +18,22 @@ const KEYS: Array<[string, string]> = [
 	['?', 'this list of keys'],
 	['esc', 'back to home · cancel typing'],
 	['q  ctrl-c', 'quit (q on the home screen)'],
+	[
+		'while typing',
+		'enter sends · esc cancels · backspace deletes · ctrl-u clears the line',
+	],
+	[
+		'',
+		'tab, when opened in a repository, changes where new tasks go: there, another repository, or none',
+	],
 ];
 
-export function keysBody(): Line[] {
-	const lines: Line[] = KEYS.map(([key, words]) => ({
-		segs: [
-			{ t: fit(key, 18), fg: 'fg', b: true },
-			{ t: words, fg: 'dim' },
-		],
-	}));
-	lines.push({
-		segs: [
-			{ t: fit('while typing', 18), fg: 'fg', b: true },
-			{
-				t: 'enter sends · esc cancels · backspace deletes · ctrl-u clears the line',
-				fg: 'dim',
-			},
-		],
-	});
-	lines.push({
-		segs: [
-			{ t: fit('', 18) },
-			{
-				t: 'tab, when opened in a repository, changes where new tasks go: there, another repository, or none',
-				fg: 'dim',
-			},
-		],
-	});
-	return lines;
+export function keysBody(content: number): Line[] {
+	return KEYS.flatMap(([key, words]) =>
+		hang(
+			[{ t: fit(key, 18), fg: 'fg', b: true }],
+			[{ t: words, fg: 'dim' }],
+			content,
+		),
+	);
 }

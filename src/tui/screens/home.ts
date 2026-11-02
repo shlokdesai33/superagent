@@ -4,9 +4,9 @@ import {
 	type Seg,
 	fit,
 	fitStart,
+	hang,
 	truncate,
 	width,
-	wrap,
 } from '../cells.ts';
 import { age, ago } from '../format.ts';
 import { type Live, type Section, sections } from '../model.ts';
@@ -19,6 +19,7 @@ import {
 	label,
 	oneLine,
 	origin,
+	paragraphs,
 	spinner,
 } from '../parts.ts';
 import { FADE_MS, type Ui } from '../state.ts';
@@ -40,6 +41,8 @@ export function homeBody(
 	content: number,
 	wide: boolean,
 	now: number,
+	/** Body rows on screen. */
+	height: number,
 ): { lines: Line[]; animating: boolean } {
 	const ctx: Context = { ui, content, wide, now };
 	const all = sections(live);
@@ -128,11 +131,19 @@ export function homeBody(
 	}
 
 	if (live.console.length > 0) {
+		// The newest message always shows in full; older ones only while they
+		// fit under the sections above, so a long reply isn't pushed off screen.
+		const room = height - lines.length - (lines.length > 0 ? 2 : 1);
+		const shown: Line[][] = [];
+		let used = 0;
+		for (const message of live.console.slice(-CONSOLE_SHOWN).toReversed()) {
+			const rows = consoleRows(message, ctx);
+			if (shown.length > 0 && used + rows.length > room) break;
+			shown.unshift(rows);
+			used += rows.length;
+		}
 		section(() => {
-			lines.push(label('CONSOLE'));
-			for (const message of live.console.slice(-CONSOLE_SHOWN)) {
-				lines.push(...consoleRows(message, ctx));
-			}
+			lines.push(label('CONSOLE'), ...shown.flat());
 		});
 	}
 
@@ -238,24 +249,14 @@ function needsRows(
 		),
 	];
 	if (task.question) {
-		const room = Math.min(MEASURE, ctx.content) - 4;
-		const question = wrap(
-			[{ t: oneLine(task.question.text), fg: 'fg', i: true }],
-			room,
-			2,
+		const question = hang(
+			[{ t: '  └ ', fg: 'ghost' }],
+			[{ t: paragraphs(task.question.text), fg: 'fg', i: true }],
+			Math.min(MEASURE, ctx.content),
 		);
-		question.forEach((segs, index) => {
-			lines.push(
-				row(
-					key,
-					ctx,
-					[{ t: index === 0 ? '  └ ' : '    ', fg: 'ghost' }, ...segs],
-					undefined,
-					fade,
-					ghost,
-				),
-			);
-		});
+		for (const { segs } of question) {
+			lines.push(row(key, ctx, segs, undefined, fade, ghost));
+		}
 	}
 	return lines;
 }
@@ -407,17 +408,14 @@ function doneRow(
 }
 
 function consoleRows(message: Message, ctx: Context): Line[] {
-	const room = Math.min(MEASURE, ctx.content) - 7;
-	const text = wrap([{ t: oneLine(message.text), fg: 'fg' }], room, 3);
-	return text.map((segs, index) => ({
-		segs: [
-			index === 0
-				? {
-						t: fit(message.author, 7),
-						fg: message.author === 'you' ? 'accent' : 'dim',
-					}
-				: { t: ' '.repeat(7) },
-			...segs,
+	return hang(
+		[
+			{
+				t: fit(message.author, 7),
+				fg: message.author === 'you' ? 'accent' : 'dim',
+			},
 		],
-	}));
+		[{ t: paragraphs(message.text), fg: 'fg' }],
+		Math.min(MEASURE, ctx.content),
+	);
 }

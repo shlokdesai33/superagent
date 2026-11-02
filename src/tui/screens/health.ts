@@ -1,8 +1,16 @@
 import type { Health } from '../../protocol.ts';
-import { type Line, type Seg, fit, truncate, wrap } from '../cells.ts';
+import { type Line, type Seg, fit, hang, width, wrap } from '../cells.ts';
 import { ago, clock, plural, tokens } from '../format.ts';
 import type { Live } from '../model.ts';
-import { MEASURE, blank, figure, label, oneLine, sep } from '../parts.ts';
+import {
+	MEASURE,
+	blank,
+	figure,
+	label,
+	oneLine,
+	paragraphs,
+	sep,
+} from '../parts.ts';
 
 const BAR = 32;
 
@@ -55,34 +63,42 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 			fg: 'faint',
 		},
 	];
-	const lines: Line[] = [{ segs: summary }, blank()];
+	const lines: Line[] = [
+		...wrap(summary, content).map((segs) => ({ segs })),
+		blank(),
+	];
 
 	if (problems > 0) {
 		lines.push(label('PROBLEMS'));
 		for (const problem of health.problems.toSorted(
 			(a, b) => a.since - b.since,
 		)) {
-			lines.push({
-				segs: [
-					{ t: '! ', fg: 'warn', b: true },
-					{ t: oneLine(problem.text), fg: 'fg' },
-				],
-				right: [{ t: ago(now - problem.since), fg: 'faint' }],
-			});
+			lines.push(
+				...hang(
+					[{ t: '! ', fg: 'warn', b: true }],
+					[{ t: paragraphs(problem.text), fg: 'fg' }],
+					content,
+					[{ t: ago(now - problem.since), fg: 'faint' }],
+				),
+			);
 			if (problem.fix) lines.push(...fixLines(problem.fix, measure));
 		}
 		for (const task of failed) {
-			lines.push({
-				segs: [
-					{ t: '✗ ', fg: 'err' },
-					{ t: fit(task.handle, 6), fg: 'dim' },
-					{ t: oneLine(task.title), fg: 'fg' },
-				],
-				right: truncate(
-					[{ t: oneLine(task.result ?? 'failed'), fg: 'faint' }],
-					Math.floor(content / 2),
-				),
-			});
+			const prefix: Seg[] = [
+				{ t: '✗ ', fg: 'err' },
+				{ t: fit(task.handle, 6), fg: 'dim' },
+			];
+			const title: Seg = { t: oneLine(task.title), fg: 'fg' };
+			const result: Seg = {
+				t: oneLine(task.result ?? 'failed'),
+				fg: 'faint',
+			};
+			// The result sits on the right while both fit, else wraps after the title.
+			lines.push(
+				...(width([...prefix, title]) + 2 + width([result]) <= content
+					? [{ segs: [...prefix, title], right: [result] }]
+					: hang(prefix, [title, sep, result], content)),
+			);
 		}
 		lines.push(blank());
 	}
@@ -90,12 +106,13 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 	if (health.warnings.length > 0) {
 		lines.push(label('WARNINGS'));
 		for (const warning of health.warnings) {
-			lines.push({
-				segs: [
-					{ t: '· ', fg: 'warn' },
-					{ t: oneLine(warning.text), fg: 'fg' },
-				],
-			});
+			lines.push(
+				...hang(
+					[{ t: '· ', fg: 'warn' }],
+					[{ t: paragraphs(warning.text), fg: 'fg' }],
+					content,
+				),
+			);
 			if (warning.fix) lines.push(...fixLines(warning.fix, measure));
 		}
 		lines.push(blank());
@@ -117,46 +134,59 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 					: channel.state === 'off'
 						? 'off'
 						: 'connecting';
-		lines.push({
-			segs: [
-				dot,
-				{
-					t: fit(channel.name, 12),
-					fg: channel.state === 'off' ? 'faint' : 'fg',
-				},
-				{ t: words, fg: 'faint' },
-				...(channel.detail
-					? [sep, { t: oneLine(channel.detail), fg: 'faint' } satisfies Seg]
-					: []),
-			],
-		});
+		lines.push(
+			...hang(
+				[
+					dot,
+					{
+						t: fit(channel.name, 12),
+						fg: channel.state === 'off' ? 'faint' : 'fg',
+					},
+				],
+				[
+					{ t: words, fg: 'faint' },
+					...(channel.detail
+						? [sep, { t: oneLine(channel.detail), fg: 'faint' } satisfies Seg]
+						: []),
+				],
+				content,
+			),
+		);
 	}
 	lines.push(blank());
 
 	const { model } = health;
 	lines.push(label('MODEL'));
-	lines.push({
-		segs: [
-			model.state === 'ok'
-				? { t: '● ', fg: 'ok' }
-				: { t: '● ', fg: model.state === 'paused' ? 'warn' : 'err' },
-			{ t: fit(model.name, 12), fg: 'fg' },
-			{ t: model.state === 'ok' ? 'ready' : model.state, fg: 'faint' },
-			...(model.detail
-				? [sep, { t: oneLine(model.detail), fg: 'faint' } satisfies Seg]
-				: []),
-			...(model.since !== null && model.state !== 'ok'
-				? [sep, { t: `since ${clock(model.since)}`, fg: 'faint' } satisfies Seg]
-				: []),
-		],
-	});
-	lines.push({
-		segs: [
-			{ t: '  ' },
-			{ t: fit('key', 12), fg: 'dim' },
-			{ t: KEY[model.key], fg: 'faint' },
-		],
-	});
+	lines.push(
+		...hang(
+			[
+				model.state === 'ok'
+					? { t: '● ', fg: 'ok' }
+					: { t: '● ', fg: model.state === 'paused' ? 'warn' : 'err' },
+				{ t: fit(model.name, 12), fg: 'fg' },
+			],
+			[
+				{ t: model.state === 'ok' ? 'ready' : model.state, fg: 'faint' },
+				...(model.detail
+					? [sep, { t: oneLine(model.detail), fg: 'faint' } satisfies Seg]
+					: []),
+				...(model.since !== null && model.state !== 'ok'
+					? [
+							sep,
+							{ t: `since ${clock(model.since)}`, fg: 'faint' } satisfies Seg,
+						]
+					: []),
+			],
+			content,
+		),
+	);
+	lines.push(
+		...hang(
+			[{ t: '  ' }, { t: fit('key', 12), fg: 'dim' }],
+			[{ t: KEY[model.key], fg: 'faint' }],
+			content,
+		),
+	);
 	lines.push(blank());
 
 	const { watchdog } = health;
