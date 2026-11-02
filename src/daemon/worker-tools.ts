@@ -136,7 +136,12 @@ export const WORKER_TOOLS: FunctionTool[] = [
 	),
 ];
 
-export type WorkerTask = { id: number; handle: string; workDir: string };
+export type WorkerTask = {
+	id: number;
+	handle: string;
+	repo: string | null;
+	workDir: string;
+};
 
 export type WorkerToolOutcome = {
 	/** The tool result for the transcript; errors start with `error:`. */

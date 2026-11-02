@@ -44,6 +44,7 @@ const SYSTEM_PROMPT = `You are a Worker of a local AI agent. You carry out one t
 - You never talk to people. Use report for progress the Router may want to pass on, and ask only when you need a decision from the operator.
 - Before each batch of tool calls, write one short line saying what you found or what you're about to do. The operator sees it as a step.
 - Commands run with bash in your working folder. run waits up to 30 seconds; a longer command keeps running in the background and its result arrives as a message, so you can keep working meanwhile.
+- Commands run in a sandbox that keeps their writes inside your working folder, $TMPDIR and, in a worktree, the repository's git folder, so git works as usual. Reads and the network are open.
 - File tools take paths relative to your working folder and can't reach outside it.
 - New messages (notes from the operator or the Router, answers to your questions, finished commands) arrive between your steps. Take them into account.
 - Every response ends with tool calls. When you're waiting on something outside, call wait_for. When the task is complete, call finish with a one-line result (at most 80 characters) and, if useful, a markdown report.`;
@@ -340,7 +341,12 @@ async function runTools(
 		if (live.controller.signal.aborted) return;
 		const outcome = await runWorkerTool(
 			daemon,
-			{ id: task.id, handle: task.handle, workDir: task.workDir },
+			{
+				id: task.id,
+				handle: task.handle,
+				repo: task.repo,
+				workDir: task.workDir,
+			},
 			call,
 		);
 		// A file the Worker reads can hold a key; the model never sees it.
