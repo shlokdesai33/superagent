@@ -64,16 +64,7 @@ export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 	}
 	lines.push(`Sandbox: ${health.sandbox}`);
 
-	const tools = Object.entries(health.machine.tools);
-	const missing = tools.filter(([, found]) => !found).map(([tool]) => tool);
-	lines.push(
-		`Machine: ${health.machine.os} · ${health.machine.arch} · tools: ${tools
-			.filter(([, found]) => found)
-			.map(([tool]) => tool)
-			.join(
-				', ',
-			)}${missing.length > 0 ? ` · missing: ${missing.join(', ')}` : ''}`,
-	);
+	lines.push(`Machine: ${health.machine.os} · ${health.machine.arch}`);
 	return lines.join('\n');
 }
 

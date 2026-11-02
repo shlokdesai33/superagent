@@ -220,24 +220,9 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 	});
 	lines.push(blank());
 
-	const tools = Object.entries(health.machine.tools);
-	const found = tools.filter(([, present]) => present).map(([tool]) => tool);
-	const missing = tools.filter(([, present]) => !present).map(([tool]) => tool);
 	lines.push(label('THIS MACHINE'));
 	const machine: Seg[] = [
 		{ t: `${health.machine.os} ${health.machine.arch}`, fg: 'fg' },
-		...(found.length > 0
-			? [sep, { t: `${found.join(', ')} available`, fg: 'faint' } satisfies Seg]
-			: []),
-		...(missing.length > 0
-			? [
-					sep,
-					{
-						t: `${missing.join(', ')} not installed`,
-						fg: 'faint',
-					} satisfies Seg,
-				]
-			: []),
 		sep,
 		{ t: SANDBOX[health.sandbox], fg: 'faint' },
 	];

@@ -642,7 +642,6 @@ function brief(
 			WHERE tt.task_id = ?`,
 		)
 		.all(task.id);
-	const tools = Object.entries(daemon.machine.tools);
 	const parts = [
 		`You are the Worker for task ${task.handle}: ${task.title}`,
 		`Instructions from the Router:\n${details?.instructions ?? ''}`,
@@ -659,13 +658,7 @@ function brief(
 		task.repo === null
 			? `Working folder: ${task.workDir}. It's a scratch folder for this task, not a repository.`
 			: `Working folder: ${task.workDir}. It's a git worktree of the ${task.repo} repository (${daemon.config.repos.find((repo) => repo.name === task.repo)?.path ?? 'no longer in config.json'}) on your own branch, ${task.branch ?? ''}; commit your work there.${worktreeNote ? ` ${worktreeNote}` : ''}`,
-		`Machine: ${daemon.machine.os} · ${daemon.machine.arch} · on PATH: ${tools
-			.filter(([, found]) => found)
-			.map(([name]) => name)
-			.join(', ')} · missing: ${tools
-			.filter(([, found]) => !found)
-			.map(([name]) => name)
-			.join(', ')}`,
+		`Machine: ${daemon.machine.os} · ${daemon.machine.arch}`,
 	);
 	return parts.join('\n\n');
 }

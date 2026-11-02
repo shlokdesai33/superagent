@@ -182,7 +182,6 @@ export type KeySource = 'env' | 'file' | 'missing';
 export type MachineFacts = {
 	os: string;
 	arch: string;
-	tools: Record<string, boolean>;
 };
 
 export type Problem = {
