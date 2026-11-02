@@ -131,16 +131,6 @@ function diagnoseLinuxProbe(stderr: string): {
 } {
 	const keep =
 		' (add the setting to /etc/sysctl.d/ to keep it after a reboot), then restart the agent';
-	if (
-		sysctl('/proc/sys/kernel/apparmor_restrict_unprivileged_userns') === '1'
-	) {
-		// The profile Claude Code documents: it lets bwrap itself create user
-		// namespaces, and leaves the commands it runs to the sandbox.
-		return {
-			text: "AppArmor doesn't let bubblewrap create user namespaces (Ubuntu 23.10 and later)",
-			fix: "printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n  include if exists <local/bwrap>\\n}\\n' | sudo tee /etc/apparmor.d/bwrap >/dev/null && sudo apparmor_parser -r /etc/apparmor.d/bwrap, then restart the agent",
-		};
-	}
 	if (sysctl('/proc/sys/kernel/unprivileged_userns_clone') === '0') {
 		return {
 			text: 'the kernel has unprivileged user namespaces turned off',
@@ -153,6 +143,20 @@ function diagnoseLinuxProbe(stderr: string): {
 			fix: `sudo sysctl -w user.max_user_namespaces=15000${keep}`,
 		};
 	}
+	// On by default since Ubuntu 23.10, so it's only the cause when bwrap has
+	// no profile yet, or fails the way a namespace without capabilities does.
+	if (
+		sysctl('/proc/sys/kernel/apparmor_restrict_unprivileged_userns') === '1' &&
+		(!bwrapProfileInstalled() ||
+			/setting up uid map|RTM_NEWADDR|apparmor/i.test(stderr))
+	) {
+		// The profile Claude Code documents: it lets bwrap itself create user
+		// namespaces, and leaves the commands it runs to the sandbox.
+		return {
+			text: "AppArmor doesn't let bubblewrap create user namespaces (Ubuntu 23.10 and later)",
+			fix: "printf 'abi <abi/4.0>,\\ninclude <tunables/global>\\nprofile bwrap /usr/bin/bwrap flags=(unconfined) {\\n  userns,\\n  include if exists <local/bwrap>\\n}\\n' | sudo tee /etc/apparmor.d/bwrap >/dev/null && sudo apparmor_parser -r /etc/apparmor.d/bwrap, then restart the agent",
+		};
+	}
 	const container =
 		existsSync('/.dockerenv') || existsSync('/run/.containerenv');
 	return {
@@ -161,6 +165,16 @@ function diagnoseLinuxProbe(stderr: string): {
 			? 'Run the agent outside the container, or give the container unprivileged user namespaces, then restart the agent'
 			: null,
 	};
+}
+
+/** Whether an AppArmor profile for bwrap is loaded, or at least installed when the loaded list can't be read. */
+function bwrapProfileInstalled(): boolean {
+	const loaded = sysctl('/sys/kernel/security/apparmor/profiles');
+	if (loaded !== null) return /^(bwrap|unpriv_bwrap) /m.test(loaded);
+	return [
+		'/etc/apparmor.d/bwrap',
+		'/etc/apparmor.d/bwrap-userns-restrict',
+	].some((path) => existsSync(path));
 }
 
 function sysctl(path: string): string | null {
