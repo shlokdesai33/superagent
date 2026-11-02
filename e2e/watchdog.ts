@@ -22,6 +22,12 @@ const SCALE = '0.001';
 
 // What each task's fake Worker does, by the task's title.
 const workers: Record<string, (request: FakeRequest) => FakeReply> = {
+	// Answers slowly, then finishes.
+	slow: () => ({
+		content: 'Done.',
+		calls: [{ name: 'finish', args: { result: 'Done slowly' } }],
+		delayMs: 3_600,
+	}),
 	// Finishes at once.
 	quick: () => ({
 		content: 'Done.',
@@ -221,6 +227,41 @@ try {
 			(count) => count >= after + 4,
 		);
 		check('the Watchdog notices the wake and carries on checking', true);
+	});
+
+	await scenario('A sleep in the middle of a model call', async (agent) => {
+		// A hung call is 35 minutes of awake time, 2.1 s here. The call takes
+		// 3.6 s of wall time, 3 s of it with the daemon stopped: only 0.6 s
+		// awake, so it isn't hung.
+		await agent.action({ type: 'send_console', text: 'please run slow' });
+		await agent.until(
+			"the slow task's model call",
+			async () =>
+				particle.requests.some(
+					(request) =>
+						request.session === 'worker' &&
+						titles.get(request.handle ?? '') === 'slow',
+				),
+			(asked) => asked,
+		);
+		agent.signal('SIGSTOP');
+		await Bun.sleep(3_000);
+		agent.signal('SIGCONT');
+		const done = await taskLine(
+			agent,
+			'the slow task finishing',
+			(task) => task.title === 'slow' && task.status === 'done',
+		);
+		const calls = particle.requests.filter(
+			(request) =>
+				request.session === 'worker' &&
+				titles.get(request.handle ?? '') === 'slow',
+		).length;
+		check(
+			'the call that spanned the sleep was left to finish, not restarted',
+			done.result === 'Done slowly' && calls === 1,
+			`${calls} ${calls === 1 ? 'call' : 'calls'}`,
+		);
 	});
 
 	await scenario('Particle outage', async (agent) => {

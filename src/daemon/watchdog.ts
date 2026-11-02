@@ -2,7 +2,6 @@ import type { Problem } from '../protocol.ts';
 import { stopCommand } from './commands.ts';
 import { watchdogMs } from './scale.ts';
 import { type Daemon, type Params, health } from './state.ts';
-import { isWorking } from './task-feed.ts';
 
 const TICK_MS = watchdogMs(60_000);
 // Recovery's own effects settle before anything is judged.
@@ -45,9 +44,17 @@ export type Round = {
 	) => void;
 	/** Records the action taken, so it's taken once. */
 	stage: (finding: Finding, stage: string) => void;
-	/** How long the finding has held. */
+	/** Awake time since `at`: wall time minus the sleeps the Watchdog saw. */
+	since: (at: number) => number;
+	/** How long the finding has held, in awake time. */
 	age: (finding: Finding) => number;
 };
+
+/** A stretch the machine slept, as the Watchdog saw it from a late tick. */
+type Sleep = { from: number; to: number };
+
+// Enough to cover every age a check looks at.
+const SLEEPS_KEPT = 50;
 
 export type Check = {
 	/** The prefix of its findings' keys. */
@@ -75,6 +82,7 @@ export function startWatchdog(
 	let lastTick = Date.now();
 	let ticks = 0;
 	let graceUntil = 0;
+	const sleeps: Sleep[] = [];
 
 	const tick = () => {
 		const now = Date.now();
@@ -85,12 +93,16 @@ export function startWatchdog(
 				after: `${Math.round(gap / 1000)} s`,
 			});
 			graceUntil = ticks + GRACE_TICKS;
+			// Timers stop while the machine sleeps, so this tick should have come
+			// a tick after the last one; the rest was sleep, which no age counts.
+			sleeps.push({ from: lastTick + TICK_MS, to: now });
+			if (sleeps.length > SLEEPS_KEPT) sleeps.shift();
 		}
 		for (const check of checks) {
 			if (check.timed && ticks <= graceUntil) continue;
 			const held = new Set<string>();
 			try {
-				check.run(newRound(daemon, now, held));
+				check.run(newRound(daemon, now, held, sleeps));
 				resolve(daemon, `${check.name}:`, held, now);
 				failing.delete(check.name);
 			} catch (error) {
@@ -103,7 +115,7 @@ export function startWatchdog(
 			}
 		}
 		const broken = new Set<string>();
-		const meta = newRound(daemon, now, broken);
+		const meta = newRound(daemon, now, broken, sleeps);
 		for (const [name, count] of failing) {
 			if (count < FAILING_TICKS) continue;
 			meta.report(
@@ -142,8 +154,20 @@ export function startWatchdog(
 	};
 }
 
-function newRound(daemon: Daemon, now: number, held: Set<string>): Round {
+function newRound(
+	daemon: Daemon,
+	now: number,
+	held: Set<string>,
+	sleeps: Sleep[],
+): Round {
 	const { db } = daemon;
+	const since = (at: number) => {
+		let slept = 0;
+		for (const sleep of sleeps) {
+			slept += Math.max(0, Math.min(sleep.to, now) - Math.max(sleep.from, at));
+		}
+		return Math.max(0, now - at - slept);
+	};
 	return {
 		daemon,
 		now,
@@ -192,7 +216,8 @@ function newRound(daemon: Daemon, now: number, held: Set<string>): Round {
 			).run(stage, finding.id);
 			daemon.log('info', 'watchdog acted', { finding: finding.key, stage });
 		},
-		age: (finding) => now - finding.openedAt,
+		since,
+		age: (finding) => since(finding.openedAt),
 	};
 }
 
@@ -236,7 +261,7 @@ const workers: Check = {
 	name: 'workers',
 	timed: true,
 	run: (round) => {
-		const { daemon, now, tickMs } = round;
+		const { daemon, tickMs } = round;
 		const { db } = daemon;
 		for (const task of activeTasks(daemon)) {
 			const live = daemon.workers.get(task.id);
@@ -255,7 +280,10 @@ const workers: Check = {
 				}
 				continue;
 			}
-			if (live.callSince !== null && now - live.callSince > HUNG_CALL_MS) {
+			if (
+				live.callSince !== null &&
+				round.since(live.callSince) > HUNG_CALL_MS
+			) {
 				const finding = round.hold(`workers:${task.handle}:hung-call`, task.id);
 				if (finding.stage === null) {
 					restartWorker(daemon, task.id);
@@ -264,14 +292,9 @@ const workers: Check = {
 				continue;
 			}
 			// Only a loop asleep with work waiting has missed a wake; one busy in
-			// a tool or blocked on something it shows is fine.
-			if (
-				!live.asleep ||
-				isWorking(daemon, task.id) ||
-				live.blockedOn !== null
-			) {
-				continue;
-			}
+			// a tool or blocked on something it shows is fine. An asleep loop's
+			// background command doesn't count: it's waiting, not working.
+			if (!live.asleep || live.blockedOn !== null) continue;
 			const inbox =
 				db
 					.query<{ count: number }, [number]>(
@@ -314,13 +337,13 @@ const router: Check = {
 	name: 'router',
 	timed: true,
 	run: (round) => {
-		const { daemon, now, tickMs } = round;
+		const { daemon, tickMs } = round;
 		const { batch, backoffUntil } = daemon.router;
-		if (batch !== null && now - batch.since > BATCH_STUCK_MS) {
+		if (batch !== null && round.since(batch.since) > BATCH_STUCK_MS) {
 			round.report(
 				round.hold('router:batch'),
 				'agent',
-				`The Router has been deciding for ${minutes(now - batch.since)}`,
+				`The Router has been deciding for ${minutes(round.since(batch.since))}`,
 				'see daemon.log',
 			);
 		}
@@ -337,7 +360,11 @@ const router: Check = {
 				"SELECT MIN(received_at) AS at FROM events WHERE route = 'router' AND consumed_at IS NULL",
 			)
 			.get()?.at;
-		if (oldest === null || oldest === undefined || now - oldest < 2 * tickMs) {
+		if (
+			oldest === null ||
+			oldest === undefined ||
+			round.since(oldest) < 2 * tickMs
+		) {
 			return;
 		}
 		const finding = round.hold('router:stalled');
@@ -368,7 +395,7 @@ const github: Check = {
 			if (
 				pulse.at !== null &&
 				!pulse.rateLimited &&
-				now - pulse.at > POLLER_LATE_WAITS * pulse.waitMs
+				round.since(pulse.at) > POLLER_LATE_WAITS * pulse.waitMs
 			) {
 				const finding = round.hold('github:poller');
 				if (finding.stage === null) {
@@ -392,16 +419,19 @@ const github: Check = {
 					AND m.at < ?`,
 			)
 			.all(now - REPLY_KICK_MS)) {
+			// Wall time is only a first cut; awake time decides.
+			const waited = round.since(reply.at);
+			if (waited < REPLY_KICK_MS) continue;
 			const finding = round.hold(`github:reply:${reply.id}`);
 			if (finding.stage === null) {
 				daemon.wakeDelivery();
 				round.stage(finding, 'kicked');
 			}
-			if (now - reply.at >= REPLY_LATE_MS) {
+			if (waited >= REPLY_LATE_MS) {
 				round.report(
 					finding,
 					'undelivered',
-					`A reply on ${reply.title} has waited ${minutes(now - reply.at)} to post`,
+					`A reply on ${reply.title} has waited ${minutes(waited)} to post`,
 				);
 			}
 		}
@@ -413,9 +443,15 @@ const commands: Check = {
 	name: 'commands',
 	timed: true,
 	run: (round) => {
-		const { daemon, now } = round;
+		const { daemon } = round;
 		for (const command of daemon.commands.values()) {
-			if (now - command.deadline < PAST_DEADLINE_MS) continue;
+			// Its timer counts awake time too, so a sleep doesn't make it late.
+			if (
+				round.since(command.startedAt) - command.timeoutMs <
+				PAST_DEADLINE_MS
+			) {
+				continue;
+			}
 			const finding = round.hold(
 				`commands:${command.stepId}:past-timeout`,
 				command.taskId,

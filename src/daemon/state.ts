@@ -122,8 +122,9 @@ export type RunningCommand = {
 	pgid: number;
 	/** Set once `run` stops waiting; its end then arrives as `command_done`. */
 	background: boolean;
-	/** When its `timeout_s` runs out. */
-	deadline: number;
+	startedAt: number;
+	/** Its `timeout_s`. */
+	timeoutMs: number;
 	/** Why it was ended early, if it was. */
 	stopReason: 'stopped' | 'timed out' | null;
 	/** Resolves with the tool result once the command has ended and its step is stored. */

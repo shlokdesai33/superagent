@@ -588,7 +588,12 @@ export function startGitHub(
 		pulse: () => ({
 			at: pulseAt,
 			waitMs,
-			rateLimited: waitUntil > Date.now(),
+			// The 429 wait, or the pause `send` takes when little quota is left.
+			rateLimited:
+				waitUntil > Date.now() ||
+				(rate !== null &&
+					rate.remaining < PAUSE_BELOW &&
+					rate.reset * 1000 > Date.now()),
 		}),
 		kick: () => cutWait?.(),
 	};
