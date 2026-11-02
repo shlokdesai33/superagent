@@ -149,7 +149,7 @@ export type Usage = {
 export type Health = {
 	channels: Array<{
 		name: string;
-		/** `off`: an optional channel that isn't set up; `detail` says how to enable it. Never a problem. */
+		/** `off`: an optional channel that isn't set up or is turned off; `detail` says what's missing. Never a problem. */
 		state: 'up' | 'connecting' | 'down' | 'off';
 		lastEventAt: number | null;
 		detail: string | null;
@@ -255,6 +255,6 @@ export type Action =
 /** Maps onto a toast: `✓ <subject> · <detail>`. */
 export type ActionResult =
 	| { ok: true; seq: number; subject: string; detail: string | null }
-	| { ok: false; code: string; subject: string; detail: string };
+	| { ok: false; code: string; subject: string; detail: string | null };
 
 export type ErrorBody = { error: { code: string; message: string } };

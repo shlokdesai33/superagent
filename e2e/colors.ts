@@ -217,7 +217,7 @@ async function themeChecks(name: ThemeName, handle: string): Promise<void> {
 				glyph.bold,
 		);
 		check(
-			`${name}: its keys are bold dim (${index('dim')}), words faint (${index('faint')}), the question italic fg`,
+			`${name}: the hint's keys are bold dim (${index('dim')}), words faint (${index('faint')}), the question italic fg`,
 			(enter?.cells ?? []).every(
 				(cell) => cell.fg === index('dim') && cell.bold,
 			) &&
@@ -236,7 +236,7 @@ async function themeChecks(name: ThemeName, handle: string): Promise<void> {
 		const band = typed?.row ?? [];
 		const prompt = band[0];
 		const arrow = band.find((cell) => cell.ch === '→');
-		const preview = find(typing, 'the Router decides');
+		const preview = find(typing, 'the Router');
 		check(
 			`${name}: while typing, the input row is a surface band with fg text, accent › and →, faint preview`,
 			band.length === COLUMNS &&
@@ -361,7 +361,7 @@ try {
 	);
 	try {
 		await modern.type('/x');
-		await modern.waitFor('the Router decides');
+		await modern.waitFor('→ the Router');
 		const [r, g, b] = THEMES.truecolor.dark.surface;
 		check(
 			'Terminal.app on macOS 26 keeps the exact truecolor surface',

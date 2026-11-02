@@ -6,15 +6,10 @@ import { MEASURE, blank, figure, label, oneLine, sep } from '../parts.ts';
 
 const BAR = 32;
 
-const KEY: Record<Health['model']['key'], string> = {
+const KEY: Record<Health['model']['key'], string | null> = {
 	env: 'from PARTICLE_API_KEY',
-	file: 'from the particle-key file in the data folder',
+	file: null,
 	missing: 'missing · run superagent login particle',
-};
-
-const SANDBOX: Record<Health['sandbox'], string> = {
-	off: 'commands run unsandboxed',
-	on: 'commands write only inside their task',
 };
 
 export function healthBody(live: Live, content: number, now: number): Line[] {
@@ -27,34 +22,32 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 	// Channels that are off are optional extras, not part of the count.
 	const active = health.channels.filter((channel) => channel.state !== 'off');
 	const up = active.filter((channel) => channel.state === 'up').length;
-	const summary: Seg[] = [
-		...(problems === 0
+	const summary: Seg[] =
+		problems === 0
 			? [
-					{ t: '● ', fg: 'ok' } satisfies Seg,
-					{ t: 'All healthy', fg: 'fg', b: true } satisfies Seg,
+					{ t: '● ', fg: 'ok' },
+					{ t: 'All healthy', fg: 'fg', b: true },
 				]
 			: [
-					{ t: '! ', fg: 'warn', b: true } satisfies Seg,
+					{ t: '! ', fg: 'warn', b: true },
 					{
 						t: `${problems} ${plural(problems, 'problem')}`,
 						fg: 'fg',
 						b: true,
-					} satisfies Seg,
-				]),
-		sep,
-		{
+					},
+				];
+	if (up < active.length) {
+		summary.push(sep, {
 			t: `${up} of ${active.length} ${plural(active.length, 'channel')} up`,
 			fg: 'faint',
-		},
-		sep,
-		{
-			t:
-				failed.length === 0
-					? 'no failed tasks'
-					: `${failed.length} failed ${plural(failed.length, 'task')}`,
+		});
+	}
+	if (failed.length > 0) {
+		summary.push(sep, {
+			t: `${failed.length} failed ${plural(failed.length, 'task')}`,
 			fg: 'faint',
-		},
-	];
+		});
+	}
 	const lines: Line[] = [{ segs: summary }, blank()];
 
 	if (problems > 0) {
@@ -111,7 +104,7 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 					: { t: '○ ', fg: 'faint' };
 		const words =
 			channel.state === 'up'
-				? `connected · ${channel.lastEventAt === null ? 'no events yet' : `last event ${ago(now - channel.lastEventAt)}`}`
+				? `connected${channel.lastEventAt === null ? '' : ` · last event ${ago(now - channel.lastEventAt)}`}`
 				: channel.state === 'down'
 					? 'disconnected'
 					: channel.state === 'off'
@@ -150,38 +143,34 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 				: []),
 		],
 	});
-	lines.push({
-		segs: [
-			{ t: '  ' },
-			{ t: fit('key', 12), fg: 'dim' },
-			{ t: KEY[model.key], fg: 'faint' },
-		],
-	});
+	// Where the key comes from matters only when it's the fix: none, or a
+	// PARTICLE_API_KEY that a new saved key wouldn't override.
+	const key = KEY[model.key];
+	if (key && (model.key === 'missing' || model.state === 'error')) {
+		lines.push({
+			segs: [
+				{ t: '  ' },
+				{ t: fit('key', 12), fg: 'dim' },
+				{ t: key, fg: 'faint' },
+			],
+		});
+	}
 	lines.push(blank());
 
 	const { watchdog } = health;
 	// Checks run every minute; one this old means the Watchdog has stalled.
 	const late =
 		watchdog.lastCheckAt !== null && now - watchdog.lastCheckAt > 3 * 60_000;
-	lines.push(label('WATCHDOG'));
-	lines.push({
-		segs: [
-			late ? { t: '● ', fg: 'warn' } : { t: '● ', fg: 'faint' },
-			{
-				t:
-					watchdog.lastCheckAt === null
-						? 'starting'
-						: `checked ${ago(now - watchdog.lastCheckAt)}`,
-				fg: late ? 'fg' : 'faint',
-			},
-			sep,
-			{
-				t: `${watchdog.reviewsToday} ${plural(watchdog.reviewsToday, 'review')} today`,
-				fg: 'faint',
-			},
-		],
-	});
-	lines.push(blank());
+	if (late && watchdog.lastCheckAt !== null) {
+		lines.push(label('WATCHDOG'));
+		lines.push({
+			segs: [
+				{ t: '● ', fg: 'warn' },
+				{ t: `checked ${ago(now - watchdog.lastCheckAt)}`, fg: 'fg' },
+			],
+		});
+		lines.push(blank());
+	}
 
 	const peak = Math.max(usage.inputTokens, usage.outputTokens);
 	const cachedShare =
@@ -220,15 +209,12 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 	});
 	lines.push(blank());
 
-	const tools = Object.entries(health.machine.tools);
-	const found = tools.filter(([, present]) => present).map(([tool]) => tool);
-	const missing = tools.filter(([, present]) => !present).map(([tool]) => tool);
+	const missing = Object.entries(health.machine.tools)
+		.filter(([, present]) => !present)
+		.map(([tool]) => tool);
 	lines.push(label('THIS MACHINE'));
 	const machine: Seg[] = [
 		{ t: `${health.machine.os} ${health.machine.arch}`, fg: 'fg' },
-		...(found.length > 0
-			? [sep, { t: `${found.join(', ')} available`, fg: 'faint' } satisfies Seg]
-			: []),
 		...(missing.length > 0
 			? [
 					sep,
@@ -238,8 +224,6 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 					} satisfies Seg,
 				]
 			: []),
-		sep,
-		{ t: SANDBOX[health.sandbox], fg: 'faint' },
 	];
 	for (const segs of wrap(machine, measure)) lines.push({ segs });
 	return lines;
