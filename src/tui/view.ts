@@ -42,6 +42,7 @@ import {
 	FADE_MS,
 	type Overflow,
 	type Ui,
+	doneShown,
 	drafting,
 	toRouter,
 	typed,
@@ -72,6 +73,8 @@ export type Frame = {
 	overflow: Overflow;
 	/** Where each row of the draft on screen starts, for ↑ / ↓ in it. */
 	draftRows: number[];
+	/** On home: DONE's rows that fit before `+ N more`. */
+	doneFits: number | null;
 };
 
 /** The whole screen, as rows of exactly `columns` cells. */
@@ -100,6 +103,7 @@ export function view(
 			scroll: 0,
 			overflow: { above: false, below: false },
 			draftRows: [0],
+			doneFits: null,
 		};
 	}
 
@@ -112,6 +116,7 @@ export function view(
 			scroll: 0,
 			overflow: { above: false, below: false },
 			draftRows: ui.draftRows,
+			doneFits: null,
 		};
 	}
 	const { connection } = model;
@@ -125,7 +130,8 @@ export function view(
 	const header = headerLine(model, ui, content, now);
 	if (now - ui.status.changedAt < FADE_MS) animating = true;
 
-	const footer: Line[] = [rule(content)];
+	// On home the rule is above the pinned console instead.
+	const footer: Line[] = home ? [] : [rule(content)];
 	let routerRows = 0;
 	if (home && live) {
 		const router = routerLines(live, dataNow, theme, content);
@@ -135,7 +141,11 @@ export function view(
 	}
 	// The composer and the toast grow with their text, leaving the body a
 	// few rows; past that, the composer shows its end and the toast is cut.
-	const spare = Math.max(1, rows - 2 - footer.length - 1 - MIN_BODY);
+	// Home's rule is in the body, above its pinned console.
+	const spare = Math.max(
+		1,
+		rows - 2 - footer.length - (home ? 1 : 0) - 1 - MIN_BODY,
+	);
 	const input = inputLines(
 		model,
 		ui,
@@ -168,15 +178,18 @@ export function view(
 	});
 	if (body.animating && !stale) animating = true;
 
-	const { scroll, overflow } = scrollFor(body.lines, ui, bodyHeight);
-	const visible = body.lines.slice(scroll, scroll + bodyHeight);
+	// Home's console is pinned under the tasks, which scroll above it.
+	const pinned = body.pinned ?? [];
+	const viewport = Math.max(0, bodyHeight - pinned.length);
+	const { scroll, overflow } = scrollFor(body.lines, ui, viewport);
+	const visible = body.lines.slice(scroll, scroll + viewport);
 
 	const screen: Line[] = [header, rule(content), ...visible];
-	while (screen.length < 2 + bodyHeight) screen.push({ segs: [] });
-	screen.push(...footer);
+	while (screen.length < 2 + viewport) screen.push({ segs: [] });
+	screen.push(...pinned, ...footer);
 
 	const top = 2;
-	const routerFrom = top + bodyHeight + 1;
+	const routerFrom = top + bodyHeight + (home ? 0 : 1);
 	// A task's rows fade from `flash` when an event goes straight to it.
 	const flashes = new Map<number, number>();
 	if (home && !stale) {
@@ -211,6 +224,7 @@ export function view(
 		scroll,
 		overflow,
 		draftRows: input.draftRows,
+		doneFits: body.doneFits ?? null,
 	};
 }
 
@@ -343,7 +357,13 @@ function bodyLines(
 	model: Model,
 	ui: Ui,
 	{ content, wide, now, height, titleCut }: BodyLayout,
-): { lines: Line[]; animating: boolean } {
+): {
+	lines: Line[];
+	animating: boolean;
+	/** Home's rule and console, under the lines that scroll. */
+	pinned?: Line[];
+	doneFits?: number;
+} {
 	const { connection } = model;
 	const measure = Math.min(MEASURE, content);
 	const prose = (segs: Seg[]): Line[] =>
@@ -883,13 +903,14 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 	}
 	if (screen.name === 'keys') return hint([['esc', 'back']]);
 
-	const items = homeItems(live);
+	const items = homeItems(live, doneShown(ui));
 	const selected: Item | undefined = items.find(
 		(item) => item.key === ui.selected,
 	);
 	const pairs: Array<[string, string]> = [];
 	if (items.length > 1) pairs.push(['↑↓', 'move']);
 	if (selected?.kind === 'problem') pairs.push(['enter', 'health']);
+	else if (selected?.kind === 'more') pairs.push(['enter', 'show all']);
 	else if (selected?.kind === 'task') {
 		const asks = selected.task.status === 'needs_you';
 		pairs.push(['enter', asks ? 'answer' : 'open']);
@@ -900,6 +921,7 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 			'ctrl-x',
 			selected.task.status === 'failed' ? 'dismiss' : 'stop',
 		]);
+	if (ui.done.expanded) pairs.push(['esc', 'fewer']);
 	pairs.push(['ctrl-t', 'health'], ['?', 'keys'], ['ctrl-c', 'quit']);
 	return fitHint(pairs, content, [
 		'ctrl-c',

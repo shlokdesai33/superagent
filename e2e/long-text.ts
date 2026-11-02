@@ -171,7 +171,7 @@ function whole(
 	);
 }
 
-/** Your message and the Router's reply under CONSOLE, at the current size. */
+/** Your message and the Router's reply in the console, at the current size. */
 function consoleChecks(tui: Tui, from: number, label: string): void {
 	const screen = tui.screen(from);
 	whole(
@@ -275,11 +275,11 @@ try {
 		const short = tui.screen(mark);
 		check(
 			'80×14: the reply is taller than the body, so its end is out of view at first',
-			short.some((row) => row.startsWith('CONSOLE')) &&
+			short.some((row) => row.startsWith('you    Please look')) &&
 				!short.some((row) => row.includes('sigma.')),
 			short.join('\n'),
 		);
-		await tui.type('\x1b[B'.repeat(6));
+		await tui.type('\x1b[B'.repeat(20));
 		await settle();
 		const scrolled = tui.screen(mark);
 		check(
@@ -287,11 +287,11 @@ try {
 			scrolled.some((row) => row.includes('sigma.')),
 			scrolled.join('\n'),
 		);
-		await tui.type('\x1b[A'.repeat(8));
+		await tui.type('\x1b[A'.repeat(24));
 		await settle();
 		check(
-			'80×14: ↑ scrolls back up to the CONSOLE label',
-			tui.screen(mark).some((row) => row.startsWith('CONSOLE')),
+			'80×14: ↑ scrolls back up to the start of the message',
+			tui.screen(mark).some((row) => row.startsWith('you    Please look')),
 		);
 	} finally {
 		await tui.quit();
