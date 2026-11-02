@@ -34,8 +34,11 @@ export type FakeParticle = {
 	requests: FakeRequest[];
 	/** `GET /models`, which the daemon's probe asks while Particle fails. */
 	models: { available: boolean; requests: number };
-	/** Every request gets a `401`, as for a revoked key. */
-	auth: { rejected: boolean };
+	/**
+	 * `rejected`: every request gets a `401`, as for a revoked key.
+	 * `rejectedKeys`: requests with one of these keys do.
+	 */
+	auth: { rejected: boolean; rejectedKeys: Set<string> };
 	/** Chat requests get Particle's `402` (no credit) or `403` (key without the scope). */
 	account: { refused: 402 | 403 | null };
 	stop(): void;
@@ -59,14 +62,16 @@ export function startFakeParticle(
 ): FakeParticle {
 	const requests: FakeRequest[] = [];
 	const models = { available: true, requests: 0 };
-	const auth = { rejected: false };
+	const auth = { rejected: false, rejectedKeys: new Set<string>() };
 	const account: FakeParticle['account'] = { refused: null };
 	const lastPrompt = new Map<string, string>();
 	let count = 0;
 	const server = Bun.serve({
 		port: 0,
 		async fetch(request) {
-			if (auth.rejected) {
+			const apiKey =
+				request.headers.get('authorization')?.replace(/^Bearer /, '') ?? '';
+			if (auth.rejected || auth.rejectedKeys.has(apiKey)) {
 				return Response.json(
 					{
 						error: {

@@ -56,7 +56,9 @@ export type Daemon = {
 	/** The key `particle` uses, to notice when it changes. */
 	particleKey: string | null;
 	keySource: KeySource;
-	model: Omit<Health['model'], 'name' | 'key'>;
+	/** The key file as last read, to notice it written again with the same key. */
+	keyFileStamp: string | null;
+	model: Omit<Health['model'], 'name' | 'key' | 'keyRejected'>;
 	/** What fixes the model's failure, when the operator can. */
 	modelFix: string | null;
 	router: RouterLive;
@@ -259,6 +261,9 @@ export function routerChanged(daemon: Daemon): number {
 	return daemon.feed.publish({ type: 'router', router: routerState(daemon) });
 }
 
+/** The model's detail while paused on a key Particle rejected. */
+export const KEY_REJECTED = 'Particle rejected the API key';
+
 /** Sets the model's health, publishing it when it changed. */
 export function setModelHealth(
 	daemon: Daemon,
@@ -434,7 +439,13 @@ export function health(daemon: Daemon): Health {
 				detail: daemon.github.detail,
 			},
 		],
-		model: { name: MODEL, ...daemon.model, key: daemon.keySource },
+		model: {
+			name: MODEL,
+			...daemon.model,
+			key: daemon.keySource,
+			keyRejected:
+				daemon.model.state === 'paused' && daemon.model.detail === KEY_REJECTED,
+		},
 		problems,
 		warnings,
 		machine: daemon.machine,

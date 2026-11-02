@@ -8,6 +8,7 @@ const KEYS: Array<[string, string]> = [
 	['s s', 'stop or dismiss the task'],
 	['/  i', 'write · @handle messages a task'],
 	['r', 'resume failed tasks, on health'],
+	['p', 'add or replace the key, on health'],
 	['h', 'health'],
 	['?', 'keys'],
 	['esc', 'back · cancel typing'],

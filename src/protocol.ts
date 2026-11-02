@@ -167,6 +167,8 @@ export type Health = {
 		since: number | null;
 		/** Where the Particle key comes from; never the key itself. */
 		key: KeySource;
+		/** Particle rejected the key in use; a new key resumes the model. */
+		keyRejected: boolean;
 	};
 	/** Failed tasks are tasks, not problems. */
 	problems: Problem[];
@@ -194,7 +196,6 @@ export type KeySource = 'env' | 'file' | 'missing';
 export type MachineFacts = {
 	os: string;
 	arch: string;
-	tools: Record<string, boolean>;
 };
 
 export type Problem = {

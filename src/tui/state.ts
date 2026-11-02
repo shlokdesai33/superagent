@@ -7,7 +7,26 @@ export type Screen =
 	| { name: 'home' }
 	| { name: 'task'; handle: string }
 	| { name: 'health' }
-	| { name: 'keys'; back: Exclude<Screen, { name: 'keys' }> };
+	| { name: 'keys'; back: Exclude<Screen, { name: 'keys' }> }
+	| KeyScreen;
+
+/**
+ * Where you paste a Particle API key: on first run (`missing`), when Particle
+ * rejected the saved one, or from health (`replace`). `text` is the key being
+ * entered; it's drawn masked and never leaves this process except to Particle
+ * and the key file.
+ */
+export type KeyScreen = {
+	name: 'key';
+	reason: 'missing' | 'rejected' | 'replace';
+	back: Exclude<Screen, { name: 'key' }>;
+	/** Where the key is saved. */
+	keyFile: string;
+	text: string;
+	/** While Particle checks the key: when it started, and which attempt. */
+	checking: { since: number; attempt: number } | null;
+	error: { subject: string; detail: string | null } | null;
+};
 
 export type Typing = {
 	mode: 'free' | 'answer';

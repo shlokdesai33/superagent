@@ -61,12 +61,7 @@ export function formatStatus(snapshot: Snapshot): string {
 		if (warning.fix) lines.push(`  Fix: ${warning.fix}`);
 	}
 
-	const missing = Object.entries(health.machine.tools)
-		.filter(([, found]) => !found)
-		.map(([tool]) => tool);
-	lines.push(
-		`Machine: ${health.machine.os} · ${health.machine.arch}${missing.length > 0 ? ` · missing: ${missing.join(', ')}` : ''}`,
-	);
+	lines.push(`Machine: ${health.machine.os} · ${health.machine.arch}`);
 	return lines.join('\n');
 }
 
