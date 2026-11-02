@@ -87,7 +87,7 @@ try {
 	check(
 		'with no key, superagent opens on the key screen with the wordmark',
 		first.some((row) => row.includes('███████╗██╗   ██╗██████╗')) &&
-			!tui.seen().includes('press / to ask'),
+			!tui.seen().includes('@handle to message a task'),
 	);
 
 	// 1b. On short terminals the wordmark shrinks or goes, never the input or
@@ -162,7 +162,7 @@ try {
 	mark = tui.mark();
 	await tui.paste(goodKey);
 	await tui.type('\r');
-	await tui.waitFor('press / to ask', mark);
+	await tui.waitFor('@handle to message a task', mark);
 	check(
 		'a good key is written to the key file with mode 0600',
 		fileMode() === 0o600 && readFileSync(keyFile, 'utf8') === `${goodKey}\n`,
@@ -181,13 +181,13 @@ try {
 
 	// 4. Health's replace key opens the same screen; esc goes back.
 	mark = tui.mark();
-	await tui.type('h');
-	await tui.waitFor('p replace key', mark);
-	await tui.type('p');
+	await tui.type('\x14');
+	await tui.waitFor('ctrl-k replace key', mark);
+	await tui.type('\x0b');
 	await tui.waitFor('Paste a new Particle API key', mark);
 	mark = tui.mark();
 	await tui.type('\x1b');
-	await tui.waitFor('p replace key', mark);
+	await tui.waitFor('ctrl-k replace key', mark);
 	check("health's replace key opens the key screen, and esc goes back", true);
 	await tui.type('\x1b');
 
@@ -208,7 +208,7 @@ try {
 	mark = tui.mark();
 	await tui.paste(nextKey);
 	await tui.type('\r');
-	await tui.waitFor('press / to ask', mark);
+	await tui.waitFor('@handle to message a task', mark);
 	await health(
 		'the model to resume on the replaced key',
 		agent.lines.indexOf(rejected) + 1,
@@ -223,7 +223,7 @@ try {
 	//    accepts it again: the key screen opens anyway, the draft is back
 	//    after it, and pasting the same key resumes the model at once, not
 	//    at the next 2-minute retry.
-	await tui.type('/half a thought');
+	await tui.type('half a thought');
 	particle.auth.rejectedKeys.add(nextKey);
 	from = agent.lines.length;
 	mark = tui.mark();
