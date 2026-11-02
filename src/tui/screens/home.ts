@@ -142,7 +142,7 @@ export function homeBody(
 			{
 				segs: [
 					{
-						t: 'Press / to ask for something, or mention superagent in Slack or GitHub.',
+						t: 'Press / to ask for something.',
 						fg: 'faint',
 					},
 				],

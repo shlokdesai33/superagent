@@ -32,6 +32,8 @@ export type Agent = {
 		read: () => Promise<T>,
 		done: (value: T) => boolean,
 	): Promise<T>;
+	/** Sends the daemon a signal, such as `SIGSTOP` to stand in for the machine sleeping. */
+	signal(name: NodeJS.Signals): void;
 	/** Stops the daemon, runs `inspect` on its data folder, then removes it. */
 	stop(inspect?: (home: string) => void | Promise<void>): Promise<void>;
 };
@@ -221,6 +223,9 @@ export async function startAgent(
 				// oxlint-disable-next-line eslint/no-await-in-loop
 				await Bun.sleep(100);
 			}
+		},
+		signal(name) {
+			child.kill(name);
 		},
 		async stop(inspect) {
 			child.kill('SIGTERM');

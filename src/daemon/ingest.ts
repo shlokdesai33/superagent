@@ -14,7 +14,7 @@ import { publishTask } from './task-feed.ts';
 const PREVIEW_CHARS = 80;
 
 export type InboundEvent = {
-	channel: 'console' | 'script' | 'internal';
+	channel: 'console' | 'script' | 'github' | 'internal';
 	/** The dedupe key; the request ID for console actions. */
 	externalId: string | null;
 	thread: {
@@ -38,7 +38,10 @@ type Decision =
 	| { route: 'task'; taskId: number }
 	| { route: 'filtered'; reason: string };
 
-const PEOPLE_KINDS = new Set(['message', 'note', 'answer']);
+/** Kinds that are also a line in a thread's conversation. */
+const MESSAGE_KINDS = new Set(['message', 'note', 'answer', 'activity', 'ci']);
+/** Kinds from people that answer a task's open question; a CI result can't. */
+const ANSWER_KINDS = new Set(['message', 'note', 'answer']);
 
 /** Internal events from Workers, addressed to the Router. */
 export const ROUTER_KINDS = new Set([
@@ -53,11 +56,12 @@ export const ROUTER_KINDS = new Set([
 
 /**
  * The Fast Path (§4.4): plain-code rules for events no task owns. The console
- * has none, since everything the operator types is a request; the script
- * channel uses the rules GitHub and Slack will start from. Returns the reason
- * to drop the event, or `null`.
+ * has none, since everything the operator types is a request. GitHub reaches
+ * only the tasks that follow a thread. Returns the reason to drop the event,
+ * or `null`.
  */
 function fastPathFilter(event: InboundEvent): string | null {
+	if (event.channel === 'github') return 'no task follows this thread';
 	if (event.channel !== 'script') return null;
 	if (event.author.isBot) return 'bot message';
 	if (!event.mentionsAgent) return 'not addressed to the agent';
@@ -149,7 +153,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 		if (
 			event.channel !== 'internal' &&
 			!event.author.isSelf &&
-			PEOPLE_KINDS.has(event.kind)
+			MESSAGE_KINDS.has(event.kind)
 		) {
 			const messageId = db
 				.query<unknown, Params>(
@@ -176,7 +180,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 		if (
 			decision.route === 'task' &&
 			event.channel !== 'internal' &&
-			PEOPLE_KINDS.has(event.kind)
+			ANSWER_KINDS.has(event.kind)
 		) {
 			answered =
 				db

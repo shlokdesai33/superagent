@@ -164,6 +164,28 @@ CREATE TABLE model_calls (
 CREATE INDEX model_calls_by_time ON model_calls (started_at);
 `,
 	'ALTER TABLE model_calls DROP COLUMN model;',
+	`
+CREATE TABLE github_cursors (
+	key        TEXT PRIMARY KEY,
+	since      TEXT,
+	etag       TEXT,
+	updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE github_items (
+	thread_id  TEXT PRIMARY KEY REFERENCES threads(id),
+	repo       TEXT NOT NULL,
+	number     INTEGER NOT NULL,
+	is_pr      INTEGER NOT NULL,
+	title      TEXT NOT NULL,
+	state      TEXT NOT NULL,
+	head_sha   TEXT,
+	ci_outcome TEXT,
+	summary    TEXT,
+	polled_at  INTEGER NOT NULL,
+	updated_at TEXT NOT NULL
+);
+`,
 ];
 
 // Letters and digits without look-alikes (no i, l, o, 0 or 1).

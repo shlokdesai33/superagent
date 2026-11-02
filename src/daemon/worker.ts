@@ -6,6 +6,7 @@ import type { ChatResult } from '../particle/client.ts';
 import type { AssistantMessage, ToolCall } from '../particle/types.ts';
 import { stopCommand } from './commands.ts';
 import { prepareWorktree } from './git.ts';
+import { githubIntros } from './github-threads.ts';
 import { ModelError, callModel, pausedOn } from './model.ts';
 import {
 	type Item,
@@ -47,6 +48,7 @@ const PROMPT_START = `You are a Worker of a local AI agent. You carry out one ta
 `;
 
 const PROMPT_END = `- File tools take paths relative to your working folder. write_file and edit_file only write inside it.
+- For GitHub, use the gh CLI in your shell, logged in as the operator: gh issue view, gh pr view, gh pr checks and gh run view --log-failed to read issues, PRs and CI, and gh pr create to open a PR from your branch. Push only your own branch, with git push -u origin HEAD. Don't comment or review on GitHub yourself: use report, and the Router decides what people hear.
 - New messages (notes from the operator or the Router, answers to your questions, finished commands) arrive between your steps. Take them into account.
 - Every response ends with tool calls. When you're waiting on something outside, call wait_for. When the task is complete, call finish with a one-line result (at most 80 characters) and, if useful, a markdown report.`;
 
@@ -226,11 +228,15 @@ async function workerLoop(
 			}
 			if (signal.aborted) return;
 		}
+		// GitHub issues it took since its last step, fetched once each.
+		const intros = await githubIntros(daemon, live.taskId);
+		if (signal.aborted) return;
 		if (!(await takeSlot(daemon, live))) return;
 
 		try {
 			const input = [
 				first ? brief(daemon, task, worktreeNote) : worktreeNote,
+				intros,
 				inbox.length > 0 ? renderInbox(inbox) : null,
 				nudge ? NUDGE : null,
 			].filter((part) => part !== null);
@@ -522,14 +528,18 @@ type InboxEvent = {
 	threadTitle: string | null;
 	kind: string;
 	author: string;
+	isBot: number;
 	text: string;
+	data: string | null;
 };
+
+const LATE_MS = 5 * 60_000;
 
 function inboxEvents(db: Database, taskId: number): InboxEvent[] {
 	return db
 		.query<InboxEvent, [number]>(
 			`SELECT e.id, e.received_at AS at, e.channel, th.title AS threadTitle, e.kind,
-				e.author, e.text
+				e.author, e.is_bot AS isBot, e.text, e.data
 			FROM events e LEFT JOIN threads th ON th.id = e.thread_id
 			WHERE e.route = 'task' AND e.task_id = ? AND e.consumed_at IS NULL
 			ORDER BY e.id`,
@@ -549,11 +559,21 @@ function renderInbox(events: InboxEvent[]): string {
 					? `answer from ${event.author} to your question`
 					: event.kind === 'command_done'
 						? 'command finished'
-						: [event.channel, event.threadTitle, event.author]
+						: [
+								event.channel,
+								event.threadTitle,
+								event.kind === 'message' ? null : event.kind,
+								`${event.author}${event.isBot ? ' (bot)' : ''}`,
+							]
 								.filter(Boolean)
 								.join(' · ');
+		const posted = postedAt(event.data);
+		const when =
+			posted !== null && event.at - posted > LATE_MS
+				? `posted ${clock(posted)}, received ${clock(event.at)} (the agent was asleep or offline)`
+				: clock(event.at);
 		lines.push(
-			`#${event.id} · ${what} · ${clock(event.at)}`,
+			`#${event.id} · ${what} · ${when}`,
 			event.text
 				.split('\n')
 				.map((line) => `  ${line}`)
@@ -605,7 +625,7 @@ function brief(
 	}
 	parts.push(
 		threads.length > 0
-			? `Threads you follow: ${threads.map((thread) => `${thread.id} (${thread.title})`).join(', ')}. Their new messages come to you.`
+			? `Threads you follow: ${threads.map((thread) => `${thread.id} (${thread.title})`).join(', ')}. Their new messages come to you; on GitHub threads, new comments and changes too. You can't post on GitHub: report, and the Router decides what people hear.`
 			: 'You follow no threads; the Router speaks to people for you.',
 		task.repo === null
 			? `Working folder: ${task.workDir}. It's a scratch folder for this task, not a repository.`
@@ -619,6 +639,18 @@ function brief(
 			.join(', ')}`,
 	);
 	return parts.join('\n\n');
+}
+
+/** GitHub's own time for an event, from its `data`. */
+function postedAt(data: string | null): number | null {
+	if (data === null) return null;
+	const value: unknown = JSON.parse(data);
+	return typeof value === 'object' &&
+		value !== null &&
+		'postedAt' in value &&
+		typeof value.postedAt === 'number'
+		? value.postedAt
+		: null;
 }
 
 function clock(at: number): string {

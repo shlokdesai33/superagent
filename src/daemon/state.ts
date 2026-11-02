@@ -14,7 +14,7 @@ import type {
 	Warning,
 } from '../protocol.ts';
 import type { Feed } from './feed.ts';
-import type { GitHubLive } from './github.ts';
+import type { GitHubApi, GitHubLive } from './github.ts';
 import type { Log } from './log.ts';
 import type { SandboxStatus } from './sandbox.ts';
 import type { Config } from './setup.ts';
@@ -40,6 +40,8 @@ export type Daemon = {
 	channels: Map<string, number | null>;
 	/** The GitHub channel's health; `off` unless gh is installed and logged in. */
 	github: GitHubLive;
+	/** GitHub's REST client, once the channel runs. */
+	githubApi: GitHubApi | null;
 	/** `POST /v1/events` is on (`--script-channel`), for tests. */
 	scriptChannel: boolean;
 	/** Action results by `requestId`, kept 10 minutes. */
@@ -278,16 +280,18 @@ export function health(daemon: Daemon): Health {
 	}
 	return {
 		channels: [
-			...[...daemon.channels].map(([name, lastEventAt]) => ({
-				name,
-				state: 'up' as const,
-				lastEventAt,
-				detail: null,
-			})),
+			...[...daemon.channels]
+				.filter(([name]) => name !== 'github')
+				.map(([name, lastEventAt]) => ({
+					name,
+					state: 'up' as const,
+					lastEventAt,
+					detail: null,
+				})),
 			{
 				name: 'github',
 				state: daemon.github.state,
-				lastEventAt: null,
+				lastEventAt: daemon.channels.get('github') ?? null,
 				detail: daemon.github.detail,
 			},
 		],
