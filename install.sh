@@ -70,7 +70,8 @@ elif [ -n "${SUPERAGENT_VERSION:-}" ]; then
 else
 	base="https://github.com/$REPO/releases/latest/download"
 fi
-dir="${SUPERAGENT_INSTALL_DIR:-$HOME/.local/bin}"
+dir="${SUPERAGENT_INSTALL_DIR:-${HOME:+$HOME/.local/bin}}"
+[ -n "$dir" ] || fail "HOME isn't set; set SUPERAGENT_INSTALL_DIR to the folder to install superagent in"
 dest="$dir/superagent"
 
 previous=""
@@ -87,9 +88,14 @@ if [ -n "$dry_run" ]; then
 fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/superagent-install.XXXXXX")"
-trap 'rm -rf "$tmp"' EXIT INT TERM
+# A trap that doesn't exit lets the script carry on after Ctrl-C, without $tmp.
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-say "Downloading $asset…"
+# Braces: shells that take the first byte of "…" for a letter, such as
+# macOS's /bin/sh, would otherwise read a variable named "asset\342".
+say "Downloading ${asset}…"
 curl -fSL --progress-bar -o "$tmp/$asset" "$base/$asset" ||
 	fail "couldn't download $base/$asset"
 curl -fsSL -o "$tmp/$asset.sha256" "$base/$asset.sha256" ||
