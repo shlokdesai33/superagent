@@ -233,11 +233,21 @@ export function placeOf(
 
 export type Item =
 	| { key: string; kind: 'problem'; problem: Problem }
-	| { key: string; kind: 'task'; task: TaskSummary };
+	| { key: string; kind: 'task'; task: TaskSummary }
+	/** DONE TODAY's `+ N more` row, for the rows it hides. */
+	| { key: string; kind: 'more'; hidden: number };
 
-/** The home screen's selectable items, top to bottom. */
-export function homeItems(live: Live): Item[] {
+export const MORE_KEY = 'more:done';
+
+/**
+ * The home screen's selectable items, top to bottom. `doneShown`: how many
+ * DONE TODAY rows home shows before its `+ N more` row; `null` for all.
+ */
+export function homeItems(live: Live, doneShown: number | null): Item[] {
 	const all = sections(live);
+	const done =
+		doneShown === null ? all.done : all.done.slice(0, Math.max(1, doneShown));
+	const hidden = all.done.length - done.length;
 	return [
 		...all.problems.map((problem): Item => ({
 			key: `problem:${problem.id}`,
@@ -245,7 +255,10 @@ export function homeItems(live: Live): Item[] {
 			problem,
 		})),
 		...[...all.failed, ...all.needs, ...all.working].map(taskItem),
-		...all.done.map(taskItem),
+		...done.map(taskItem),
+		...(hidden > 0
+			? [{ key: MORE_KEY, kind: 'more', hidden } satisfies Item]
+			: []),
 	];
 }
 
