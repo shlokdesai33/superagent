@@ -113,7 +113,11 @@ export type GitHubApi = {
 
 type Rate = { limit: number; remaining: number; reset: number };
 
-export type GitHubClient = GitHubApi & { stop: () => Promise<void> };
+export type GitHubClient = GitHubApi & {
+	stop: () => Promise<void>;
+	/** Checks the configured repositories again now, after one is added. */
+	recheck: () => void;
+};
 
 /**
  * Runs the GitHub channel until `stop`: reads the token from `gh auth token`,
@@ -577,6 +581,10 @@ export function startGitHub(
 			stop.abort();
 			await loop;
 			await queue;
+		},
+		recheck: () => {
+			checked = false;
+			cutWait?.();
 		},
 	};
 }

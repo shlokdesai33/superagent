@@ -36,5 +36,14 @@ export function keysBody(): Line[] {
 			},
 		],
 	});
+	lines.push({
+		segs: [
+			{ t: fit('', 18) },
+			{
+				t: 'tab, when opened in a repository, changes where new tasks go: there, another repository, or none',
+				fg: 'dim',
+			},
+		],
+	});
 	return lines;
 }

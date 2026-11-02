@@ -26,7 +26,14 @@ import {
 	stoppable,
 } from './model.ts';
 import { FRAME_MS } from './parts.ts';
-import { FADE_MS, type Toast, type Ui, mergedSteps } from './state.ts';
+import { repoChoices } from './repo.ts';
+import {
+	FADE_MS,
+	type Toast,
+	type Ui,
+	mergedSteps,
+	toRouter,
+} from './state.ts';
 import type { Terminal } from './terminal.ts';
 import { THEMES, type ThemeName, themeFromOsc11 } from './theme.ts';
 import { statusPhrase, view } from './view.ts';
@@ -64,7 +71,7 @@ export class App {
 	private finish: () => void = () => {};
 	readonly done: Promise<void>;
 
-	constructor(terminal: Terminal, theme: ThemeName) {
+	constructor(terminal: Terminal, theme: ThemeName, startedIn: string | null) {
 		this.terminal = terminal;
 		this.model = {
 			connection: { state: 'connecting' },
@@ -89,6 +96,7 @@ export class App {
 				previous: null,
 			},
 			details: new Map(),
+			repo: { startedIn, path: startedIn },
 		};
 		this.done = new Promise((resolve) => {
 			this.finish = resolve;
@@ -389,6 +397,7 @@ export class App {
 		else if (event.kind === 'key') {
 			if (event.name === 'enter') this.send();
 			else if (event.name === 'escape') this.ui.typing = null;
+			else if (event.name === 'tab') this.nextRepo();
 			else if (event.name === 'backspace') {
 				const chars = [
 					...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(
@@ -431,12 +440,29 @@ export class App {
 			});
 			return;
 		}
-		const { screen } = this.ui;
+		const { screen, repo } = this.ui;
 		if (screen.name === 'task') {
 			this.act({ type: 'send_note', handle: screen.handle, text });
 			return;
 		}
-		this.act({ type: 'send_console', text });
+		this.act({
+			type: 'send_console',
+			text,
+			...(repo.path === null ? {} : { repo: repo.path }),
+		});
+	}
+
+	/** Tab while writing to the Router: the next default repository, or none. */
+	private nextRepo(): void {
+		if (!toRouter(this.ui)) return;
+		const { repo } = this.ui;
+		const choices = repoChoices(
+			repo.startedIn,
+			this.model.live?.health.repos ?? [],
+		);
+		if (choices.length === 0) return;
+		const index = choices.indexOf(repo.path);
+		repo.path = choices[(index + 1) % choices.length] ?? null;
 	}
 
 	private startTyping(): void {

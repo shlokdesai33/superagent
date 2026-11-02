@@ -1,8 +1,10 @@
 import { App } from './app.ts';
+import { repositoryAt } from './repo.ts';
 import { Terminal } from './terminal.ts';
 
 /** Runs the terminal UI until the user quits. Restores the terminal on every exit. */
 export async function runTui(): Promise<void> {
+	const startedIn = repositoryAt(process.cwd());
 	const terminal = new Terminal();
 	const restore = () => terminal.leave();
 	const onSignal = () => {
@@ -23,7 +25,7 @@ export async function runTui(): Promise<void> {
 	try {
 		const theme = await terminal.detectTheme();
 		terminal.enter();
-		const app = new App(terminal, theme);
+		const app = new App(terminal, theme, startedIn);
 		app.start();
 		await app.done;
 	} finally {

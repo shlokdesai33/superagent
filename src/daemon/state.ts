@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite';
+import { realpathSync } from 'node:fs';
 import type { DataPaths } from '../home.ts';
 import { MODEL, type ParticleClient } from '../particle/client.ts';
 import type {
@@ -14,7 +15,7 @@ import type {
 	Warning,
 } from '../protocol.ts';
 import type { Feed } from './feed.ts';
-import type { GitHubApi, GitHubLive } from './github.ts';
+import type { GitHubClient, GitHubLive } from './github.ts';
 import type { Log } from './log.ts';
 import type { SandboxStatus } from './sandbox.ts';
 import type { Config } from './setup.ts';
@@ -42,7 +43,7 @@ export type Daemon = {
 	/** The GitHub channel's health; `off` unless gh is installed and logged in. */
 	github: GitHubLive;
 	/** GitHub's REST client, once the channel runs. */
-	githubApi: GitHubApi | null;
+	githubApi: GitHubClient | null;
 	/** Tells the GitHub delivery loop a reply is waiting. */
 	wakeDelivery: () => void;
 	/** `POST /v1/events` is on (`--script-channel`), for tests. */
@@ -329,7 +330,20 @@ export function health(daemon: Daemon): Health {
 		warnings,
 		machine: daemon.machine,
 		sandbox: sandbox.state,
+		repos: daemon.config.repos.map((repo) => ({
+			name: repo.name,
+			path: canonical(repo.path),
+		})),
 	};
+}
+
+/** `path` with its symlinks resolved, or as given when it doesn't exist. */
+export function canonical(path: string): string {
+	try {
+		return realpathSync(path);
+	} catch {
+		return path;
+	}
 }
 
 export function dayStart(now: number): number {
