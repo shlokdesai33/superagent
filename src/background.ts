@@ -71,8 +71,17 @@ export async function startAgent(paths: DataPaths): Promise<StartResult> {
 
 	const deadline = Date.now() + READY_WAIT_MS;
 	while (Date.now() < deadline) {
-		// oxlint-disable-next-line eslint/no-await-in-loop
-		const snapshot = await runningAgent();
+		let snapshot: Snapshot | null = null;
+		try {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			snapshot = await runningAgent();
+		} catch (error) {
+			// Listening but not answering yet: still starting, until the deadline.
+			if (
+				!(error instanceof DaemonUnreachable && error.kind === 'not_answering')
+			)
+				throw error;
+		}
 		if (snapshot) return { ok: true, started: true, snapshot };
 		if (child.exitCode !== null || child.signalCode !== null) break;
 		// oxlint-disable-next-line eslint/no-await-in-loop

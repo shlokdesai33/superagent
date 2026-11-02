@@ -1,11 +1,27 @@
 // End to end: the background agent's commands as a user runs them,
 // `superagent start`, `status` and `stop`, on an isolated data folder. Run
 // with `bun run e2e`; it exits non-zero if a check fails.
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { startAgent } from '../src/background.ts';
+import { dataPaths } from '../src/home.ts';
 import { startFakeParticle } from './fake-particle.ts';
 
 const CLI = join(import.meta.dir, '..', 'src', 'cli.ts');
+
+// startAgent starts its own script with `daemon`, so called from here it
+// starts this one: a stand-in agent that takes connections on its socket and
+// never answers, like an agent still starting up.
+if (Bun.argv[2] === 'daemon') {
+	const folder = Bun.env.SUPERAGENT_HOME ?? '';
+	writeFileSync(join(folder, 'daemon.pid'), `${process.pid}\n`);
+	Bun.listen({
+		unix: join(folder, 'agent.sock'),
+		socket: { data() {} },
+	});
+	process.stderr.write('stand-in agent: listening, never answering\n');
+	await new Promise(() => {});
+}
 
 const particle = startFakeParticle(() => ({ content: 'Nothing to do.' }));
 // Short, to stay under the socket path limit.
@@ -121,6 +137,38 @@ try {
 		after.code === 0 && after.out === "superagent isn't running.",
 		after.out,
 	);
+
+	process.stdout.write('\nAn agent that listens but never answers\n');
+	const slowHome = mkdtempSync('/tmp/sa-');
+	const saved = Bun.env.SUPERAGENT_HOME;
+	Bun.env.SUPERAGENT_HOME = slowHome;
+	const waitStarted = Date.now();
+	let outcome: string;
+	try {
+		const result = await startAgent(dataPaths());
+		outcome = result.ok ? 'started' : result.cause;
+	} catch (error) {
+		outcome = `threw: ${error instanceof Error ? error.message : String(error)}`;
+	} finally {
+		if (saved === undefined) delete Bun.env.SUPERAGENT_HOME;
+		else Bun.env.SUPERAGENT_HOME = saved;
+	}
+	const waited = Date.now() - waitStarted;
+	check(
+		'start keeps waiting for the full 20 s, then says what it printed',
+		outcome === 'stand-in agent: listening, never answering' &&
+			waited >= 19_000,
+		`${outcome} · ${waited} ms`,
+	);
+	try {
+		process.kill(
+			Number(readFileSync(join(slowHome, 'daemon.pid'), 'utf8').trim()),
+			'SIGKILL',
+		);
+	} catch {
+		// It never started.
+	}
+	rmSync(slowHome, { recursive: true, force: true });
 } finally {
 	try {
 		const pid = agentPid();
