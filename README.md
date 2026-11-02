@@ -53,7 +53,7 @@ bun src/cli.ts daemon         # run the background agent in this terminal (for d
 
 The terminal UI connects to the agent for the same data folder and reconnects by itself when it goes away. It picks a light or dark theme from the terminal's background; press `?` for its keys.
 
-The agent keeps everything in one data folder that only you can read, `~/.superagent` unless `SUPERAGENT_HOME` is set: `config.json` (mode `0600`), the Particle key `particle-key` (mode `0600`), the socket `agent.sock`, the lock `daemon.pid`, the SQLite state `state.db`, its log `daemon.log` and `output.log`, what a background agent printed outside its log (startup errors and crashes). Clients talk HTTP over the socket, sending `Superagent-Protocol: 1`:
+The agent keeps everything in one data folder that only you can read, `~/.superagent` unless `SUPERAGENT_HOME` is set: `config.json` (mode `0600`), the Particle key `particle-key` (mode `0600`), the socket `agent.sock`, the lock `daemon.pid` (one left by a crash or a reboot is ignored, even when its pid now belongs to another program), the SQLite state `state.db`, its log `daemon.log` and `output.log`, what a background agent printed outside its log (startup errors and crashes). Clients talk HTTP over the socket, sending `Superagent-Protocol: 1`:
 
 ```sh
 curl -N --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
