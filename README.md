@@ -26,15 +26,6 @@ curl -fsSL https://github.com/shlokdesai33/superagent/releases/latest/download/i
 
 This puts `superagent` in `~/.local/bin`, without sudo, and tells you if that folder isn't on your `PATH`. Add `SUPERAGENT_VERSION=v0.1.0` before `sh` for a given release, or `SUPERAGENT_INSTALL_DIR=<folder>` to install elsewhere.
 
-To build from source, with Bun 1.4.4 or newer:
-
-```sh
-git clone https://github.com/shlokdesai33/superagent && cd superagent
-bun install
-bun run build darwin-arm64   # or darwin-x64, linux-x64, linux-arm64
-cp dist/superagent-darwin-arm64 ~/.local/bin/superagent
-```
-
 ## First run
 
 Open it in a repository you want to work on:
