@@ -6,10 +6,11 @@ import {
 	statSync,
 	truncateSync,
 } from 'node:fs';
-import { DaemonUnreachable, readSnapshot } from './client.ts';
+import { DaemonUnreachable, NOT_ANSWERING, readSnapshot } from './client.ts';
 import { BACKGROUND_ENV, type DataPaths, isAgentProcess } from './home.ts';
 import type { Snapshot } from './protocol.ts';
 
+const ANSWER_WAIT_MS = 5_000;
 const READY_WAIT_MS = 20_000;
 const STOP_WAIT_MS = 30_000;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -18,13 +19,24 @@ export type StartResult =
 	| { ok: true; started: boolean; snapshot: Snapshot }
 	| { ok: false; cause: string; fix: string | null };
 
-/** The running agent's snapshot, or `null` when it isn't running. */
+/**
+ * The running agent's snapshot, or `null` when it isn't running. Throws
+ * `not_answering` when it takes the connection but sends nothing for 5 s.
+ */
 export async function runningAgent(): Promise<Snapshot | null> {
+	const signal = AbortSignal.timeout(ANSWER_WAIT_MS);
 	try {
-		return await readSnapshot();
+		return await readSnapshot(signal);
 	} catch (error) {
 		if (error instanceof DaemonUnreachable && error.kind === 'not_running') {
 			return null;
+		}
+		if (signal.aborted) {
+			throw new DaemonUnreachable(
+				'not_answering',
+				NOT_ANSWERING,
+				`no answer on its socket within ${ANSWER_WAIT_MS / 1000} s`,
+			);
 		}
 		throw error;
 	}
@@ -59,8 +71,17 @@ export async function startAgent(paths: DataPaths): Promise<StartResult> {
 
 	const deadline = Date.now() + READY_WAIT_MS;
 	while (Date.now() < deadline) {
-		// oxlint-disable-next-line eslint/no-await-in-loop
-		const snapshot = await runningAgent();
+		let snapshot: Snapshot | null = null;
+		try {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			snapshot = await runningAgent();
+		} catch (error) {
+			// Listening but not answering yet: still starting, until the deadline.
+			if (
+				!(error instanceof DaemonUnreachable && error.kind === 'not_answering')
+			)
+				throw error;
+		}
 		if (snapshot) return { ok: true, started: true, snapshot };
 		if (child.exitCode !== null || child.signalCode !== null) break;
 		// oxlint-disable-next-line eslint/no-await-in-loop
@@ -91,6 +112,12 @@ export async function stopAgent(paths: DataPaths): Promise<boolean> {
 		return false;
 	}
 	process.kill(pid, 'SIGTERM');
+	// A stopped agent (SIGSTOP, ctrl-z) only acts on SIGTERM once it continues.
+	try {
+		process.kill(pid, 'SIGCONT');
+	} catch {
+		// It already ended.
+	}
 	const deadline = Date.now() + STOP_WAIT_MS;
 	while (alive(pid) && Date.now() < deadline) {
 		// oxlint-disable-next-line eslint/no-await-in-loop
