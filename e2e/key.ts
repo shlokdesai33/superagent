@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import type { FeedLine, Health } from '../src/protocol.ts';
 import { startFakeParticle } from './fake-particle.ts';
 import { startAgent } from './harness.ts';
+import { replay, text } from './screen.ts';
 import { openTui } from './tui.ts';
 
 type HealthLine = Extract<FeedLine, { type: 'health' }>;
@@ -74,6 +75,15 @@ try {
 		until: 'Paste your Particle API key',
 	});
 	const first = tui.screen();
+	await Bun.sleep(200);
+	const painted = replay(tui.raw()).cells.filter((row) =>
+		row.some((cell) => cell.bgRgb !== null),
+	);
+	check(
+		"the key screen keeps the terminal's background, painting only the input band",
+		painted.length === 1 && text(painted[0] ?? []).includes('paste your key'),
+		painted.map(text).join(' | '),
+	);
 	check(
 		'with no key, superagent opens on the key screen with the wordmark',
 		first.some((row) => row.includes('███████╗██╗   ██╗██████╗')) &&

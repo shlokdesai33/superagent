@@ -5,6 +5,10 @@
 // messages are one colour on every line, wrapped ones too, at both depths;
 // truecolor sent to that Terminal.app turned first lines faint. Run with
 // `bun run e2e`; it exits non-zero if a check fails.
+//
+// The screen keeps the terminal's own background: only the selected item and
+// the input band paint one, a subtle step from the background the terminal
+// reports, and every word reads at 4.5:1 on whichever it sits on.
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,12 +20,14 @@ import {
 	type ThemeName,
 	colorDepth,
 	nearest256,
-	xterm256,
+	themeFor,
+	themeOf,
 } from '../src/tui/theme.ts';
 import { startFakeParticle } from './fake-particle.ts';
 import { startAgent } from './harness.ts';
 import {
 	COLUMNS,
+	type Screen,
 	contrast,
 	find,
 	findIn,
@@ -42,6 +48,9 @@ const SHORT_REPLY = 'Started a task for the retries.';
 const LONG_REPLY =
 	'The login test fails about one run in twenty because the session cookie is read before the redirect lands, so it keeps going.';
 const LONG_TAIL = 'so it keeps going.';
+/** Reset, no link, paste and focus reports off, autowrap and cursor back, main screen. */
+const RESTORE =
+	'\x1b[0m\x1b]8;;\x1b\\\x1b[?2004l\x1b[?1004l\x1b[?7h\x1b[?25h\x1b[?1049l';
 // Words, not lines: `ghost` is never used for text (tui-design.md §5).
 const WORD_ROLES: Role[] = [
 	'fg',
@@ -107,6 +116,105 @@ const appleTerminal = (theme: ThemeName, version = '455.1') => ({
 
 function same(a: Rgb | null, b: Rgb): boolean {
 	return a !== null && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+function hexRgb(hex: string): Rgb {
+	const value = Number.parseInt(hex.slice(1), 16);
+	return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
+/** The text of every row with any cell on a painted background. */
+function paintedRows(screen: Screen): string[] {
+	return screen.cells
+		.filter((row) => row.some((cell) => cell.bgRgb !== null))
+		.map(text);
+}
+
+/**
+ * Each word colour on each background shown, lowest contrast first; a cell
+ * on the terminal's own background is measured against `background`.
+ */
+function wordContrasts(
+	screens: Screen[],
+	background: Rgb,
+	ghost: Rgb,
+): Array<[string, number]> {
+	const pairs = new Map<string, number>();
+	for (const screen of screens) {
+		for (const line of screen.cells) {
+			for (const cell of line) {
+				if (cell.ch === ' ' || cell.fgRgb === null) continue;
+				if (same(cell.fgRgb, ghost)) continue;
+				const under = cell.bgRgb ?? background;
+				pairs.set(
+					`${cell.fg ?? cell.fgRgb.join(',')} on ${cell.bgRgb ? (cell.bg ?? under.join(',')) : 'default'}`,
+					contrast(cell.fgRgb, under),
+				);
+			}
+		}
+	}
+	return [...pairs].toSorted((a, b) => a[1] - b[1]);
+}
+
+/**
+ * The terminal reports its background (OSC 11): the screen keeps it, the
+ * selected row and the input band step subtly from it, every word reads at
+ * 4.5:1 on it, and quitting leaves the terminal's colours alone.
+ */
+async function backgroundChecks(hex: string, version: string): Promise<void> {
+	const background = hexRgb(hex);
+	const name = themeOf(background);
+	const env = appleTerminal(name, version);
+	const depth = colorDepth(env);
+	const theme = themeFor(name, depth, background);
+	const label = `${depth} on ${hex}`;
+	const tui = await openTui(agent.home, outside, env, { background: hex });
+	try {
+		await tui.waitFor('answer');
+		await settle();
+		const home = replay(tui.raw());
+		const mark = tui.mark();
+		await tui.type(`/${TYPED}`);
+		await tui.waitFor(TYPED, mark);
+		await settle();
+		const typing = replay(tui.raw());
+		await tui.type('\x1b');
+		const surfaces = [home, typing].flatMap((screen) =>
+			screen.cells.flatMap((row) => row.filter((cell) => cell.bgRgb !== null)),
+		);
+		const step = contrast(theme.surface, background);
+		check(
+			`${label}: ordinary cells keep the terminal's background; the selected row and band are a subtle surface (${step.toFixed(2)}:1)`,
+			paintedRows(home).length === 2 &&
+				paintedRows(typing).length === 3 &&
+				surfaces.every((cell) => same(cell.bgRgb, theme.surface)) &&
+				step >= 1.05 &&
+				step <= 1.35,
+			paintedRows(typing)
+				.map((line) => line.trimEnd())
+				.join(' / '),
+		);
+		const sorted = wordContrasts([home, typing], background, theme.ghost);
+		check(
+			`${label}: every word is at least 4.5:1 on the terminal's background and on the surface`,
+			sorted.length > 0 && (sorted[0]?.[1] ?? 0) >= 4.5,
+			sorted
+				.slice(0, 4)
+				.map(([pair, ratio]) => `${pair} ${ratio.toFixed(1)}`)
+				.join(', '),
+		);
+	} finally {
+		await tui.quit();
+	}
+	const raw = tui.raw();
+	const left = raw.lastIndexOf(RESTORE);
+	check(
+		`${label}: quitting leaves the terminal as it was: colours reset, main screen back, its own colours never set`,
+		left !== -1 &&
+			!raw.slice(left + RESTORE.length).includes('\x1b') &&
+			// oxlint-disable-next-line no-control-regex
+			!/\x1b\](?:4|10|11|104|110|111);(?!\?)/.test(raw),
+	);
 }
 
 /**
@@ -232,6 +340,7 @@ async function themeChecks(name: ThemeName, handle: string): Promise<void> {
 		await tui.waitFor(TYPED, mark);
 		await settle();
 		const typing = replay(tui.raw());
+		await tui.type('\x1b');
 		const typed = find(typing, TYPED);
 		const band = typed?.row ?? [];
 		const prompt = band[0];
@@ -249,21 +358,19 @@ async function themeChecks(name: ThemeName, handle: string): Promise<void> {
 			text(band).trimEnd(),
 		);
 
-		// Every word on both screens: its colours as the 256 palette shows them.
-		const pairs = new Map<string, number>();
-		for (const screen of [home, typing]) {
-			for (const line of screen.cells) {
-				for (const cell of line) {
-					if (cell.ch === ' ' || cell.fg === index('ghost')) continue;
-					if (cell.fg === null || cell.bg === null) continue;
-					pairs.set(
-						`${cell.fg} on ${cell.bg}`,
-						contrast(xterm256(cell.fg), xterm256(cell.bg)),
-					);
-				}
-			}
-		}
-		const sorted = [...pairs].toSorted((a, b) => a[1] - b[1]);
+		check(
+			`${name}: only the selected item and the input band paint a background; the rest is the terminal's`,
+			paintedRows(home).join('|') ===
+				[text(row), text(question?.row ?? [])].join('|') &&
+				paintedRows(typing).join('|') ===
+					[text(row), text(question?.row ?? []), text(band)].join('|'),
+			paintedRows(typing)
+				.map((line) => line.trimEnd())
+				.join(' / '),
+		);
+
+		// The terminal's background is the design's here: nothing answers OSC 11.
+		const sorted = wordContrasts([home, typing], theme.bg, theme.ghost);
 		check(
 			`${name}: every word on screen is at least 4.5:1`,
 			sorted.length > 0 && (sorted[0]?.[1] ?? 0) >= 4.5,
@@ -352,6 +459,19 @@ try {
 			// oxlint-disable-next-line eslint/no-await-in-loop
 			await consoleChecks(name, version);
 		}
+	}
+
+	// Terminal.app's Pro and Basic profiles, Dracula and Solarized light.
+	for (const [hex, version] of [
+		['#000000', '455.1'],
+		['#FFFFFF', '455.1'],
+		['#282A36', '455.1'],
+		['#282A36', '470'],
+		['#FDF6E3', '455.1'],
+		['#FDF6E3', '470'],
+	] as const) {
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		await backgroundChecks(hex, version);
 	}
 
 	const modern = await openTui(
