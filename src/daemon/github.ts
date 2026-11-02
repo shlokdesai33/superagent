@@ -40,12 +40,25 @@ export type GitHubLive = {
 	problems: Problem[];
 	/** Configured repositories on GitHub, by config name, once the token is checked. */
 	repos: Array<{ name: string; fullName: string }>;
+	/** Your GitHub login, once the token is checked; for the sign-off. */
+	login: string | null;
 };
 
 export function initialGitHub(config: Config): GitHubLive {
 	return config.github
-		? { state: 'connecting', detail: CHECKING, problems: [], repos: [] }
-		: { state: 'off', detail: DISABLED, problems: [], repos: [] };
+		? {
+				state: 'connecting',
+				detail: CHECKING,
+				problems: [],
+				repos: [],
+				login: null,
+			}
+		: { state: 'off', detail: DISABLED, problems: [], repos: [], login: null };
+}
+
+/** A failed reply's first retry: half a tick, so 30 s, doubling from there. */
+export function githubRetryMs(): number {
+	return TICK_MS / 2;
 }
 
 /** Why a `github:` thread can't be used right now, or `null` when GitHub is on. */
@@ -150,6 +163,7 @@ export function startGitHub(
 			detail,
 			problems: stamped,
 			repos: current.repos,
+			login: state === 'off' ? null : current.login,
 		};
 		if (JSON.stringify(current) === JSON.stringify(next)) return;
 		if (current.state !== state) {
@@ -254,7 +268,9 @@ export function startGitHub(
 				});
 			} catch (error) {
 				if (stop.signal.aborted) throw error;
-				const delay = RETRY_DELAYS_MS[attempt];
+				// Only reads are retried here: a write may have landed, and its
+				// caller checks before trying again.
+				const delay = method === 'GET' ? RETRY_DELAYS_MS[attempt] : undefined;
 				if (delay !== undefined) {
 					// oxlint-disable-next-line eslint/no-await-in-loop
 					await sleep(delay, stop.signal);
@@ -281,7 +297,7 @@ export function startGitHub(
 			}
 
 			if (status >= 500) {
-				const delay = RETRY_DELAYS_MS[attempt];
+				const delay = method === 'GET' ? RETRY_DELAYS_MS[attempt] : undefined;
 				if (delay !== undefined) {
 					// oxlint-disable-next-line eslint/no-await-in-loop
 					await sleep(delay, stop.signal);
@@ -435,7 +451,7 @@ export function startGitHub(
 			}
 		}
 		repoProblems = problems;
-		daemon.github = { ...daemon.github, repos: visible };
+		daemon.github = { ...daemon.github, repos: visible, login };
 		checked = true;
 		daemon.log('info', 'github connected', { login, repos });
 	};

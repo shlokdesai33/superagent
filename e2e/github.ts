@@ -118,6 +118,53 @@ const particle = startFakeParticle((request) => {
 		) {
 			issueHandle = started;
 		}
+		// After a crash, a real Router doesn't repeat replies it already sent.
+		if (request.fresh.includes('An earlier attempt to decide these')) {
+			return { content: 'Already handled.' };
+		}
+		const replyTo = request.fresh.match(/REPLYTO (\d+) (.+)/);
+		if (replyTo?.[1] && replyTo[2]) {
+			return {
+				calls: [
+					{
+						name: 'reply',
+						args: {
+							thread: 'github:acme/app#7',
+							text: replyTo[2],
+							reply_to: Number(replyTo[1]),
+						},
+					},
+				],
+			};
+		}
+		if (request.fresh.includes('REPLYLONG')) {
+			return {
+				calls: [
+					{
+						name: 'reply',
+						args: {
+							thread: 'github:acme/app#7',
+							text: Array.from({ length: 301 }, () => 'word').join(' '),
+						},
+					},
+				],
+			};
+		}
+		const replyOn = request.fresh.match(/REPLY(\d+) (.+)/);
+		if (replyOn?.[1] && replyOn[2]) {
+			return {
+				calls: [
+					{
+						name: 'reply',
+						args: {
+							thread: `github:acme/app#${replyOn[1]}`,
+							text: replyOn[2],
+							...(issueHandle ? { task: issueHandle } : {}),
+						},
+					},
+				],
+			};
+		}
 		if (request.fresh.includes('ISSUE fix')) {
 			return {
 				calls: [
@@ -261,6 +308,30 @@ const githubIs = async (
 	);
 	if (found === null) throw new Error(`no health line for ${what}`);
 	return found;
+};
+
+type ThreadDetail = {
+	messages: Array<{
+		direction: string;
+		text: string;
+		delivery: string;
+	}>;
+};
+
+// The daemon is trusted to send the shape it promises.
+function isThreadDetail(value: unknown): value is ThreadDetail {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'messages' in value &&
+		Array.isArray(value.messages)
+	);
+}
+
+const threadDetail = async (id: string): Promise<ThreadDetail> => {
+	const detail = await agent.get(`/v1/threads/${encodeURIComponent(id)}`);
+	if (!isThreadDetail(detail)) throw new Error(`not a thread: ${id}`);
+	return detail;
 };
 
 const githubProblems = (value: Health) =>
@@ -460,10 +531,10 @@ try {
 			first.fresh.includes('EARLY-COMMENT') &&
 			first.fresh.includes('labels: bug'),
 	);
-	const detail = await agent.get(`/v1/tasks/${handle}`);
+	const taskDetail = await agent.get(`/v1/tasks/${handle}`);
 	check(
 		"the task works in the issue's repository",
-		JSON.stringify(detail).includes('"branch":"superagent/'),
+		JSON.stringify(taskDetail).includes('"branch":"superagent/'),
 	);
 	await agent.until(
 		'polling of #7',
@@ -524,6 +595,126 @@ try {
 		threadRead?.split('\n')[2] ?? 'no read_thread',
 	);
 
+	// 3. Replies out: signed, marked, delivered, and recognized when they come back.
+	const commentsWith = (n: number, text: string) =>
+		github
+			.comments('acme/app', n)
+			.filter((comment) => comment.body.includes(text));
+	const postsWith = (n: number, text: string) =>
+		github.requests.filter(
+			(request) =>
+				request.method === 'POST' &&
+				request.path === `/repos/acme/app/issues/${n}/comments` &&
+				request.body.includes(text),
+		);
+	const delivery = async (n: number, text: string) => {
+		const found = await agent.until(
+			`the reply ${text} to settle`,
+			async () => threadDetail(`github:acme/app#${n}`),
+			(detail) =>
+				detail.messages.some(
+					(message) =>
+						message.direction === 'out' &&
+						message.text.includes(text) &&
+						message.delivery !== 'pending',
+				),
+		);
+		return found.messages.find((message) => message.text.includes(text))
+			?.delivery;
+	};
+	await agent.action({
+		type: 'send_console',
+		text: 'REPLY7 R1 Working on it.',
+	});
+	check(
+		'a Router reply on GitHub is delivered',
+		(await delivery(7, 'R1 Working on it.')) === 'delivered',
+	);
+	const r1 = commentsWith(7, 'R1 Working on it.');
+	check(
+		'it is posted once, signed, with the hidden marker',
+		r1.length === 1 &&
+			(r1[0]?.body ?? '').includes(
+				`<sub>Posted by superagent for @shlok · task ${handle}</sub>`,
+			) &&
+			/<!-- superagent m\d+ -->$/.test(r1[0]?.body ?? ''),
+		r1[0]?.body.split('\n').slice(-2).join(' | ') ?? 'not posted',
+	);
+	const r1Back = await agent.waitFor(
+		'R1 polled back',
+		(line): line is RoutedLine =>
+			line.type === 'routed' &&
+			line.event.channel === 'github' &&
+			line.event.preview.startsWith('R1 Working'),
+	);
+	check(
+		'when polling brings it back, it is filtered as the agent’s own',
+		r1Back.event.destination.kind === 'filtered' &&
+			r1Back.event.destination.reason === 'own message',
+	);
+
+	await agent.action({
+		type: 'send_console',
+		text: `REPLYTO ${c1.event.id} R2 Thanks, that's fixed now.`,
+	});
+	await delivery(7, 'R2 Thanks');
+	check(
+		'reply_to on a comment quotes it',
+		(commentsWith(7, 'R2 Thanks')[0]?.body ?? '').startsWith(
+			'> **@alice**:\n> LATER-COMMENT (C1)',
+		),
+	);
+
+	await agent.action({ type: 'send_console', text: 'REPLYLONG please' });
+	await agent.until(
+		'the long reply to be refused',
+		async () =>
+			particle.requests
+				.filter((request) => request.session === 'router')
+				.flatMap((request) => request.results),
+		(results) => results.some((result) => result.includes('at most 300')),
+	);
+	check('a GitHub reply over 300 words is refused', true);
+
+	github.failNextWrites(1, 502);
+	await agent.action({ type: 'send_console', text: 'REPLY7 R3 Retried.' });
+	check(
+		'a reply that hit a 502 is retried and delivered',
+		(await delivery(7, 'R3 Retried.')) === 'delivered',
+	);
+	check(
+		'after checking for its marker, it is posted only once',
+		commentsWith(7, 'R3 Retried.').length === 1 &&
+			postsWith(7, 'R3 Retried.').length === 2,
+		`${postsWith(7, 'R3 Retried.').length} posts`,
+	);
+
+	github.lockIssue('acme/app', 10);
+	await agent.action({ type: 'send_console', text: 'REPLY10 R4 Locked out.' });
+	check(
+		'a reply GitHub refuses for good fails',
+		(await delivery(10, 'R4 Locked out.')) === 'failed',
+	);
+	const undelivered = await agent.until(
+		'the undelivered problem',
+		async () => latestHealth(),
+		(value) =>
+			value?.problems.some((problem) =>
+				problem.id.startsWith('undelivered:'),
+			) ?? false,
+	);
+	check(
+		'it is a problem saying why',
+		undelivered?.problems.some((problem) =>
+			problem.text.startsWith(
+				"Couldn't comment on app#10: GitHub answered 422 to POST /repos/acme/app/issues/10/comments: Unable to create comment because issue is locked.",
+			),
+		) ?? false,
+		undelivered?.problems.find((problem) =>
+			problem.id.startsWith('undelivered:'),
+		)?.text,
+	);
+
 	// 7. Asleep: comments posted meanwhile arrive once each, in order, labeled late.
 	const beforeSleep = agent.lines.length;
 	agent.signal('SIGSTOP');
@@ -564,6 +755,34 @@ try {
 					line.type === 'health' &&
 					githubChannel(line.health)?.detail === 'catching up after sleep',
 			),
+	);
+
+	// 8. A crash mid-delivery: the comment lands, the daemon dies before it
+	// hears so, and on restart it finds its marker instead of posting again.
+	const held = github.holdNextWrite();
+	await agent.action({
+		type: 'send_console',
+		text: 'REPLY7 R5 Posted across a crash.',
+	});
+	await held.arrived;
+	await agent.crash();
+	held.release();
+	await agent.until(
+		'the held comment to land',
+		async () => commentsWith(7, 'R5 Posted across a crash.'),
+		(found) => found.length === 1,
+	);
+	await agent.restart();
+	check(
+		'after the restart, the reply is marked delivered',
+		(await delivery(7, 'R5 Posted across a crash.')) === 'delivered',
+	);
+	await Bun.sleep(500);
+	check(
+		'and it was posted exactly once',
+		commentsWith(7, 'R5 Posted across a crash.').length === 1 &&
+			postsWith(7, 'R5 Posted across a crash.').length === 1,
+		`${commentsWith(7, 'R5 Posted across a crash.').length} comments, ${postsWith(7, 'R5 Posted across a crash.').length} posts`,
 	);
 
 	// Closing the issue reaches the task, which finishes; polling then stops.
