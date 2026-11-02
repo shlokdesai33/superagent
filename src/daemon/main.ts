@@ -181,7 +181,14 @@ export async function runDaemon(options: {
 							since: startedAt,
 						}
 					: { state: 'ok', detail: null, since: null },
-			router: { batch: null, backoffUntil: null, wake: () => {} },
+			modelFix: null,
+			router: {
+				batch: null,
+				backoffUntil: null,
+				heldBecause: null,
+				failing: null,
+				wake: () => {},
+			},
 			paths,
 			loginPath: commandPath,
 			sandbox,

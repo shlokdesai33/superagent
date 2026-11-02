@@ -57,6 +57,8 @@ export type Daemon = {
 	particleKey: string | null;
 	keySource: KeySource;
 	model: Omit<Health['model'], 'name' | 'key'>;
+	/** What fixes the model's failure, when the operator can. */
+	modelFix: string | null;
 	router: RouterLive;
 	paths: DataPaths;
 	/** Your login shell's PATH, for Worker commands. */
@@ -94,6 +96,10 @@ export type RouterLive = {
 	batch: { id: number; since: number; size: number } | null;
 	/** When its backoff after a failure ends, while it's backing off. */
 	backoffUntil: number | null;
+	/** Why it's backing off, for the console messages it holds. */
+	heldBecause: string | null;
+	/** Its batches' error when it isn't Particle's, until a batch succeeds. */
+	failing: { error: string; since: number } | null;
 	/** Tells the Router loop the mailbox may have changed. */
 	wake: () => void;
 };
@@ -196,12 +202,39 @@ export function routerState(daemon: Daemon): RouterState {
 		)
 		.get();
 	const { batch } = daemon.router;
+	const pending = db
+		.query<{ id: number }, [number]>(
+			`SELECT m.id FROM messages m JOIN events e ON e.id = m.event_id
+			WHERE m.thread_id = 'console' AND e.route = 'router' AND e.consumed_at IS NULL
+			ORDER BY m.id DESC LIMIT ?`,
+		)
+		.all(CONSOLE_SNAPSHOT_MESSAGES)
+		.map((row) => row.id)
+		.toReversed();
 	return {
 		deciding: batch !== null,
 		decidingSince: batch?.since ?? null,
 		batchSize: batch?.size ?? 0,
 		waiting,
 		last: last ?? null,
+		held: batch === null ? held(daemon) : null,
+		pending,
+	};
+}
+
+/** Why the Router isn't deciding its waiting events, when something stops it. */
+function held(daemon: Daemon): RouterState['held'] {
+	const { router } = daemon;
+	if (daemon.particle === null) {
+		return {
+			reason: daemon.model.detail ?? 'no Particle API key',
+			until: null,
+		};
+	}
+	if (router.backoffUntil === null) return null;
+	return {
+		reason: router.heldBecause ?? 'the Router hit an error',
+		until: router.backoffUntil,
 	};
 }
 
@@ -215,9 +248,16 @@ export function setModelHealth(
 	daemon: Daemon,
 	state: Health['model']['state'],
 	detail: string | null,
+	fix: string | null = null,
 ): void {
 	const current = daemon.model;
-	if (current.state === state && current.detail === detail) return;
+	if (
+		current.state === state &&
+		current.detail === detail &&
+		daemon.modelFix === fix
+	) {
+		return;
+	}
 	const recovered = current.state === 'error' && state !== 'error';
 	daemon.model = {
 		state,
@@ -229,7 +269,10 @@ export function setModelHealth(
 					? current.since
 					: Date.now(),
 	};
+	daemon.modelFix = fix;
 	daemon.feed.publish({ type: 'health', health: health(daemon) });
+	// Console messages without a key say why they wait.
+	routerChanged(daemon);
 	// Workers waiting out a Particle outage and the Router's backoff carry on:
 	// with a working model, or into the account-error handling.
 	if (recovered) {
@@ -270,12 +313,26 @@ export function usageChanged(daemon: Daemon): void {
 export function health(daemon: Daemon): Health {
 	const problems: Problem[] = [];
 	if (daemon.model.state !== 'ok') {
+		const text = daemon.model.detail ?? 'Particle is unavailable';
+		// Paused with a key: Particle refused the account, and every loop
+		// tries again on its own.
+		const account = daemon.model.state === 'paused' && daemon.particle !== null;
 		problems.push({
 			id: 'model',
 			kind: 'model',
-			text: daemon.model.detail ?? 'Particle is unavailable',
-			fix: null,
+			text: account ? `${text} · the agent retries every 2 minutes` : text,
+			fix: daemon.modelFix,
 			since: daemon.model.since ?? Date.now(),
+		});
+	}
+	const { failing } = daemon.router;
+	if (failing !== null) {
+		problems.push({
+			id: 'router:failing',
+			kind: 'agent',
+			text: `The Router failed and retries with backoff: ${cut(failing.error.replaceAll(/\s+/g, ' '), 200)}`,
+			fix: 'superagent logs shows the error',
+			since: failing.since,
 		});
 	}
 	const warnings: Warning[] = [];
