@@ -84,7 +84,10 @@ export function refreshParticleKey(daemon: Daemon): void {
 		daemon.paths.particleKey,
 	);
 	addSecrets(daemon.secrets, found);
-	if (key === daemon.particleKey) return;
+	if (key === daemon.particleKey) {
+		if (key === null) setModelHealth(daemon, 'paused', problem ?? NO_API_KEY);
+		return;
+	}
 	const had = daemon.particleKey !== null;
 	daemon.particleKey = key;
 	daemon.keySource = source;
@@ -128,20 +131,35 @@ export type ModelCall = {
 /**
  * Makes one Chat Completions call and records it in `model_calls`. A failure
  * becomes a `ModelError` and shows in the model's health; a success clears it.
- * An aborted call rethrows the abort reason.
+ * Only a call made with the current key changes health, and an account
+ * failure with a key replaced meanwhile is tried again with the new one. An
+ * aborted call rethrows the abort reason.
  */
 export async function callModel(
 	daemon: Daemon,
 	call: ModelCall,
 ): Promise<ChatResult> {
-	refreshParticleKey(daemon);
-	const { particle } = daemon;
-	if (particle === null) throw new ModelError(NO_API_KEY, 'account');
 	// The Router's calls (no task) are never queued; it makes one at a time.
 	const worker = call.taskId !== null;
 	if (worker) await takeWorkerCall(daemon, call.signal);
 	try {
-		return await chat(daemon, particle, call);
+		for (;;) {
+			refreshParticleKey(daemon);
+			const { particle } = daemon;
+			if (particle === null) throw new ModelError(NO_API_KEY, 'account');
+			try {
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				return await chat(daemon, particle, call);
+			} catch (error) {
+				// The key was replaced during the call, so try the new one.
+				const stale =
+					error instanceof ModelError &&
+					error.failure === 'account' &&
+					!call.signal.aborted &&
+					daemon.particle !== particle;
+				if (!stale) throw error;
+			}
+		}
 	} finally {
 		if (worker) {
 			daemon.calls.workers -= 1;
@@ -207,11 +225,19 @@ async function chat(
 			message: error instanceof Error ? error.message : String(error),
 			requestId,
 		});
-		setModelHealth(daemon, failure === 'account' ? 'paused' : 'error', detail);
+		// A call made with a key that has since changed says nothing about the
+		// current one; each key change makes a new client.
+		if (daemon.particle === particle) {
+			setModelHealth(
+				daemon,
+				failure === 'account' ? 'paused' : 'error',
+				detail,
+			);
+		}
 		throw new ModelError(detail, failure, { cause: error });
 	}
 	record(daemon, call, startedAt, { result });
-	setModelHealth(daemon, 'ok', null);
+	if (daemon.particle === particle) setModelHealth(daemon, 'ok', null);
 	return result;
 }
 
