@@ -247,8 +247,8 @@ try {
 	});
 	check(
 		'answering again shows who answered on the thread',
-		!again.ok && again.detail.startsWith('bob answered in script'),
-		again.ok ? 'ok' : again.detail,
+		!again.ok && (again.detail ?? '').startsWith('bob answered in script'),
+		again.ok ? 'ok' : (again.detail ?? ''),
 	);
 
 	// 3. The Worker releases the thread, which goes back to the Router.
@@ -359,7 +359,7 @@ try {
 	check(
 		'a note reopens the task',
 		reopen.ok && reopen.detail === 'it reopens',
-		reopen.ok ? (reopen.detail ?? '') : reopen.detail,
+		reopen.detail ?? '',
 	);
 	const reclaimed = await agent.until(
 		'the thread to be taken back',

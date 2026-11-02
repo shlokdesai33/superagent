@@ -313,14 +313,10 @@ export function usageChanged(daemon: Daemon): void {
 export function health(daemon: Daemon): Health {
 	const problems: Problem[] = [];
 	if (daemon.model.state !== 'ok') {
-		const text = daemon.model.detail ?? 'Particle is unavailable';
-		// Paused with a key: Particle refused the account, and every loop
-		// tries again on its own.
-		const account = daemon.model.state === 'paused' && daemon.particle !== null;
 		problems.push({
 			id: 'model',
 			kind: 'model',
-			text: account ? `${text} · the agent retries every 2 minutes` : text,
+			text: daemon.model.detail ?? 'Particle is unavailable',
 			fix: daemon.modelFix,
 			since: daemon.model.since ?? Date.now(),
 		});
@@ -330,7 +326,7 @@ export function health(daemon: Daemon): Health {
 		problems.push({
 			id: 'router:failing',
 			kind: 'agent',
-			text: `The Router failed and retries with backoff: ${cut(failing.error.replaceAll(/\s+/g, ' '), 200)}`,
+			text: `The Router failed: ${cut(failing.error.replaceAll(/\s+/g, ' '), 200)}`,
 			fix: 'superagent logs shows the error',
 			since: failing.since,
 		});
