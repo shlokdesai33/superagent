@@ -6,7 +6,7 @@ import type {
 	ChatRequest,
 	ToolCall,
 } from '../particle/types.ts';
-import { ModelError, callModel } from './model.ts';
+import { ACCOUNT_RETRY_MS, ModelError, callModel } from './model.ts';
 import { defaultRepo } from './repos.ts';
 import { ROUTER_TOOLS, runRouterTool } from './router-tools.ts';
 import {
@@ -25,6 +25,7 @@ import {
 	type MessageRow,
 	type Params,
 	cut,
+	health,
 	routerChanged,
 	toMessage,
 } from './state.ts';
@@ -36,7 +37,6 @@ const MAX_COMPLETION_TOKENS = 16_000;
 const BATCH_EVENTS = 20;
 const MAX_CALLS_PER_BATCH = 10;
 const COMPACT_AT_PROMPT_TOKENS = 200_000;
-const ACCOUNT_RETRY_MS = 2 * 60_000;
 const BACKOFF_MS = { base: 30_000, cap: 10 * 60_000 };
 const EVENT_TEXT_CHARS = 2_000;
 const CONTEXT_MESSAGES = 2;
@@ -47,6 +47,9 @@ const REPORT_CHARS = 500;
 const CUT_OFF_NUDGE =
 	'Your last response was cut off at the output limit. Finish deciding: call the tools you need, or end without tool calls to stay silent.';
 
+const silentNudge = (events: number[], failed: boolean) =>
+	`${events.map((id) => `#${id}`).join(', ')} ${events.length === 1 ? 'is a message' : 'are messages'} from the operator in the console, and they hear nothing unless you call reply. ${failed ? 'A tool call above failed: fix it and try again, or reply saying what went wrong. ' : ''}Start the work they asked for, or reply in the console with what happens next.`;
+
 const SYSTEM_PROMPT = `You are the Router of a local AI agent that works for one person, the operator. People reach the agent through channels, each with threads (conversations). The console, the operator's terminal, has one thread, \`console\`. Other threads have IDs such as \`script:support/77\`.
 
 Each user message lists new events (#42 is event 42), oldest first, followed by the open tasks. Decide what each event needs, then act through your tools.
@@ -55,7 +58,7 @@ Each user message lists new events (#42 is event 42), oldest first, followed by 
 - When a request comes from a thread other than the console, pass that thread to start_task so the task follows it; its later messages go straight to the task. Reply on the thread the people are in.
 - A console event can name a default repository: the one the operator's terminal is in. Tasks you start for that event work there when you leave out repo; when events in one batch have different defaults, pass event. Pass repo only when the message clearly asks for another repository, or "none" when it clearly isn't about code in any.
 - People hear you only through reply. Your plain text is private notes that nobody reads.
-- Stay silent when nothing needs saying: end without calling reply.
+- Stay silent when nothing needs saying: end without calling reply. A console message from the operator always needs a reply or a task.
 - Chat replies, including the console, are short (at most 100 words) and say what happens next: who is doing what, or what you need.
 - Answer quick questions directly with reply when no work is needed.
 - Workers' questions for console tasks are already shown to the operator; don't repeat them.
@@ -138,12 +141,18 @@ export function startRouter(daemon: Daemon): RouterLoop {
 		const opened = openBatch(daemon);
 		const { id: batchId } = opened;
 		const actions: string[] = [];
-		let pending: Item[] = [userItem(render(daemon, opened.events, true))];
+		const failures: string[] = [];
+		const fromConsole = consoleMessages(daemon.db, opened.events);
+		let nudged = false;
+		let callLimit = MAX_CALLS_PER_BATCH;
+		let pending: Item[] = [];
 		try {
-			for (let call = 1; call <= MAX_CALLS_PER_BATCH; call++) {
+			pending.push(userItem(render(daemon, opened.events, true)));
+			for (let call = 1; call <= callLimit; call++) {
 				if (call > 1) {
 					const drained = takeEvents(daemon.db, batchId, BATCH_EVENTS);
 					if (drained.length > 0) {
+						fromConsole.push(...consoleMessages(daemon.db, drained));
 						pending.push(userItem(render(daemon, drained, false)));
 						if (daemon.router.batch) {
 							daemon.router.batch.size += drained.length;
@@ -210,14 +219,29 @@ export function startRouter(daemon: Daemon): RouterLoop {
 				pending = [];
 
 				if (calls.length === 0) {
-					if (result.finishReason !== 'length') break;
-					pending = [userItem(CUT_OFF_NUDGE)];
-					continue;
+					if (result.finishReason === 'length') {
+						pending = [userItem(CUT_OFF_NUDGE)];
+						continue;
+					}
+					// The operator asked for something; once, say silence isn't an
+					// answer, with a call of its own even after the last allowed one.
+					if (!nudged && actions.length === 0 && fromConsole.length > 0) {
+						nudged = true;
+						if (call === callLimit) callLimit += 1;
+						daemon.log('info', 'router nudged to answer the console', {
+							batch: batchId,
+							events: fromConsole,
+						});
+						pending = [userItem(silentNudge(fromConsole, failures.length > 0))];
+						continue;
+					}
+					break;
 				}
 				for (const toolCall of calls) {
-					const action = runTool(daemon, sessionId, batchId, toolCall);
-					if (action !== null && !actions.includes(action))
-						actions.push(action);
+					const ran = runTool(daemon, sessionId, batchId, toolCall);
+					if (ran.action !== null && !actions.includes(ran.action))
+						actions.push(ran.action);
+					if (ran.failure !== null) failures.push(ran.failure);
 				}
 			}
 		} catch (error) {
@@ -228,10 +252,11 @@ export function startRouter(daemon: Daemon): RouterLoop {
 		}
 
 		const size = daemon.router.batch?.size ?? opened.events.length;
+		const [lastFailure] = failures.slice(-1);
 		const summary =
 			actions.length > 0
 				? actions.join(' · ')
-				: `stayed silent on ${size} ${size === 1 ? 'event' : 'events'}`;
+				: `stayed silent on ${size} ${size === 1 ? 'event' : 'events'}${lastFailure ? ` · ${cut(lastFailure, 160)}` : ''}`;
 		daemon.db
 			.query<unknown, Params>(
 				"UPDATE router_batches SET state = 'done', ended_at = $at, summary = $summary WHERE id = $id",
@@ -256,38 +281,53 @@ export function startRouter(daemon: Daemon): RouterLoop {
 			try {
 				await batch();
 				failures = 0;
+				if (daemon.router.failing !== null) {
+					daemon.router.failing = null;
+					daemon.feed.publish({ type: 'health', health: health(daemon) });
+				}
 			} catch (error) {
 				if (signal.aborted) break;
+				const model = error instanceof ModelError ? error : null;
 				let delay: number;
-				if (error instanceof ModelError && error.failure === 'account') {
+				if (model?.failure === 'account') {
 					delay = ACCOUNT_RETRY_MS;
 				} else {
 					delay = Math.min(BACKOFF_MS.cap, BACKOFF_MS.base * 2 ** failures);
 					failures += 1;
 				}
-				daemon.log(
-					error instanceof ModelError ? 'warn' : 'error',
-					'router batch put back',
-					{
-						error:
-							error instanceof ModelError
-								? error.message
-								: error instanceof Error
-									? (error.stack ?? error.message)
-									: String(error),
-						retryInSeconds: delay / 1000,
-					},
-				);
-				// After a transient failure, Particle leaving `error` (a call or the
-				// probe) ends the backoff.
-				const transient =
-					error instanceof ModelError && error.failure === 'transient';
+				const message = error instanceof Error ? error.message : String(error);
+				daemon.log(model ? 'warn' : 'error', 'router batch put back', {
+					error:
+						model?.message ??
+						(error instanceof Error ? (error.stack ?? message) : message),
+					retryInSeconds: delay / 1000,
+				});
+				// Particle's failures show in the model's health; anything else is
+				// the agent's own, and shows as a problem until a batch succeeds.
+				if (model === null) {
+					daemon.router.failing = {
+						error: message,
+						since: daemon.router.failing?.since ?? Date.now(),
+					};
+					daemon.feed.publish({ type: 'health', health: health(daemon) });
+				}
+				daemon.router.heldBecause = model?.message ?? message;
 				daemon.router.backoffUntil = Date.now() + delay;
+				routerChanged(daemon);
+				// After a transient failure, Particle leaving `error` (a call or the
+				// probe) ends the backoff; after an account failure, a new key does.
+				const key = daemon.particleKey;
 				await sleep(
 					delay,
-					transient ? () => daemon.model.state !== 'error' : null,
+					model?.failure === 'transient'
+						? () => daemon.model.state !== 'error'
+						: model?.failure === 'account'
+							? () => daemon.particleKey !== key
+							: null,
 				);
 				daemon.router.backoffUntil = null;
+				daemon.router.heldBecause = null;
+				routerChanged(daemon);
 			}
 		}
 	})();
@@ -310,18 +350,56 @@ function mailboxSize(db: Database): number {
 	);
 }
 
-/** Runs one tool call and stores its result in one transaction, then publishes what it sent. */
+/**
+ * A batch's console messages from the operator, by event number, leaving out
+ * those an interrupted attempt already acted on: it may have answered them.
+ */
+function consoleMessages(db: Database, events: EventRow[]): number[] {
+	return events
+		.filter(
+			(event) =>
+				event.channel === 'console' &&
+				event.kind === 'message' &&
+				(event.batchId === null || !actedIn(db, event.batchId)),
+		)
+		.map((event) => event.id);
+}
+
+/** Whether a batch, or an interrupted one before it with the same events, replied or acted. */
+function actedIn(db: Database, batchId: number): boolean {
+	const row = db
+		.query<{ summary: string | null }, [number]>(
+			'SELECT summary FROM router_batches WHERE id = ?',
+		)
+		.get(batchId);
+	return row !== null && row.summary !== null;
+}
+
+/**
+ * Runs one tool call and stores its result in one transaction, then publishes
+ * what it sent. `failure` is `start_task failed: …` for a call that errored.
+ */
 function runTool(
 	daemon: Daemon,
 	sessionId: number,
 	batchId: number,
 	call: ToolCall,
-): string | null {
+): { action: string | null; failure: string | null } {
 	const outcome = daemon.db.transaction(() => {
 		const ran = runRouterTool(daemon, batchId, call);
 		appendItems(daemon.db, sessionId, [
 			{ role: 'tool', tool_call_id: call.id, content: ran.result },
 		]);
+		// With the action itself, so an attempt interrupted after it (by a
+		// crash or Particle) is known to have acted.
+		if (ran.action !== null) {
+			daemon.db
+				.query<unknown, Params>(
+					`UPDATE router_batches SET summary = COALESCE(summary || ' · ', '') || $action
+					WHERE id = $id`,
+				)
+				.run({ action: ran.action, id: batchId });
+		}
 		return ran;
 	})();
 	daemon.log('info', 'router tool', {
@@ -330,7 +408,12 @@ function runTool(
 		result: cut(outcome.result, 200),
 	});
 	for (const message of outcome.messages) publishMessage(daemon, message);
-	return outcome.action;
+	return {
+		action: outcome.action,
+		failure: outcome.result.startsWith('error: ')
+			? `${call.function.name} failed: ${outcome.result.slice('error: '.length)}`
+			: null,
+	};
 }
 
 function publishMessage(daemon: Daemon, message: MessageRow): void {
@@ -398,6 +481,16 @@ function takeEvents(db: Database, batchId: number, limit: number): EventRow[] {
 		);
 		const at = Date.now();
 		for (const event of events) stamp.run({ batchId, at, id: event.id });
+		// What an interrupted attempt did carries over, in case this one is
+		// interrupted too.
+		const inherit = db.query<unknown, Params>(
+			`UPDATE router_batches SET summary = COALESCE(summary,
+				(SELECT summary FROM router_batches WHERE id = $earlier))
+			WHERE id = $batchId`,
+		);
+		for (const earlier of new Set(events.map((event) => event.batchId))) {
+			if (earlier !== null) inherit.run({ earlier, batchId });
+		}
 		return events;
 	})();
 }

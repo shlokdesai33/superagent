@@ -29,6 +29,12 @@ const KEY_POLL_MS = 2_000;
 const PROBE_MS = watchdogMs(2 * 60_000);
 
 export const NO_API_KEY = `No Particle API key: paste one in superagent, run superagent login particle, or set ${API_KEY_ENV}`;
+/** What fixes a key Particle rejected. */
+const REJECTED_KEY_FIX =
+	'paste a working key in superagent (p on the health screen), or run superagent login particle';
+/** How often every loop tries Particle again after an account failure; shorter in tests. */
+export const ACCOUNT_RETRY_MS =
+	Number(Bun.env.SUPERAGENT_PARTICLE_RETRY_MS) || 2 * 60_000;
 
 /**
  * - `account`: fixed by the person (401, 402, 403); every loop pauses.
@@ -133,8 +139,9 @@ export function refreshParticleKey(daemon: Daemon): void {
 	if (daemon.model === before) {
 		daemon.feed.publish({ type: 'health', health: health(daemon) });
 	}
+	// A replaced key also ends the Router's pause after an account failure.
+	if (key !== null) daemon.router.wake();
 	if (resumes) {
-		daemon.router.wake();
 		for (const live of daemon.workers.values()) live.wake();
 	}
 }
@@ -160,7 +167,7 @@ export async function checkStartingKey(daemon: Daemon): Promise<void> {
 		return;
 	}
 	daemon.log('warn', KEY_REJECTED, { source: daemon.keySource });
-	setModelHealth(daemon, 'paused', KEY_REJECTED);
+	setModelHealth(daemon, 'paused', KEY_REJECTED, REJECTED_KEY_FIX);
 }
 
 /**
@@ -203,7 +210,7 @@ async function probeParticle(daemon: Daemon): Promise<void> {
 		daemon.log('info', 'Particle answers again');
 		setModelHealth(daemon, 'ok', null);
 	} else if (check.result === 'rejected') {
-		setModelHealth(daemon, 'paused', KEY_REJECTED);
+		setModelHealth(daemon, 'paused', KEY_REJECTED, REJECTED_KEY_FIX);
 	}
 }
 
@@ -283,7 +290,7 @@ export function pausedOn(error: ModelError): string {
 	const status =
 		error.cause instanceof ParticleError ? error.cause.status : null;
 	if (status === 401) return 'Particle (API key rejected)';
-	if (status === 402) return 'Particle (out of credits)';
+	if (status === 402) return 'Particle (out of credit)';
 	if (status === 403) return 'Particle (API key not allowed)';
 	return 'Particle (no API key)';
 }
@@ -310,7 +317,7 @@ async function chat(
 		daemon.log('warn', 'model call failed', {
 			purpose: call.purpose,
 			error: text,
-			message: error instanceof Error ? error.message : String(error),
+			detail: error instanceof Error ? error.message : String(error),
 			requestId,
 		});
 		// A call made with a key that has since changed says nothing about the
@@ -320,6 +327,7 @@ async function chat(
 				daemon,
 				failure === 'account' ? 'paused' : 'error',
 				detail,
+				failure === 'account' ? accountFix(error) : null,
 			);
 		}
 		throw new ModelError(detail, failure, { cause: error });
@@ -415,10 +423,22 @@ function errorText(error: unknown): string {
 function describe(error: unknown, text: string): string {
 	if (error instanceof ParticleError) {
 		if (error.status === 401) return KEY_REJECTED;
-		if (error.status === 402) return 'Particle account is out of credits';
+		if (error.status === 402) return 'Particle account is out of credit';
 		if (error.status === 403) {
 			return "Particle's API key isn't allowed to use chat completions";
 		}
 	}
 	return `Particle call failed: ${text}`;
+}
+
+/** What the operator does about an account failure; the health screen shows it. */
+function accountFix(error: unknown): string {
+	const status = error instanceof ParticleError ? error.status : null;
+	if (status === 402) {
+		return 'add credit on the Billing page at https://platform.particle.ai';
+	}
+	if (status === 403) {
+		return 'create a key that can use chat completions at https://platform.particle.ai, then paste it in superagent (p on the health screen) or run superagent login particle';
+	}
+	return REJECTED_KEY_FIX;
 }
