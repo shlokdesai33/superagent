@@ -164,18 +164,29 @@ export async function runCommand(
 	const sink = Bun.file(path).writer();
 	let written = 0;
 	let truncated = false;
-	const pump = async (stream: ReadableStream<Uint8Array>) => {
-		for await (const chunk of stream) {
-			const room = MAX_LOG_BYTES - written;
-			if (room <= 0) {
-				truncated = true;
-				continue;
-			}
-			const part = chunk.length > room ? chunk.subarray(0, room) : chunk;
-			truncated ||= part.length < chunk.length;
-			await sink.write(part);
-			written += part.length;
+	const write = async (text: string) => {
+		const bytes = Buffer.from(text);
+		const room = MAX_LOG_BYTES - written;
+		if (room <= 0) {
+			truncated ||= bytes.length > 0;
+			return;
 		}
+		const part = bytes.length > room ? bytes.subarray(0, room) : bytes;
+		truncated ||= part.length < bytes.length;
+		await sink.write(part);
+		written += part.length;
+	};
+	// The log file holds output with the agent's keys already redacted.
+	const pump = async (stream: ReadableStream<Uint8Array>) => {
+		const decoder = new TextDecoder();
+		let held = '';
+		for await (const chunk of stream) {
+			const text = held + decoder.decode(chunk, { stream: true });
+			const end = safeCut(daemon.secrets, text);
+			held = text.slice(end);
+			await write(redact(daemon.secrets, text.slice(0, end)));
+		}
+		await write(redact(daemon.secrets, held + decoder.decode()));
 	};
 
 	entry.finished = (async () => {
@@ -237,6 +248,36 @@ export async function runCommand(
 	if (finishedInTime) return entry.finished;
 	entry.background = true;
 	return `still running as step ${stepId}; its result will arrive as a message. Use read_output to look at it meanwhile, or stop_command to end it.`;
+}
+
+/**
+ * Where streamed output can be cut so that no key, whole or still arriving,
+ * straddles the cut: the last `longest - 1` characters are held back, and the
+ * cut moves to the start of any key that would cross it.
+ */
+function safeCut(secrets: string[], text: string): number {
+	const longest = Math.max(0, ...secrets.map((secret) => secret.length));
+	if (longest === 0) return text.length;
+	let at = Math.max(0, text.length - (longest - 1));
+	// Keys can't overlap themselves much; a chain longer than this is noise.
+	const floor = Math.max(0, at - 2 * longest);
+	const crosses = (start: number, end: number) =>
+		secrets.some(
+			(secret) =>
+				start + secret.length > end &&
+				secret.startsWith(text.slice(start, start + secret.length)),
+		);
+	for (let moved = true; moved;) {
+		moved = false;
+		for (let start = Math.max(floor, at - longest + 1); start < at; start++) {
+			if (crosses(start, at)) {
+				at = start;
+				moved = true;
+				break;
+			}
+		}
+	}
+	return at;
 }
 
 type Env = Record<string, string | undefined>;
