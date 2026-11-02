@@ -28,6 +28,30 @@ const workers: Record<string, (request: FakeRequest) => FakeReply> = {
 		calls: [{ name: 'finish', args: { result: 'Done slowly' } }],
 		delayMs: 3_600,
 	}),
+	// Reads the same missing file forever: calls without progress.
+	spinner: () => ({
+		content: 'Looking again.',
+		calls: [{ name: 'read_file', args: { path: 'notes.txt' } }],
+	}),
+	// Edits a file every call (progress), then finishes after 170 calls.
+	editor: (request) =>
+		request.called.length >= 170
+			? {
+					content: 'Done.',
+					calls: [{ name: 'finish', args: { result: 'Edited 170 times' } }],
+				}
+			: {
+					content: 'Editing.',
+					calls: [
+						{
+							name: 'write_file',
+							args: {
+								path: 'progress.txt',
+								content: `step ${request.called.length}\n`,
+							},
+						},
+					],
+				},
 	// Finishes at once.
 	quick: () => ({
 		content: 'Done.',
@@ -73,6 +97,8 @@ const particle = startFakeParticle((request) => {
 		}
 		const name = request.fresh.match(/please run (\w+)/)?.[1];
 		if (!name) return { content: 'Nothing to say.' };
+		// Asked on a script thread: the task follows it.
+		const thread = request.fresh.match(/\((script:[^,]+), no owner\)/)?.[1];
 		return {
 			calls: [
 				{
@@ -80,7 +106,7 @@ const particle = startFakeParticle((request) => {
 					args: {
 						title: name,
 						instructions: `Run the ${name} scenario.`,
-						threads: [],
+						threads: thread ? [thread] : [],
 						repo: 'none',
 					},
 				},
@@ -128,6 +154,8 @@ async function taskLine(
 async function scenario(
 	name: string,
 	body: (agent: Agent) => Promise<void>,
+	/** Findings that may act or report here, by key. */
+	allowed: RegExp | null = null,
 ): Promise<void> {
 	process.stdout.write(`\n${name}\n`);
 	const agent = await startAgent(particle.url, {
@@ -148,10 +176,13 @@ async function scenario(
 					`SELECT key, stage, problem_kind AS kind FROM watchdog_findings
 					WHERE stage IS NOT NULL OR problem_kind IS NOT NULL`,
 				)
-				.all();
+				.all()
+				.filter((finding) => !allowed?.test(finding.key));
 			db.close();
 			check(
-				'the Watchdog took no action and reported nothing',
+				allowed
+					? 'the Watchdog took no other action and reported nothing'
+					: 'the Watchdog took no action and reported nothing',
 				acted.length === 0,
 				acted
 					.map((finding) => `${finding.key}: ${finding.stage ?? finding.kind}`)
@@ -159,6 +190,19 @@ async function scenario(
 			);
 		});
 	}
+}
+
+type TaskDetail = { task: TaskSummary };
+
+// The daemon is trusted to send the shape it promises.
+function isTaskDetail(value: unknown): value is TaskDetail {
+	return typeof value === 'object' && value !== null && 'task' in value;
+}
+
+async function taskDetail(agent: Agent, handle: string): Promise<TaskDetail> {
+	const detail = await agent.get(`/v1/tasks/${handle}`);
+	if (!isTaskDetail(detail)) throw new Error(`not a task detail: ${handle}`);
+	return detail;
 }
 
 const watchdogLines = (agent: Agent) =>
@@ -281,6 +325,174 @@ try {
 			'the call that spanned the sleep was left to finish, not restarted',
 			done.result === 'Done slowly' && calls === 1,
 			`${calls} ${calls === 1 ? 'call' : 'calls'}`,
+		);
+	});
+
+	await scenario(
+		'A runaway task is paused, across a crash',
+		async (agent) => {
+			await agent.action({ type: 'send_console', text: 'please run spinner' });
+			const paused = await taskLine(
+				agent,
+				'the spinner paused with a question',
+				(task) => task.title === 'spinner' && task.status === 'needs_you',
+			);
+			const { handle } = paused;
+			const question = paused.question;
+			check(
+				'after 150 calls without progress, the task asks you whether to go on',
+				question !== null &&
+					question.text.startsWith('Watchdog:') &&
+					JSON.stringify(question.options) === '["Continue","Stop"]',
+				question?.text ?? 'no question',
+			);
+			// The check runs each tick, so a fast fake Worker overshoots a little.
+			const atPause = workerCalls(handle);
+			check(
+				'it took at least 150 model calls',
+				atPause >= 150,
+				`${atPause} calls`,
+			);
+			check(
+				"the Router isn't told: people on threads don't hear about pauses",
+				!particle.requests.some(
+					(request) =>
+						request.session === 'router' &&
+						request.fresh.includes(`task ${handle}`),
+				),
+			);
+
+			await agent.crash();
+			await agent.restart();
+			const before = watchdogLines(agent).length;
+			await agent.until(
+				'a few checks after the restart',
+				async () => watchdogLines(agent).length,
+				(count) => count >= before + 4,
+			);
+			const detail = await taskDetail(agent, handle);
+			check(
+				'after a crash, the same question is still open and no second one was asked',
+				detail.task.status === 'needs_you' &&
+					detail.task.question?.id === question?.id,
+				`question ${detail.task.question?.id ?? 'none'}`,
+			);
+			check(
+				'while paused, the Worker makes no calls',
+				workerCalls(handle) === atPause,
+				`${workerCalls(handle)} calls`,
+			);
+
+			const answered = await agent.action({
+				type: 'answer_question',
+				handle,
+				questionId: question?.id ?? 0,
+				text: 'Continue',
+			});
+			check('Continue is accepted', answered.ok);
+			await agent.until(
+				'the Worker to hear why it was paused',
+				async () =>
+					particle.requests.some(
+						(request) =>
+							request.handle === handle &&
+							request.fresh.includes('The operator let you continue'),
+					),
+				(heard) => heard,
+			);
+			check('the Worker carries on and is told why it was paused', true);
+
+			const again = await taskLine(
+				agent,
+				'the spinner paused a second time',
+				(task) =>
+					task.handle === handle &&
+					task.status === 'needs_you' &&
+					task.question !== null &&
+					task.question.id !== question?.id,
+			);
+			check(
+				'Continue starts the count again: the next pause comes 150 calls later',
+				workerCalls(handle) - atPause >= 150,
+				`${workerCalls(handle) - atPause} more calls`,
+			);
+			await agent.action({
+				type: 'answer_question',
+				handle,
+				questionId: again.question?.id ?? 0,
+				text: 'stop',
+			});
+			const stopped = await taskLine(
+				agent,
+				'the spinner stopped',
+				(task) => task.handle === handle && task.status === 'stopped',
+			);
+			check('Stop stops the task', stopped.result === 'stopped by you');
+		},
+		/^runaway:/,
+	);
+
+	await scenario(
+		'Only you answer the Watchdog',
+		async (agent) => {
+			await agent.event({
+				externalId: 'ask-1',
+				thread: { key: 'support/1', title: '#support', url: null },
+				author: { id: 'u-bob', name: 'bob', isBot: false },
+				text: '@superagent please run spinner',
+				mentionsAgent: true,
+			});
+			const paused = await taskLine(
+				agent,
+				'the spinner paused',
+				(task) =>
+					task.title === 'spinner' &&
+					task.status === 'needs_you' &&
+					task.threads.some((thread) => thread.id === 'script:support/1'),
+			);
+			await agent.event({
+				externalId: 'reply-1',
+				thread: { key: 'support/1', title: '#support', url: null },
+				author: { id: 'u-bob', name: 'bob', isBot: false },
+				text: 'sure, keep going',
+				mentionsAgent: false,
+			});
+			await Bun.sleep(300);
+			const detail = await taskDetail(agent, paused.handle);
+			check(
+				"a comment on the task's thread doesn't answer the Watchdog's question",
+				detail.task.status === 'needs_you' &&
+					detail.task.question?.id === paused.question?.id,
+				detail.task.status,
+			);
+			await agent.action({
+				type: 'send_note',
+				handle: paused.handle,
+				text: 'try something else',
+			});
+			const going = await taskLine(
+				agent,
+				'the spinner going again',
+				(task) =>
+					task.handle === paused.handle &&
+					(task.status === 'working' || task.status === 'waiting'),
+			);
+			check('your note does, and the task goes on', going.question === null);
+			await agent.action({ type: 'stop_task', handle: paused.handle });
+		},
+		/^runaway:/,
+	);
+
+	await scenario('Edits are progress', async (agent) => {
+		await agent.action({ type: 'send_console', text: 'please run editor' });
+		const done = await taskLine(
+			agent,
+			'the editor finishing',
+			(task) => task.title === 'editor' && task.status === 'done',
+		);
+		check(
+			'a Worker that keeps editing makes 170 calls without being paused',
+			done.result === 'Edited 170 times',
 		);
 	});
 

@@ -7,6 +7,7 @@ import { envWithoutSecrets, redact } from './secrets.ts';
 import { type Daemon, type Params, type RunningCommand, cut } from './state.ts';
 import {
 	isWorking,
+	markProgress,
 	publishStep,
 	slotsChanged,
 	taskChanged,
@@ -143,9 +144,6 @@ export async function runCommand(
 	db.query<unknown, [number, number]>(
 		'UPDATE steps SET pgid = ? WHERE id = ?',
 	).run(pgid, stepId);
-	db.query<unknown, [number, number]>(
-		'UPDATE tasks SET last_progress_at = ? WHERE id = ?',
-	).run(startedAt, task.id);
 
 	const entry: RunningCommand = {
 		stepId,
@@ -216,6 +214,17 @@ export async function runCommand(
 			`UPDATE steps SET status = $status, ended_at = $endedAt, exit_code = $exitCode, pgid = NULL
 			WHERE id = $id`,
 		).run({ status, endedAt, exitCode, id: stepId });
+		// Running the same command to the same end again isn't progress.
+		const repeated = db
+			.query<unknown, Params>(
+				`SELECT 1 FROM steps s JOIN tasks t ON t.id = s.task_id
+				WHERE s.task_id = $taskId AND s.kind = 'command' AND s.id != $id
+					AND s.command = $command AND s.exit_code IS $exitCode
+					AND s.started_at >= COALESCE(t.last_progress_at, 0)
+				LIMIT 1`,
+			)
+			.get({ taskId: task.id, id: stepId, command, exitCode });
+		if (!repeated) markProgress(db, task.id, endedAt);
 		daemon.commands.delete(stepId);
 		publishStep(daemon, stepId);
 		taskChanged(daemon, task.id);

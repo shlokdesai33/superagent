@@ -1,7 +1,7 @@
 import type { Action, ActionResult } from '../protocol.ts';
 import { ingest } from './ingest.ts';
 import { useRepository } from './repos.ts';
-import type { Daemon } from './state.ts';
+import type { Daemon, Params } from './state.ts';
 import { taskByHandle } from './task-feed.ts';
 import {
 	endTask,
@@ -105,7 +105,13 @@ export async function runAction(
 					'handle and text must be strings and questionId a number',
 				);
 			}
-			result = answerQuestion(daemon, requestId, handle, questionId, text);
+			result = await answerQuestion(
+				daemon,
+				requestId,
+				handle,
+				questionId,
+				text,
+			);
 			break;
 		}
 		case 'stop_task': {
@@ -214,21 +220,28 @@ function sendNote(
 	};
 }
 
-function answerQuestion(
+async function answerQuestion(
 	daemon: Daemon,
 	requestId: string,
 	handle: string,
 	questionId: number,
 	text: string,
-): ActionResult {
+): Promise<ActionResult> {
 	const task = taskByHandle(daemon.db, handle);
 	if (!task) return unknownTask(handle);
 	const question = daemon.db
 		.query<
-			{ state: string; answeredBy: string | null; answeredAt: number | null },
+			{
+				state: string;
+				answeredBy: string | null;
+				answeredAt: number | null;
+				askedBy: string;
+				text: string;
+			},
 			[number, number]
 		>(
-			`SELECT state, answered_by AS answeredBy, answered_at AS answeredAt
+			`SELECT state, answered_by AS answeredBy, answered_at AS answeredAt,
+				asked_by AS askedBy, text
 			FROM questions WHERE id = ? AND task_id = ?`,
 		)
 		.get(questionId, task.id);
@@ -259,6 +272,12 @@ function answerQuestion(
 		};
 	}
 	if (text.trim() === '') return empty();
+	if (question.askedBy === 'watchdog') {
+		return answerWatchdog(daemon, requestId, task, questionId, {
+			question: question.text,
+			answer: text,
+		});
+	}
 	const seq =
 		ingest(daemon, {
 			channel: 'console',
@@ -277,6 +296,55 @@ function answerQuestion(
 			question: questionId,
 		});
 	}
+	return {
+		ok: true,
+		seq,
+		subject: `Answered ${task.handle}`,
+		detail: 'it continues from here',
+	};
+}
+
+/**
+ * The Watchdog paused the task. `Stop` stops it; anything else lets it go on,
+ * with a note telling the Worker why it was paused and what you said.
+ */
+async function answerWatchdog(
+	daemon: Daemon,
+	requestId: string,
+	task: { id: number; handle: string },
+	questionId: number,
+	reply: { question: string; answer: string },
+): Promise<ActionResult> {
+	const answer = reply.answer.trim();
+	if (answer.toLowerCase() === 'stop') {
+		daemon.db
+			.query<unknown, Params>(
+				`UPDATE questions SET state = 'answered', answer = $answer,
+					answered_by = 'you (console)', answered_at = $at
+				WHERE id = $id AND state = 'open'`,
+			)
+			.run({ answer, at: Date.now(), id: questionId });
+		return stopTask(daemon, task.handle);
+	}
+	const why = reply.question.replace(/^Watchdog:\s*/, '');
+	const note = [
+		`The operator let you continue after the watchdog paused you. It said: ${why}`,
+		answer.toLowerCase() === 'continue' ? null : `The operator adds: ${answer}`,
+	]
+		.filter((line) => line !== null)
+		.join('\n\n');
+	// A note from the operator answers the question and makes the task active.
+	const seq =
+		ingest(daemon, {
+			channel: 'console',
+			externalId: requestId,
+			thread: null,
+			kind: 'note',
+			author: { name: 'you', id: null, isBot: false, isSelf: false },
+			text: note,
+			mentionsAgent: true,
+			taskId: task.id,
+		}) ?? daemon.feed.seq;
 	return {
 		ok: true,
 		seq,

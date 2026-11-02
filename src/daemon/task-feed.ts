@@ -39,6 +39,20 @@ export const TASK_COLUMNS = `t.id, t.handle, t.title, t.state, t.waiting_on AS w
 	LEFT JOIN events e ON e.id = t.origin_event_id
 	LEFT JOIN threads th ON th.id = e.thread_id`;
 
+/**
+ * The task moved forward: an edit, a new command outcome, a question, a wait,
+ * its end, or new input. The Watchdog counts calls since the last one.
+ */
+export function markProgress(
+	db: Database,
+	taskId: number,
+	at: number = Date.now(),
+): void {
+	db.query<unknown, [number, number]>(
+		'UPDATE tasks SET last_progress_at = ?, progress_calls = model_calls WHERE id = ?',
+	).run(at, taskId);
+}
+
 export function taskRow(db: Database, id: number): TaskRow | null {
 	return db
 		.query<TaskRow, [number]>(`SELECT ${TASK_COLUMNS} WHERE t.id = ?`)

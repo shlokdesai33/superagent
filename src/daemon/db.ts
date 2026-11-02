@@ -209,6 +209,10 @@ CREATE TABLE watchdog_findings (
 );
 CREATE UNIQUE INDEX watchdog_open ON watchdog_findings (key) WHERE state = 'open';
 `,
+	`
+ALTER TABLE tasks ADD COLUMN progress_calls INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE questions ADD COLUMN asked_by TEXT NOT NULL DEFAULT 'worker';
+`,
 ];
 
 // Letters and digits without look-alikes (no i, l, o, 0 or 1).

@@ -11,7 +11,12 @@ import type { FunctionTool, ToolCall } from '../particle/types.ts';
 import { readOutput, runCommand, stopCommand, taskFolder } from './commands.ts';
 import { editDiff } from './git.ts';
 import { type Daemon, type Params, cut } from './state.ts';
-import { openQuestion, publishStep, taskChanged } from './task-feed.ts';
+import {
+	markProgress,
+	openQuestion,
+	publishStep,
+	taskChanged,
+} from './task-feed.ts';
 import { askQuestion, endTask, toRouter } from './tasks.ts';
 import {
 	type Args,
@@ -239,6 +244,7 @@ export async function runWorkerTool(
 						'UPDATE tasks SET waiting_on = ?, updated_at = ? WHERE id = ?',
 					)
 					.run(what, Date.now(), task.id);
+				markProgress(daemon.db, task.id);
 				taskChanged(daemon, task.id);
 				return done(`waiting on ${what}; any new message wakes you`, true);
 			}
@@ -414,11 +420,7 @@ async function editStep(
 				...change,
 			}).lastInsertRowid,
 	);
-	daemon.db
-		.query<unknown, [number, number]>(
-			'UPDATE tasks SET last_progress_at = ? WHERE id = ?',
-		)
-		.run(at, task.id);
+	markProgress(daemon.db, task.id, at);
 	publishStep(daemon, id);
 }
 
