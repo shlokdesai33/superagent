@@ -18,6 +18,7 @@ import { type Watchdog, startWatchdog } from './watchdog.ts';
 import { createLog } from './log.ts';
 import {
 	NO_API_KEY,
+	checkStartingKey,
 	findParticleKey,
 	particleClient,
 	watchParticleKey,
@@ -173,6 +174,7 @@ export async function runDaemon(options: {
 			particle,
 			particleKey: key.key,
 			keySource: key.source,
+			keyFileStamp: key.fileStamp,
 			model:
 				particle === null
 					? {
@@ -223,6 +225,7 @@ export async function runDaemon(options: {
 		particleKey: daemon.keySource,
 	});
 	if (daemon.particle === null) log('warn', daemon.model.detail ?? NO_API_KEY);
+	else void checkStartingKey(daemon);
 	stopKeyWatch = watchParticleKey(daemon);
 	router = startRouter(daemon);
 	startWorkers(daemon);
