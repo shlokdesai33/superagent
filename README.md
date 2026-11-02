@@ -26,15 +26,6 @@ curl -fsSL https://github.com/shlokdesai33/superagent/releases/latest/download/i
 
 This puts `superagent` in `~/.local/bin`, without sudo, and tells you if that folder isn't on your `PATH`. Add `SUPERAGENT_VERSION=v0.1.0` before `sh` for a given release, or `SUPERAGENT_INSTALL_DIR=<folder>` to install elsewhere.
 
-To build from source, with Bun 1.4.4 or newer:
-
-```sh
-git clone https://github.com/shlokdesai33/superagent && cd superagent
-bun install
-bun run build darwin-arm64   # or darwin-x64, linux-x64, linux-arm64
-cp dist/superagent-darwin-arm64 ~/.local/bin/superagent
-```
-
 ## First run
 
 Open it in a repository you want to work on:
@@ -114,10 +105,3 @@ superagent stop
 rm ~/.local/bin/superagent
 rm -rf ~/.superagent
 ```
-
-## Troubleshooting
-
-- **Colors in macOS Terminal.** Nothing to set: superagent picks the colors Terminal.app can show, and a light or dark theme from its background.
-- **Particle rejected the key, or the account is out of credit.** It shows at the top of home under NEEDS YOU, with the fix. Work pauses and resumes on its own once the key or the credit is sorted.
-- **"The agent and this terminal are different versions".** The background agent is still on the old version after an update: run `superagent restart`.
-- **"superagent isn't running".** Run `superagent` or `superagent start`. If it can't start, it prints why; `superagent logs` has more.
