@@ -133,7 +133,8 @@ export function taskSummary(daemon: Daemon, row: TaskRow): TaskSummary {
 	const activity = Array.from({ length: ACTIVITY_MINUTES }, () => 0);
 	for (const { at } of db
 		.query<{ at: number }, [number, number]>(
-			'SELECT started_at AS at FROM model_calls WHERE task_id = ? AND started_at >= ?',
+			// Watchdog reviews aren't the task's own activity.
+			"SELECT started_at AS at FROM model_calls WHERE task_id = ? AND started_at >= ? AND purpose != 'watchdog'",
 		)
 		.all(row.id, windowStart)) {
 		const index = Math.floor((at - windowStart) / MINUTE_MS);
@@ -327,7 +328,7 @@ export function startActivityTimer(daemon: Daemon): () => void {
 			() => {
 				for (const { id } of daemon.db
 					.query<{ id: number }, [number]>(
-						'SELECT DISTINCT task_id AS id FROM model_calls WHERE task_id IS NOT NULL AND started_at >= ?',
+						"SELECT DISTINCT task_id AS id FROM model_calls WHERE task_id IS NOT NULL AND started_at >= ? AND purpose != 'watchdog'",
 					)
 					.all(Date.now() - (ACTIVITY_MINUTES + 1) * MINUTE_MS)) {
 					taskChanged(daemon, id);
