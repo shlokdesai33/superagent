@@ -1,6 +1,11 @@
-// End to end: the Watchdog. A Particle outage pauses tasks instead of failing
-// them, and a free probe resumes them. Run with `bun run e2e`; it exits
+// End to end: the Watchdog. Its checks run quietly when nothing is wrong and
+// through a sleep; a Particle outage pauses tasks instead of failing them, and
+// a free probe resumes them. After every scenario, the Watchdog must have
+// taken no action it wasn't meant to. Run with `bun run e2e`; it exits
 // non-zero if a check fails.
+import { Database } from 'bun:sqlite';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { FeedLine, TaskSummary } from '../src/protocol.ts';
 import {
 	type FakeReply,
@@ -17,6 +22,11 @@ const SCALE = '0.001';
 
 // What each task's fake Worker does, by the task's title.
 const workers: Record<string, (request: FakeRequest) => FakeReply> = {
+	// Finishes at once.
+	quick: () => ({
+		content: 'Done.',
+		calls: [{ name: 'finish', args: { result: 'Done quickly' } }],
+	}),
 	// Breaks while `outage` is on, then finishes.
 	outage: () =>
 		controls.outage
@@ -125,11 +135,94 @@ async function scenario(
 			`✗ ${error instanceof Error ? error.message : String(error)}\n`,
 		);
 	} finally {
-		await agent.stop();
+		await agent.stop((home) => {
+			const db = new Database(join(home, 'state.db'), { readonly: true });
+			const acted = db
+				.query<{ key: string; stage: string | null; kind: string | null }, []>(
+					`SELECT key, stage, problem_kind AS kind FROM watchdog_findings
+					WHERE stage IS NOT NULL OR problem_kind IS NOT NULL`,
+				)
+				.all();
+			db.close();
+			check(
+				'the Watchdog took no action and reported nothing',
+				acted.length === 0,
+				acted
+					.map((finding) => `${finding.key}: ${finding.stage ?? finding.kind}`)
+					.join(', '),
+			);
+		});
 	}
 }
 
+const watchdogLines = (agent: Agent) =>
+	agent.lines.filter(
+		(line): line is HealthLine =>
+			line.type === 'health' && line.health.watchdog.lastCheckAt !== null,
+	);
+
 try {
+	await scenario('Quiet', async (agent) => {
+		await agent.action({ type: 'send_console', text: 'please run quick' });
+		const done = await taskLine(
+			agent,
+			'the quick task finishing',
+			(task) => task.title === 'quick' && task.status === 'done',
+		);
+		check('a task runs to the end', done.result === 'Done quickly');
+		await agent.until(
+			'the Watchdog to check a few times',
+			async () => watchdogLines(agent).length,
+			(count) => count >= 5,
+		);
+		const checks = watchdogLines(agent).map(
+			(line) => line.health.watchdog.lastCheckAt ?? 0,
+		);
+		check(
+			'health shows the Watchdog checking, again and again',
+			checks.every((at, index) => index === 0 || at > (checks[index - 1] ?? 0)),
+			`${checks.length} checks`,
+		);
+		const last = watchdogLines(agent).at(-1)?.health;
+		check(
+			'no Watchdog problems and no reviews',
+			last !== undefined &&
+				!last.problems.some(
+					(problem) => problem.kind === 'task' || problem.kind === 'agent',
+				) &&
+				last.watchdog.reviewsToday === 0,
+		);
+	});
+
+	await scenario('Sleep', async (agent) => {
+		await agent.action({ type: 'send_console', text: 'please run waiter' });
+		await taskLine(
+			agent,
+			'the waiter waiting for a note',
+			(task) => task.title === 'waiter' && task.waitingOn === 'a note',
+		);
+		await agent.until(
+			'the Watchdog to check',
+			async () => watchdogLines(agent).length,
+			(count) => count >= 2,
+		);
+		agent.signal('SIGSTOP');
+		await Bun.sleep(600);
+		agent.signal('SIGCONT');
+		await agent.until(
+			'the wake in the log',
+			async () => readFileSync(join(agent.home, 'daemon.log'), 'utf8'),
+			(log) => log.includes('watchdog saw the machine wake'),
+		);
+		const after = watchdogLines(agent).length;
+		await agent.until(
+			'the Watchdog to check after the wake',
+			async () => watchdogLines(agent).length,
+			(count) => count >= after + 4,
+		);
+		check('the Watchdog notices the wake and carries on checking', true);
+	});
+
 	await scenario('Particle outage', async (agent) => {
 		controls.outage = true;
 		particle.models.available = false;

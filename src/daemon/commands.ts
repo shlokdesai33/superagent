@@ -152,6 +152,7 @@ export async function runCommand(
 		taskId: task.id,
 		pgid,
 		background: false,
+		deadline: startedAt + timeoutSeconds * 1000,
 		stopReason: null,
 		finished: Promise.resolve(''),
 	};

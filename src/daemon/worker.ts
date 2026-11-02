@@ -115,6 +115,7 @@ function runWorker(daemon: Daemon, taskId: number): void {
 			woken = null;
 		},
 		callSince: null,
+		asleep: false,
 		turn: false,
 		blockedOn: null,
 		loop: Promise.resolve(),
@@ -125,10 +126,14 @@ function runWorker(daemon: Daemon, taskId: number): void {
 			const done = () => {
 				if (timer) clearTimeout(timer);
 				controller.signal.removeEventListener('abort', done);
+				live.asleep = false;
 				resolve();
 			};
 			const timer = ms === null ? null : setTimeout(done, ms);
-			if (ms === null) woken = done;
+			if (ms === null) {
+				woken = done;
+				live.asleep = true;
+			}
 			controller.signal.addEventListener('abort', done, { once: true });
 		});
 
