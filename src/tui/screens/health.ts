@@ -6,12 +6,6 @@ import { MEASURE, blank, figure, label, oneLine, sep } from '../parts.ts';
 
 const BAR = 32;
 
-const PROACTIVE: Record<Health['proactive'], string> = {
-	off: 'only messages for the agent are handled',
-	observe: 'matches are listed under OBSERVED without acting',
-	act: 'matches are acted on',
-};
-
 const KEY: Record<Health['model']['key'], string> = {
 	env: 'from PARTICLE_API_KEY',
 	file: 'from the particle-key file in the data folder',
@@ -214,17 +208,6 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 		{ t: SANDBOX[health.sandbox], fg: 'faint' },
 	];
 	for (const segs of wrap(machine, measure)) lines.push({ segs });
-	lines.push(blank());
-
-	lines.push(label('PROACTIVE WORK'));
-	lines.push({
-		segs: [
-			{ t: 'mode: ', fg: 'faint' },
-			{ t: health.proactive, fg: 'fg' },
-			sep,
-			{ t: PROACTIVE[health.proactive], fg: 'faint' },
-		],
-	});
 	return lines;
 }
 

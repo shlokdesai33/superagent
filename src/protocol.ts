@@ -13,8 +13,6 @@ export type FeedLine =
 	| { type: 'router'; seq: number; router: RouterState }
 	| { type: 'usage'; seq: number; usage: Usage }
 	| { type: 'health'; seq: number; health: Health }
-	/** Reserved; never sent in this version. */
-	| { type: 'observed'; seq: number; observed: Observed }
 	| { type: 'ping'; now: number };
 
 export type FeedUpdate = Exclude<
@@ -33,8 +31,6 @@ export type Snapshot = {
 	router: RouterState;
 	usage: Usage;
 	health: Health;
-	/** Always empty in this version. */
-	observed: Observed[];
 };
 
 export type TaskSummary = {
@@ -162,8 +158,6 @@ export type Health = {
 	/** Failed tasks are tasks, not problems. */
 	problems: Problem[];
 	machine: MachineFacts;
-	/** Always `off` in this version. */
-	proactive: 'off' | 'observe' | 'act';
 	/** `unavailable` comes with a `sandbox` problem, and commands are refused. Never `off`. */
 	sandbox: 'off' | 'on' | 'unavailable';
 };
@@ -185,17 +179,6 @@ export type Problem = {
 	/** What to run or do to fix it, when the agent knows. */
 	fix: string | null;
 	since: number;
-};
-
-/** Reserved for observe mode. */
-export type Observed = {
-	id: number;
-	at: number;
-	rule: string;
-	/** `slack · #eng` */
-	source: string;
-	summary: string;
-	eventId: number;
 };
 
 /** `GET /v1/tasks/:handle`. */
@@ -227,9 +210,7 @@ export type Action =
 	  }
 	| { type: 'stop_task'; handle: string }
 	/** `null`: every failed task. */
-	| { type: 'resume_tasks'; handles: string[] | null }
-	| { type: 'act_observed'; id: number }
-	| { type: 'ignore_observed'; id: number };
+	| { type: 'resume_tasks'; handles: string[] | null };
 
 /** Maps onto a toast: `✓ <subject> · <detail>`. */
 export type ActionResult =

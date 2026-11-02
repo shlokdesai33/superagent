@@ -25,6 +25,5 @@ export function buildSnapshot(daemon: Daemon): Snapshot {
 		router: routerState(daemon),
 		usage: usageSince(daemon.db, start),
 		health: health(daemon),
-		observed: [],
 	};
 }

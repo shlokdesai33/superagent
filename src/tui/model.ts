@@ -2,7 +2,6 @@ import type {
 	FeedLine,
 	Health,
 	Message,
-	Observed,
 	Problem,
 	RoutedEvent,
 	RouterState,
@@ -24,7 +23,6 @@ export type Live = {
 	router: RouterState;
 	usage: Usage;
 	health: Health;
-	observed: Map<number, Observed>;
 	/** Steps and messages from the feed, by task, with the `seq` they came at. */
 	steps: Map<string, Map<number, { step: Step; seq: number }>>;
 	messages: Map<string, Map<number, { message: Message; seq: number }>>;
@@ -68,7 +66,6 @@ export function fromSnapshot(
 		router: snapshot.router,
 		usage: snapshot.usage,
 		health: snapshot.health,
-		observed: new Map(snapshot.observed.map((item) => [item.id, item])),
 		steps: new Map(),
 		messages: new Map(),
 		seq,
@@ -123,9 +120,6 @@ export function apply(live: Live, line: FeedLine, now: number): Applied {
 			return { kind: 'other' };
 		case 'health':
 			live.health = line.health;
-			return { kind: 'other' };
-		case 'observed':
-			live.observed.set(line.observed.id, line.observed);
 			return { kind: 'other' };
 	}
 }
@@ -186,7 +180,6 @@ export type Sections = {
 	failed: TaskSummary[];
 	needs: TaskSummary[];
 	working: TaskSummary[];
-	observed: Observed[];
 	done: TaskSummary[];
 };
 
@@ -211,7 +204,6 @@ export function sections(live: Live): Sections {
 		failed,
 		needs,
 		working,
-		observed: [...live.observed.values()].toSorted((a, b) => a.at - b.at),
 		done,
 	};
 }
@@ -241,8 +233,7 @@ export function placeOf(
 
 export type Item =
 	| { key: string; kind: 'problem'; problem: Problem }
-	| { key: string; kind: 'task'; task: TaskSummary }
-	| { key: string; kind: 'observed'; observed: Observed };
+	| { key: string; kind: 'task'; task: TaskSummary };
 
 /** The home screen's selectable items, top to bottom. */
 export function homeItems(live: Live): Item[] {
@@ -254,11 +245,6 @@ export function homeItems(live: Live): Item[] {
 			problem,
 		})),
 		...[...all.failed, ...all.needs, ...all.working].map(taskItem),
-		...all.observed.map((observed): Item => ({
-			key: `observed:${observed.id}`,
-			kind: 'observed',
-			observed,
-		})),
 		...all.done.map(taskItem),
 	];
 }

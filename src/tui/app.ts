@@ -539,10 +539,6 @@ export class App {
 			this.openTask(item.task.handle);
 		} else if (ch === 's' && item.kind === 'task' && stoppable(item.task)) {
 			this.ui.confirmStop = item.task.handle;
-		} else if (ch === 'a' && item.kind === 'observed') {
-			this.act({ type: 'act_observed', id: item.observed.id });
-		} else if (ch === 'x' && item.kind === 'observed') {
-			this.act({ type: 'ignore_observed', id: item.observed.id });
 		}
 	}
 

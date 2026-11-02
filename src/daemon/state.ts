@@ -265,7 +265,6 @@ export function health(daemon: Daemon): Health {
 		model: { name: MODEL, ...daemon.model, key: daemon.keySource },
 		problems,
 		machine: daemon.machine,
-		proactive: 'off',
 		sandbox: sandbox.state,
 	};
 }
