@@ -107,14 +107,14 @@ function halves(): Art {
 const SIZES: Art[] = [shadow(), blocks(), halves()];
 
 /**
- * The largest wordmark that fits `columns` by `rows`: strokes in `accent`,
- * the shadow in `ghost`. Empty when none fits.
+ * Every wordmark size that fits `columns`, largest first: strokes in
+ * `accent`, the shadow in `ghost`.
  */
-export function wordmark(columns: number, rows: number): Seg[][] {
-	const art = SIZES.find(
-		(size) => size.length <= rows && width(size[0] ?? '') <= columns,
-	);
-	if (!art) return [];
+export function wordmarks(columns: number): Seg[][][] {
+	return SIZES.filter((size) => width(size[0] ?? '') <= columns).map(paint);
+}
+
+function paint(art: Art): Seg[][] {
 	return art.map((line) => {
 		const segs: Seg[] = [];
 		for (const ch of line) {

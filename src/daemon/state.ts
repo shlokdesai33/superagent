@@ -56,6 +56,8 @@ export type Daemon = {
 	/** The key `particle` uses, to notice when it changes. */
 	particleKey: string | null;
 	keySource: KeySource;
+	/** The key file as last read, to notice it written again with the same key. */
+	keyFileStamp: string | null;
 	model: Omit<Health['model'], 'name' | 'key' | 'keyRejected'>;
 	router: RouterLive;
 	paths: DataPaths;

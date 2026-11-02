@@ -81,6 +81,34 @@ try {
 			!tui.seen().includes('press / to ask'),
 	);
 
+	// 1b. On short terminals the wordmark shrinks or goes, never the input or
+	//     the outcome of a try.
+	for (const [columns, rows] of [
+		[40, 12],
+		[100, 16],
+	] as const) {
+		const small = await openTui(agent.home, outside, {
+			env: tuiEnv,
+			columns,
+			rows,
+			until: 'enter check and save',
+		});
+		const before = small.screen().join('\n');
+		await small.paste(badKey);
+		await small.type('\r');
+		await small.waitFor('Particle rejected', small.mark()).catch(() => {});
+		await Bun.sleep(200);
+		const after = small.screen().join('\n');
+		check(
+			`at ${columns}×${rows} the input and the outcome line stay on screen`,
+			before.includes('› ') &&
+				before.includes('paste your key') &&
+				after.includes('Particle rejected this key'),
+		);
+		await small.type('\x1b');
+		await small.quit();
+	}
+
 	// 2. Not a key at all, then a key Particle rejects: refused in place.
 	let mark = tui.mark();
 	await tui.type('hello\r');
@@ -158,7 +186,34 @@ try {
 		readFileSync(keyFile, 'utf8') === `${nextKey}\n`,
 	);
 
-	// 6. No key anywhere it shouldn't be.
+	// 6. Particle rejects the key in use, then accepts it again: pasting the
+	//    same key resumes the model at once, not at the next 2-minute retry.
+	particle.auth.rejectedKeys.add(nextKey);
+	from = agent.lines.length;
+	mark = tui.mark();
+	await agent.action({ type: 'send_console', text: 'hello' });
+	const paused = await health(
+		'a model call to be rejected',
+		from,
+		(model) => model.keyRejected,
+	);
+	await tui.waitFor('Particle rejected the saved key', mark);
+	particle.auth.rejectedKeys.delete(nextKey);
+	mark = tui.mark();
+	await tui.paste(nextKey);
+	await tui.type('\r');
+	await tui.waitFor('press / to ask', mark);
+	const resumed = await health(
+		'the model to resume on the same key saved again',
+		agent.lines.indexOf(paused) + 1,
+		(model) => model.state === 'ok',
+	).catch(() => null);
+	check(
+		'saving the same key again after Particle accepts it resumes the model',
+		resumed !== null,
+	);
+
+	// 7. No key anywhere it shouldn't be.
 	const terminal = tui.seen();
 	check(
 		'no key ever shows in the terminal',

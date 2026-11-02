@@ -174,6 +174,7 @@ export async function runDaemon(options: {
 			particle,
 			particleKey: key.key,
 			keySource: key.source,
+			keyFileStamp: key.fileStamp,
 			model:
 				particle === null
 					? {

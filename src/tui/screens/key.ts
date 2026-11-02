@@ -3,11 +3,35 @@ import { type Line, type Seg, width, wrap } from '../cells.ts';
 import type { Model } from '../model.ts';
 import { hint, rule, sep, spinner } from '../parts.ts';
 import type { KeyScreen } from '../state.ts';
-import { wordmark } from '../wordmark.ts';
+import { wordmarks } from '../wordmark.ts';
 
 /** The text column is at least this wide, and as wide as the wordmark. */
 const COLUMN = 60;
 const MASK = '•';
+/** Rows between the wordmark and the text. */
+const GAP = 2;
+const OUTCOME_LINES = 3;
+
+type Text = {
+	title: Seg[][];
+	/** What happens to the key. */
+	about: Seg[][];
+	/** A blank row above the input. */
+	blank: boolean;
+	input: Seg[];
+	/** Always at least one row, so a result doesn't move the layout. */
+	outcome: Seg[][];
+};
+
+function textHeight(text: Text): number {
+	return (
+		text.title.length +
+		text.about.length +
+		(text.blank ? 1 : 0) +
+		1 +
+		text.outcome.length
+	);
+}
 
 const TITLE: Record<KeyScreen['reason'], string> = {
 	missing: 'Paste your Particle API key to get started',
@@ -30,20 +54,16 @@ export function keyLines(
 	const footer: Line[] = [rule(content), { segs: hintSegs(screen, content) }];
 	const room = rows - footer.length;
 
-	const textBlock = (column: number): Line[] => {
+	const textFor = (column: number): Text => {
 		const prose = (segs: Seg[]): Seg[][] => wrap(segs, column);
-		const env = model.live?.health.model.key === 'env';
-		const lines: Seg[][] = [
-			...prose([{ t: TITLE[screen.reason], fg: 'fg', b: true }]),
-			...prose([
-				{
-					t: `superagent checks it with Particle, which costs nothing, then saves it to ${home(screen.keyFile)}, readable only by you.`,
-					fg: 'faint',
-				},
-			]),
-		];
-		if (env) {
-			lines.push(
+		const about = prose([
+			{
+				t: `superagent checks it with Particle, which costs nothing, then saves it to ${home(screen.keyFile)}, readable only by you.`,
+				fg: 'faint',
+			},
+		]);
+		if (model.live?.health.model.key === 'env') {
+			about.push(
 				...prose([
 					{
 						t: 'PARTICLE_API_KEY is set where the agent runs and overrides this file while it is.',
@@ -52,30 +72,65 @@ export function keyLines(
 				]),
 			);
 		}
-		lines.push([], inputSegs(screen, column, now));
-		lines.push(...prose(outcomeSegs(screen, now)));
-		return lines.map((segs) => ({ segs }));
+		return {
+			title: prose([{ t: TITLE[screen.reason], fg: 'fg', b: true }]),
+			about,
+			blank: true,
+			input: inputSegs(screen, column, now),
+			outcome: wrap(outcomeSegs(screen, now), column, OUTCOME_LINES),
+		};
 	};
 
-	// The text column lines up under the wordmark when it's the wider one.
-	let art = wordmark(
-		content,
-		Math.max(0, room - textBlock(content).length - 2),
-	);
-	const artWidth = art.length > 0 ? width(art[0] ?? []) : 0;
-	const column = Math.min(content, Math.max(COLUMN, artWidth));
-	const text = textBlock(column);
-	if (art.length > 0 && art.length + 2 + text.length > room) art = [];
-	const name: Seg[][] =
-		art.length > 0 ? art : [[{ t: 'superagent', fg: 'fg', b: true }]];
+	// The largest wordmark that fits with all the text; the text column lines
+	// up under it when it's the wider one.
+	let name: Seg[][] = [];
+	let gap = GAP;
+	let column = Math.min(content, COLUMN);
+	let text: Text | null = null;
+	for (const art of wordmarks(content)) {
+		const wide = Math.min(content, Math.max(COLUMN, width(art[0] ?? [])));
+		const full = textFor(wide);
+		if (art.length + GAP + textHeight(full) <= room) {
+			name = art;
+			column = wide;
+			text = full;
+			break;
+		}
+	}
+	if (text === null) {
+		// Too short for a wordmark: the input and the outcome always stay, then
+		// the title, the blank above the input, what happens to the key, and
+		// the name, as far as they fit.
+		const full = textFor(column);
+		let spare = room - 1 - full.outcome.length;
+		const keep = (lines: Seg[][]): Seg[][] => {
+			if (lines.length > spare) return [];
+			spare -= lines.length;
+			return lines;
+		};
+		const title = keep(full.title);
+		const blank = keep([[]]).length > 0;
+		const about = keep(full.about);
+		gap = Math.min(GAP, spare - 1);
+		if (gap >= 1) name = [[{ t: 'superagent', fg: 'fg', b: true }]];
+		text = { ...full, title, blank, about };
+	}
 
 	const left = Math.floor((content - column) / 2);
 	const artLeft = left + Math.floor((column - width(name[0] ?? [])) / 2);
+	const textLines: Seg[][] = [
+		...text.title,
+		...text.about,
+		...(text.blank ? [[]] : []),
+		text.input,
+		...text.outcome,
+	];
 	const block: Line[] = [
 		...name.map((segs) => indent(segs, artLeft)),
-		{ segs: [] },
-		{ segs: [] },
-		...text.map((line) => indent(line.segs, left)),
+		...(name.length > 0
+			? Array.from({ length: gap }, () => ({ segs: [] }))
+			: []),
+		...textLines.map((segs) => indent(segs, left)),
 	];
 	// A little above the middle reads as centred.
 	const top = Math.max(0, Math.floor((room - block.length) * 0.4));

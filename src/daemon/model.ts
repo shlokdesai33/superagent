@@ -6,6 +6,7 @@ import {
 	checkApiKey,
 	createParticleClient,
 } from '../particle/client.ts';
+import { statSync } from 'node:fs';
 import { estimateCostUsd } from '../particle/cost.ts';
 import type { ChatRequest } from '../particle/types.ts';
 import type { KeySource } from '../protocol.ts';
@@ -53,6 +54,8 @@ export type FoundKey = {
 	found: string[];
 	/** Why the key file couldn't be read, when it couldn't. */
 	problem: string | null;
+	/** Changes whenever the key file is written, even with the same key. */
+	fileStamp: string | null;
 };
 
 /** `PARTICLE_API_KEY` wins over the key file. */
@@ -65,11 +68,18 @@ export function findParticleKey(keyFile: string): FoundKey {
 	} catch (error) {
 		problem = `Couldn't read ${keyFile}: ${error instanceof Error ? error.message : String(error)}`;
 	}
+	let fileStamp: string | null = null;
+	if (file !== null) {
+		const stat = statSync(keyFile, { throwIfNoEntry: false });
+		// Key files are replaced by a rename, so the inode changes with each write.
+		if (stat) fileStamp = `${stat.ino}:${stat.mtimeMs}`;
+	}
 	return {
 		key: env ?? file,
 		source: env !== null ? 'env' : file !== null ? 'file' : 'missing',
 		found: [env, file].filter((key) => key !== null),
 		problem,
+		fileStamp,
 	};
 }
 
@@ -81,15 +91,25 @@ export function particleClient(apiKey: string): ParticleClient {
 /**
  * Reads the key again. A changed key replaces the client for the next call;
  * a key appearing, or replacing one the model paused on, resumes the model
- * and wakes the Router and Workers, and one disappearing pauses it.
+ * and wakes the Router and Workers, and one disappearing pauses it. The key
+ * file written again with the same key (the TUI saves only a key Particle
+ * just accepted) also resumes a paused model.
  */
 export function refreshParticleKey(daemon: Daemon): void {
-	const { key, source, found, problem } = findParticleKey(
+	const { key, source, found, problem, fileStamp } = findParticleKey(
 		daemon.paths.particleKey,
 	);
 	addSecrets(daemon.secrets, found);
+	const rewritten = source === 'file' && fileStamp !== daemon.keyFileStamp;
+	daemon.keyFileStamp = fileStamp;
 	if (key === daemon.particleKey) {
 		if (key === null) setModelHealth(daemon, 'paused', problem ?? NO_API_KEY);
+		else if (rewritten && daemon.model.state === 'paused') {
+			daemon.log('info', 'Particle key saved again', { source });
+			setModelHealth(daemon, 'ok', null);
+			daemon.router.wake();
+			for (const live of daemon.workers.values()) live.wake();
+		}
 		return;
 	}
 	const had = daemon.particleKey !== null;
