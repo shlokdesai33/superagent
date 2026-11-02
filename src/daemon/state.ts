@@ -4,6 +4,7 @@ import { MODEL, type ParticleClient } from '../particle/client.ts';
 import type {
 	ActionResult,
 	Health,
+	KeySource,
 	MachineFacts,
 	Message,
 	Problem,
@@ -26,7 +27,10 @@ export type Daemon = {
 	feed: Feed;
 	log: Log;
 	config: Config;
-	/** The agent's own keys, kept out of commands, the model, the feed and the log. */
+	/**
+	 * Every key the agent has read, kept out of commands, the model, the feed
+	 * and the log. Only grows, so a replaced key stays redacted.
+	 */
 	secrets: string[];
 	agent: Snapshot['agent'];
 	machine: MachineFacts;
@@ -39,7 +43,10 @@ export type Daemon = {
 	usageTimer: Timer | null;
 	/** `null` when there's no API key; the model stays paused. */
 	particle: ParticleClient | null;
-	model: Omit<Health['model'], 'name'>;
+	/** The key `particle` uses, to notice when it changes. */
+	particleKey: string | null;
+	keySource: KeySource;
+	model: Omit<Health['model'], 'name' | 'key'>;
 	router: RouterLive;
 	paths: DataPaths;
 	/** Your login shell's PATH, for Worker commands. */
@@ -255,7 +262,7 @@ export function health(daemon: Daemon): Health {
 			lastEventAt,
 			detail: null,
 		})),
-		model: { name: MODEL, ...daemon.model },
+		model: { name: MODEL, ...daemon.model, key: daemon.keySource },
 		problems,
 		machine: daemon.machine,
 		proactive: 'off',

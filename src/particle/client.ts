@@ -218,6 +218,42 @@ export function createParticleClient(
 	return { chat };
 }
 
+const KEY_CHECK_TIMEOUT_MS = 15_000;
+
+/** Particle keys are `pai-` and 43 more characters; older `ds-` keys still work. */
+export function looksLikeApiKey(key: string): boolean {
+	return /^(?:pai|ds)-[\x21-\x7e]+$/.test(key);
+}
+
+export type KeyCheck =
+	| { result: 'valid' }
+	| { result: 'rejected' }
+	| { result: 'unchecked'; problem: string };
+
+/** Asks Particle about a key with `GET /models`, which spends no tokens or credits. */
+export async function checkApiKey(options: {
+	apiKey: string;
+	baseUrl?: string;
+}): Promise<KeyCheck> {
+	const url = `${(options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '')}/models`;
+	let response: Response;
+	try {
+		response = await fetch(url, {
+			headers: { Authorization: `Bearer ${options.apiKey}` },
+			signal: AbortSignal.timeout(KEY_CHECK_TIMEOUT_MS),
+		});
+		await response.body?.cancel();
+	} catch (error) {
+		return {
+			result: 'unchecked',
+			problem: error instanceof Error ? error.message : String(error),
+		};
+	}
+	if (response.ok) return { result: 'valid' };
+	if (response.status === 401) return { result: 'rejected' };
+	return { result: 'unchecked', problem: `HTTP ${response.status}` };
+}
+
 type Fail = (error: unknown, requestId: string | null) => unknown;
 
 async function readStream(

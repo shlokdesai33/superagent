@@ -8,7 +8,9 @@ import {
 import { release } from 'node:os';
 import { isAbsolute } from 'node:path';
 import type { DataPaths } from '../home.ts';
+import { readKeyFile, writeKeyFile } from '../keys.ts';
 import type { MachineFacts } from '../protocol.ts';
+import type { Log } from './log.ts';
 
 /** A setup problem the person fixes; its message is shown as is. */
 export class StartupError extends Error {
@@ -30,7 +32,7 @@ const MACHINE_TOOLS = [
 ];
 
 export function createDataFolder(paths: DataPaths): void {
-	// Only you can read it: config.json and command logs can hold API keys.
+	// Only you can read it: the key file and command logs hold API keys.
 	mkdirSync(paths.home, { recursive: true, mode: 0o700 });
 	chmodSync(paths.home, 0o700);
 	if (Buffer.byteLength(paths.socket) >= SOCKET_PATH_LIMIT) {
@@ -89,16 +91,59 @@ function isAlive(pid: number): boolean {
 }
 
 export type Config = {
-	particleApiKey: string | null;
 	repos: Array<{ name: string; path: string }>;
 	maxWorkingTasks: number;
 };
 
 const DEFAULT_CONFIG: Config = {
-	particleApiKey: null,
 	repos: [],
 	maxWorkingTasks: 4,
 };
+
+/**
+ * Moves `particleApiKey` from `config.json`, where earlier versions kept it,
+ * to the key file. A key file that already holds a key keeps it. Returns the
+ * moved key, so it's redacted even when it isn't the one in use.
+ */
+export function migrateConfigKey(paths: DataPaths, log: Log): string | null {
+	let value: unknown;
+	try {
+		value = JSON.parse(readFileSync(paths.config, 'utf8')) as unknown;
+	} catch {
+		// Missing or invalid; `loadConfig` creates or reports it.
+		return null;
+	}
+	if (
+		typeof value !== 'object' ||
+		value === null ||
+		Array.isArray(value) ||
+		!('particleApiKey' in value)
+	) {
+		return null;
+	}
+	const { particleApiKey, ...rest } = value;
+	if (particleApiKey !== null && typeof particleApiKey !== 'string') {
+		throw new StartupError(`${paths.config}: particleApiKey must be a string`);
+	}
+	const key = particleApiKey?.trim() || null;
+	const existing = readKeyFile(paths.particleKey);
+	if (key !== null && existing === null) {
+		writeKeyFile(paths.particleKey, key);
+	}
+	writeFileSync(paths.config, `${JSON.stringify(rest, null, '\t')}\n`, {
+		mode: 0o600,
+	});
+	log(
+		'info',
+		key === null
+			? 'removed an empty particleApiKey from config.json'
+			: existing === null || existing === key
+				? 'moved particleApiKey from config.json to the key file'
+				: 'removed particleApiKey from config.json; the key file already had a different key, which stays',
+		{ keyFile: paths.particleKey },
+	);
+	return key;
+}
 
 /** Reads `config.json`, writing the defaults when it doesn't exist. */
 export function loadConfig(path: string): Config {
@@ -107,15 +152,12 @@ export function loadConfig(path: string): Config {
 		text = readFileSync(path, 'utf8');
 	} catch (error) {
 		if (errorCode(error) !== 'ENOENT') throw error;
-		const { particleApiKey: _, ...defaults } = DEFAULT_CONFIG;
-		writeFileSync(path, `${JSON.stringify(defaults, null, '\t')}\n`, {
+		writeFileSync(path, `${JSON.stringify(DEFAULT_CONFIG, null, '\t')}\n`, {
 			flag: 'wx',
 			mode: 0o600,
 		});
 		return DEFAULT_CONFIG;
 	}
-	// It can hold the Particle key.
-	chmodSync(path, 0o600);
 
 	let value: unknown;
 	try {
@@ -131,10 +173,6 @@ export function loadConfig(path: string): Config {
 	}
 	const raw: Record<string, unknown> = { ...value };
 
-	const particleApiKey = raw.particleApiKey ?? null;
-	if (particleApiKey !== null && typeof particleApiKey !== 'string') {
-		throw invalid('particleApiKey must be a string');
-	}
 	const repos = raw.repos ?? [];
 	if (
 		!Array.isArray(repos) ||
@@ -179,7 +217,6 @@ export function loadConfig(path: string): Config {
 		throw invalid('maxWorkingTasks must be a whole number of at least 1');
 	}
 	return {
-		particleApiKey,
 		repos: parsedRepos,
 		maxWorkingTasks,
 	};

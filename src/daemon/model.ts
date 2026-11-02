@@ -7,10 +7,13 @@ import {
 } from '../particle/client.ts';
 import { estimateCostUsd } from '../particle/cost.ts';
 import type { ChatRequest } from '../particle/types.ts';
-import type { Config } from './setup.ts';
+import type { KeySource } from '../protocol.ts';
+import { readKeyFile } from '../keys.ts';
+import { addSecrets } from './secrets.ts';
 import {
 	type Daemon,
 	type Params,
+	health,
 	setModelHealth,
 	usageChanged,
 } from './state.ts';
@@ -18,7 +21,9 @@ import {
 // Particle publishes no rate limit and advises capping concurrency.
 const MAX_CALLS_IN_FLIGHT = 6;
 
-export const NO_API_KEY = `No Particle API key: set ${API_KEY_ENV} or particleApiKey in config.json, then restart the agent`;
+const KEY_POLL_MS = 2_000;
+
+export const NO_API_KEY = `No Particle API key: run superagent login particle, or set ${API_KEY_ENV}`;
 
 /**
  * - `account`: fixed by the person (401, 402, 403); every loop pauses.
@@ -37,12 +42,79 @@ export class ModelError extends Error {
 	}
 }
 
-/** `PARTICLE_API_KEY` wins over `particleApiKey` in the config. */
-export function createModelClient(config: Config): ParticleClient | null {
-	const apiKey = Bun.env[API_KEY_ENV] || config.particleApiKey;
-	if (!apiKey) return null;
+export type FoundKey = {
+	key: string | null;
+	source: KeySource;
+	/** Every key found, including a key file that `PARTICLE_API_KEY` overrides. */
+	found: string[];
+	/** Why the key file couldn't be read, when it couldn't. */
+	problem: string | null;
+};
+
+/** `PARTICLE_API_KEY` wins over the key file. */
+export function findParticleKey(keyFile: string): FoundKey {
+	const env = Bun.env[API_KEY_ENV]?.trim() || null;
+	let file: string | null = null;
+	let problem: string | null = null;
+	try {
+		file = readKeyFile(keyFile);
+	} catch (error) {
+		problem = `Couldn't read ${keyFile}: ${error instanceof Error ? error.message : String(error)}`;
+	}
+	return {
+		key: env ?? file,
+		source: env !== null ? 'env' : file !== null ? 'file' : 'missing',
+		found: [env, file].filter((key) => key !== null),
+		problem,
+	};
+}
+
+export function particleClient(apiKey: string): ParticleClient {
 	const baseUrl = Bun.env.PARTICLE_BASE_URL;
 	return createParticleClient(baseUrl ? { apiKey, baseUrl } : { apiKey });
+}
+
+/**
+ * Reads the key again. A changed key replaces the client for the next call;
+ * a key appearing resumes the model and wakes the Router and Workers, and one
+ * disappearing pauses it.
+ */
+export function refreshParticleKey(daemon: Daemon): void {
+	const { key, source, found, problem } = findParticleKey(
+		daemon.paths.particleKey,
+	);
+	addSecrets(daemon.secrets, found);
+	if (key === daemon.particleKey) return;
+	const had = daemon.particleKey !== null;
+	daemon.particleKey = key;
+	daemon.keySource = source;
+	daemon.particle = key === null ? null : particleClient(key);
+	daemon.log(
+		key === null ? 'warn' : 'info',
+		key === null
+			? 'Particle key gone'
+			: had
+				? 'Particle key changed'
+				: 'Particle key found',
+		problem === null ? { source } : { source, problem },
+	);
+	const before = daemon.model;
+	if (key === null) setModelHealth(daemon, 'paused', problem ?? NO_API_KEY);
+	else if (!had) setModelHealth(daemon, 'ok', null);
+	// `setModelHealth` publishes only a changed state; the key source changed.
+	if (daemon.model === before) {
+		daemon.feed.publish({ type: 'health', health: health(daemon) });
+	}
+	if (key !== null && !had) {
+		daemon.router.wake();
+		for (const live of daemon.workers.values()) live.wake();
+	}
+}
+
+/** Re-reads the key every 2 seconds, so a model paused without one resumes. */
+export function watchParticleKey(daemon: Daemon): () => void {
+	const timer = setInterval(() => refreshParticleKey(daemon), KEY_POLL_MS);
+	return () => clearInterval(timer);
 }
 
 export type ModelCall = {
@@ -62,6 +134,7 @@ export async function callModel(
 	daemon: Daemon,
 	call: ModelCall,
 ): Promise<ChatResult> {
+	refreshParticleKey(daemon);
 	const { particle } = daemon;
 	if (particle === null) throw new ModelError(NO_API_KEY, 'account');
 	// The Router's calls (no task) are never queued; it makes one at a time.

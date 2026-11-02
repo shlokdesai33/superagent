@@ -12,6 +12,12 @@ const PROACTIVE: Record<Health['proactive'], string> = {
 	act: 'matches are acted on',
 };
 
+const KEY: Record<Health['model']['key'], string> = {
+	env: 'from PARTICLE_API_KEY',
+	file: 'from the particle-key file in the data folder',
+	missing: 'missing · run superagent login particle',
+};
+
 const SANDBOX: Record<Health['sandbox'], string> = {
 	off: 'commands run unsandboxed',
 	on: 'commands write only inside their task',
@@ -138,6 +144,13 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 			...(model.since !== null && model.state !== 'ok'
 				? [sep, { t: `since ${clock(model.since)}`, fg: 'faint' } satisfies Seg]
 				: []),
+		],
+	});
+	lines.push({
+		segs: [
+			{ t: '  ' },
+			{ t: fit('key', 12), fg: 'dim' },
+			{ t: KEY[model.key], fg: 'faint' },
 		],
 	});
 	lines.push(blank());

@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 export type DataPaths = {
 	home: string;
 	config: string;
+	particleKey: string;
 	socket: string;
 	pid: string;
 	log: string;
@@ -18,6 +19,7 @@ export function dataPaths(): DataPaths {
 	return {
 		home,
 		config: join(home, 'config.json'),
+		particleKey: join(home, 'particle-key'),
 		socket: join(home, 'agent.sock'),
 		pid: join(home, 'daemon.pid'),
 		log: join(home, 'daemon.log'),
