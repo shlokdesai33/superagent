@@ -75,7 +75,7 @@ It builds the four executables, signs the macOS ones ad hoc with `codesign` when
 
 Run `bun run check` before opening a PR, and list its results in the PR description.
 
-There are no unit tests. `e2e/` drives the real daemon the way the TUI does: `e2e/harness.ts` starts `superagent daemon --script-channel` on a fresh `/tmp/sa-…` data folder and talks to it over its socket, and `e2e/fake-particle.ts` is a Particle server whose answers each scenario scripts, told apart by `prompt_cache_key`. `e2e/threads.ts` covers thread ownership, filtering, release and reopen, and questions answered on a thread; it prints one line per check and exits non-zero if any fails. Set `E2E_VERBOSE=1` to see the daemon's log and `E2E_KEEP=1` to keep its data folder.
+There are no unit tests. `e2e/` drives the real daemon the way the TUI does: `e2e/harness.ts` starts `superagent daemon --script-channel` on a fresh `/tmp/sa-…` data folder and talks to it over its socket, and `e2e/fake-particle.ts` is a Particle server whose answers each scenario scripts, told apart by `prompt_cache_key`. `e2e/threads.ts` covers thread ownership, filtering, release and reopen, and questions answered on a thread; it prints one line per check and exits non-zero if any fails. `e2e/install.ts` runs `install.sh` against fake releases on localhost under every POSIX shell it finds (`sh`, dash, bash, zsh, busybox), piped and as a file, in the C, a UTF-8 and a Latin-1 locale; on Linux, `sudo localedef -i en_US -f ISO-8859-1 en_US.ISO-8859-1` adds the Latin-1 one, which catches what macOS's `/bin/sh` trips on. Set `E2E_VERBOSE=1` to see the daemon's log and `E2E_KEEP=1` to keep its data folder.
 
 ## Running from source
 
