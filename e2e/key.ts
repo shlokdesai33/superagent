@@ -72,7 +72,7 @@ try {
 	// 1. No key: the welcome screen, not home.
 	const tui = await openTui(agent.home, outside, {
 		env: tuiEnv,
-		until: 'Paste your Particle API key to get started',
+		until: 'Paste your Particle API key',
 	});
 	const first = tui.screen();
 	check(
@@ -91,7 +91,7 @@ try {
 			env: tuiEnv,
 			columns,
 			rows,
-			until: 'enter check and save',
+			until: 'enter save',
 		});
 		const before = small.screen().join('\n');
 		await small.paste(badKey);
@@ -119,6 +119,12 @@ try {
 	await tui.type('\r');
 	await tui.waitFor('Particle rejected this key', mark);
 	check(
+		'the screen says only what to do: no storage or reassurance',
+		!/costs nothing|readable only|nothing was saved|stays hidden/.test(
+			tui.seen(),
+		),
+	);
+	check(
 		'a rejected key is refused on the same screen and nothing is saved',
 		fileMode() === null &&
 			tui.screen().some((row) => row.includes('Paste your')),
@@ -137,7 +143,7 @@ try {
 	);
 	check(
 		'the home screen follows, with a toast saying it was saved',
-		tui.seen(mark).includes('Particle accepted the key'),
+		tui.seen(mark).includes('✓ Saved the key'),
 	);
 	await health(
 		'the agent to take the key from its file',

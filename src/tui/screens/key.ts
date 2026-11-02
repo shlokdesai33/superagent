@@ -1,4 +1,3 @@
-import { homedir } from 'node:os';
 import { type Line, type Seg, width, wrap } from '../cells.ts';
 import type { Model } from '../model.ts';
 import { hint, rule, sep, spinner } from '../parts.ts';
@@ -14,7 +13,7 @@ const OUTCOME_LINES = 3;
 
 type Text = {
 	title: Seg[][];
-	/** What happens to the key. */
+	/** That `PARTICLE_API_KEY` overrides the saved key, when it does. */
 	about: Seg[][];
 	/** A blank row above the input. */
 	blank: boolean;
@@ -34,8 +33,8 @@ function textHeight(text: Text): number {
 }
 
 const TITLE: Record<KeyScreen['reason'], string> = {
-	missing: 'Paste your Particle API key to get started',
-	rejected: 'Particle rejected the saved key; paste a new one to carry on',
+	missing: 'Paste your Particle API key',
+	rejected: 'Particle rejected the saved key · paste a new one',
 	replace: 'Paste a new Particle API key',
 };
 
@@ -56,22 +55,15 @@ export function keyLines(
 
 	const textFor = (column: number): Text => {
 		const prose = (segs: Seg[]): Seg[][] => wrap(segs, column);
-		const about = prose([
-			{
-				t: `superagent checks it with Particle, which costs nothing, then saves it to ${home(screen.keyFile)}, readable only by you.`,
-				fg: 'faint',
-			},
-		]);
-		if (model.live?.health.model.key === 'env') {
-			about.push(
-				...prose([
-					{
-						t: 'PARTICLE_API_KEY is set where the agent runs and overrides this file while it is.',
-						fg: 'faint',
-					},
-				]),
-			);
-		}
+		const about =
+			model.live?.health.model.key === 'env'
+				? prose([
+						{
+							t: 'PARTICLE_API_KEY is set and overrides the saved key.',
+							fg: 'faint',
+						},
+					])
+				: [];
 		return {
 			title: prose([{ t: TITLE[screen.reason], fg: 'fg', b: true }]),
 			about,
@@ -147,13 +139,6 @@ function indent(segs: Seg[], columns: number): Line {
 	return { segs: columns > 0 ? [{ t: ' '.repeat(columns) }, ...segs] : segs };
 }
 
-function home(path: string): string {
-	const dir = homedir();
-	return dir && path.startsWith(`${dir}/`)
-		? `~${path.slice(dir.length)}`
-		: path;
-}
-
 /** The key as `•`s on a `surface` band across the column; never the key. */
 function inputSegs(screen: KeyScreen, column: number, now: number): Seg[] {
 	const count = Array.from(screen.text).length;
@@ -167,7 +152,7 @@ function inputSegs(screen: KeyScreen, column: number, now: number): Seg[] {
 	const segs: Seg[] = [{ t: '› ', fg: 'accent', bg: 'surface' }];
 	if (count === 0) {
 		segs.push(cursor, {
-			t: 'paste your key here · it stays hidden',
+			t: 'paste your key',
 			fg: 'faint',
 			i: true,
 			bg: 'surface',
@@ -184,7 +169,7 @@ function outcomeSegs(screen: KeyScreen, now: number): Seg[] {
 	if (screen.checking !== null) {
 		return [
 			{ t: `${spinner(now)} `, fg: 'accent' },
-			{ t: 'checking with Particle…', fg: 'faint' },
+			{ t: 'checking…', fg: 'faint' },
 		];
 	}
 	const { error } = screen;
@@ -209,12 +194,7 @@ function hintSegs(screen: KeyScreen, content: number): Seg[] {
 	let pairs: Array<[string, string]> =
 		screen.checking !== null
 			? [esc, ['ctrl-c', 'quit']]
-			: [
-					['enter', 'check and save'],
-					['ctrl-u', 'clear'],
-					esc,
-					['ctrl-c', 'quit'],
-				];
+			: [['enter', 'save'], ['ctrl-u', 'clear'], esc, ['ctrl-c', 'quit']];
 	for (const drop of ['ctrl-u', 'ctrl-c']) {
 		if (width(hint(pairs)) <= content) break;
 		pairs = pairs.filter(([key]) => key !== drop);

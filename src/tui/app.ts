@@ -302,10 +302,7 @@ export class App {
 			return;
 		}
 		if (!looksLikeApiKey(key)) {
-			fail(
-				"That isn't a Particle API key",
-				'they start with pai- · nothing was saved',
-			);
+			fail("That isn't a Particle API key", 'they start with pai-');
 			return;
 		}
 		this.keyAttempts += 1;
@@ -323,13 +320,9 @@ export class App {
 		}
 		screen.checking = null;
 		if (check.result === 'rejected') {
-			fail('Particle rejected this key', 'nothing was saved · paste another');
+			fail('Particle rejected this key', 'paste another');
 		} else if (check.result === 'unchecked') {
-			fail(
-				"Couldn't check the key with Particle",
-				`${check.problem.replaceAll(key, '[redacted]')} · nothing was saved · enter tries again`,
-				true,
-			);
+			fail("Couldn't reach Particle", 'enter tries again', true);
 		} else {
 			const paths = dataPaths();
 			try {
@@ -350,10 +343,8 @@ export class App {
 			const env = this.model.live?.health.model.key === 'env';
 			this.showToast({
 				glyph: '✓',
-				subject: 'Particle accepted the key',
-				detail: env
-					? 'saved · PARTICLE_API_KEY still overrides it'
-					: 'saved · the agent picks it up in a few seconds',
+				subject: 'Saved the key',
+				detail: env ? 'PARTICLE_API_KEY overrides it' : null,
 				ms: TOAST_MS,
 			});
 		}

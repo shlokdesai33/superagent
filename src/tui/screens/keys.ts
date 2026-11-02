@@ -14,7 +14,7 @@ const KEYS: Array<[string, string]> = [
 	],
 	['/  i', 'write · start with @handle to message a task'],
 	['r', 'resume failed tasks, on the health screen'],
-	['p', 'add or replace your Particle API key, on the health screen'],
+	['p', 'add or replace the key, on health'],
 	['h', 'health'],
 	['?', 'this list of keys'],
 	['esc', 'back to home · cancel typing'],
