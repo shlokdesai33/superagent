@@ -1,4 +1,10 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	chmodSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from 'node:fs';
 import { release } from 'node:os';
 import { isAbsolute } from 'node:path';
 import type { DataPaths } from '../home.ts';
@@ -24,7 +30,9 @@ const MACHINE_TOOLS = [
 ];
 
 export function createDataFolder(paths: DataPaths): void {
-	mkdirSync(paths.home, { recursive: true });
+	// Only you can read it: config.json and command logs can hold API keys.
+	mkdirSync(paths.home, { recursive: true, mode: 0o700 });
+	chmodSync(paths.home, 0o700);
 	if (Buffer.byteLength(paths.socket) >= SOCKET_PATH_LIMIT) {
 		throw new StartupError(
 			`The socket path ${paths.socket} is longer than this platform allows (${SOCKET_PATH_LIMIT - 1} bytes). Set SUPERAGENT_HOME to a shorter folder.`,
@@ -102,9 +110,12 @@ export function loadConfig(path: string): Config {
 		const { particleApiKey: _, ...defaults } = DEFAULT_CONFIG;
 		writeFileSync(path, `${JSON.stringify(defaults, null, '\t')}\n`, {
 			flag: 'wx',
+			mode: 0o600,
 		});
 		return DEFAULT_CONFIG;
 	}
+	// It can hold the Particle key.
+	chmodSync(path, 0o600);
 
 	let value: unknown;
 	try {
@@ -180,7 +191,7 @@ export function saveRepos(path: string, repos: Config['repos']): void {
 	const raw: Record<string, unknown> =
 		typeof value === 'object' && value !== null ? { ...value } : {};
 	raw.repos = repos;
-	writeFileSync(path, `${JSON.stringify(raw, null, '\t')}\n`);
+	writeFileSync(path, `${JSON.stringify(raw, null, '\t')}\n`, { mode: 0o600 });
 }
 
 /** Fails when `git` or `bash` is missing, since Workers can't run without them. */

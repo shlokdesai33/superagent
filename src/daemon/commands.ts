@@ -1,6 +1,7 @@
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ingest } from './ingest.ts';
+import { envWithoutSecrets, redact } from './secrets.ts';
 import { type Daemon, type Params, type RunningCommand, cut } from './state.ts';
 import {
 	isWorking,
@@ -54,10 +55,13 @@ export function commandLog(
 	return join(taskFolder(daemon, handle), 'commands', `${stepId}.log`);
 }
 
-/** The daemon's environment, with your login PATH and nothing that waits for a terminal. */
+/**
+ * The daemon's environment without the agent's keys, with your login PATH and
+ * nothing that waits for a terminal.
+ */
 function commandEnv(daemon: Daemon, handle: string): Env {
 	return {
-		...Bun.env,
+		...envWithoutSecrets(daemon.secrets),
 		PATH: daemon.loginPath,
 		LANG: Bun.env.LANG || 'C.UTF-8',
 		TERM: 'dumb',
@@ -258,7 +262,7 @@ function describeResult(
 				: run.exitCode === null
 					? `ended by ${run.signal ?? 'a signal'}`
 					: `exit ${run.exitCode}`;
-	const lines = readLog(commandLog(daemon, handle, stepId));
+	const lines = readLog(daemon, commandLog(daemon, handle, stepId));
 	const header = `step ${stepId} · ${outcome} · ${(run.ms / 1000).toFixed(1)} s · ${lines.length} ${lines.length === 1 ? 'line' : 'lines'} of output`;
 	let body: string[];
 	if (lines.length <= RESULT_HEAD_LINES + RESULT_TAIL_LINES) {
@@ -276,10 +280,11 @@ function describeResult(
 		: text;
 }
 
-function readLog(path: string): string[] {
+/** A command's output with the agent's keys redacted, since a command can print them. */
+function readLog(daemon: Daemon, path: string): string[] {
 	let text: string;
 	try {
-		text = readFileSync(path, 'utf8');
+		text = redact(daemon.secrets, readFileSync(path, 'utf8'));
 	} catch {
 		return [];
 	}
@@ -297,7 +302,7 @@ export function readOutput(
 	from: number,
 	count: number,
 ): { lines: string[]; total: number } {
-	const lines = readLog(commandLog(daemon, handle, stepId));
+	const lines = readLog(daemon, commandLog(daemon, handle, stepId));
 	const start = Math.max(1, from) - 1;
 	return { lines: lines.slice(start, start + count), total: lines.length };
 }

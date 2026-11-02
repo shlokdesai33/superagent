@@ -26,6 +26,7 @@ import {
 	workingTasks,
 } from './task-feed.ts';
 import { endTask } from './tasks.ts';
+import { redact } from './secrets.ts';
 import { WORKER_TOOLS, runWorkerTool } from './worker-tools.ts';
 
 const EFFORT = 'high';
@@ -342,13 +343,15 @@ async function runTools(
 			{ id: task.id, handle: task.handle, workDir: task.workDir },
 			call,
 		);
+		// A file the Worker reads can hold a key; the model never sees it.
+		const result = redact(daemon.secrets, outcome.result);
 		appendItems(db, sessionId, [
-			{ role: 'tool', tool_call_id: call.id, content: outcome.result },
+			{ role: 'tool', tool_call_id: call.id, content: result },
 		]);
 		daemon.log('info', 'worker tool', {
 			task: task.handle,
 			tool: call.function.name,
-			result: cut(outcome.result.split('\n')[0] ?? '', 160),
+			result: cut(result.split('\n')[0] ?? '', 160),
 		});
 		// `ask`, `wait_for` and `finish` end the turn; later calls are answered
 		// so the transcript stays valid.

@@ -8,6 +8,7 @@ import {
 	writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { envWithoutSecrets, redact } from './secrets.ts';
 import type { Daemon } from './state.ts';
 
 const FETCH_TIMEOUT_MS = 60_000;
@@ -19,11 +20,17 @@ const CLEANUP_INTERVAL_MS = 24 * 60 * 60_000;
 
 export type GitResult = { code: number; stdout: string; stderr: string };
 
-/** The daemon's environment, with your login PATH and no credential prompts. */
-function gitEnv(daemon: Daemon | null): Record<string, string | undefined> {
+/**
+ * The daemon's environment without the agent's keys, since a repository's
+ * hooks and config run with it. With your login PATH and no credential prompts.
+ */
+function gitEnv(
+	loginPath: string,
+	secrets: string[],
+): Record<string, string | undefined> {
 	return {
-		...Bun.env,
-		PATH: daemon?.loginPath ?? Bun.env.PATH ?? '/usr/bin:/bin',
+		...envWithoutSecrets(secrets),
+		PATH: loginPath,
 		GIT_TERMINAL_PROMPT: '0',
 	};
 }
@@ -40,7 +47,7 @@ export async function git(
 ): Promise<GitResult> {
 	const child = Bun.spawn(['git', ...args], {
 		cwd: options.cwd ?? daemon.paths.home,
-		env: { ...gitEnv(daemon), ...options.env },
+		env: { ...gitEnv(daemon.loginPath, daemon.secrets), ...options.env },
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'pipe',
@@ -59,10 +66,10 @@ function firstLine(text: string): string {
 }
 
 /** The top of the git repository containing `dir`, or `null`. */
-export function repositoryRoot(dir: string): string | null {
+export function repositoryRoot(dir: string, secrets: string[]): string | null {
 	const result = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
 		cwd: dir,
-		env: gitEnv(null),
+		env: gitEnv(Bun.env.PATH ?? '/usr/bin:/bin', secrets),
 		stdin: 'ignore',
 		stdout: 'pipe',
 		stderr: 'ignore',
@@ -260,8 +267,10 @@ export async function editDiff(
 				.replace(/^--- a\/before$/, `--- a/${path}`)
 				.replace(/^\+\+\+ b\/after$/, `+++ b/${path}`),
 		);
-		const diff = [...header, ...(body === -1 ? [] : lines.slice(body))].join(
-			'\n',
+		// The diff is shown in the TUI, and an edited file can hold a key.
+		const diff = redact(
+			daemon.secrets,
+			[...header, ...(body === -1 ? [] : lines.slice(body))].join('\n'),
 		);
 		return {
 			additions: counts?.[1] && counts[1] !== '-' ? Number(counts[1]) : null,

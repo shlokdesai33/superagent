@@ -24,6 +24,8 @@ export type Daemon = {
 	feed: Feed;
 	log: Log;
 	config: Config;
+	/** The agent's own keys, kept out of commands, the model, the feed and the log. */
+	secrets: string[];
 	agent: Snapshot['agent'];
 	machine: MachineFacts;
 	/** The last event time of each channel, for health. */

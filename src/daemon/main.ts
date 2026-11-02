@@ -10,6 +10,7 @@ import { createLog } from './log.ts';
 import { NO_API_KEY, createModelClient } from './model.ts';
 import { type RouterLoop, recoverRouter, startRouter } from './router.ts';
 import { recoverCommands, captureLoginPath } from './commands.ts';
+import { agentSecrets } from './secrets.ts';
 import { listen } from './server.ts';
 import {
 	createDataFolder,
@@ -73,9 +74,10 @@ export async function runDaemon(options: {
 		});
 		db = openDatabase(paths.db);
 		const config = loadConfig(paths.config);
+		const secrets = agentSecrets(config);
 		// First run inside a repository: use it.
 		if (config.repos.length === 0) {
-			const top = repositoryRoot(process.cwd());
+			const top = repositoryRoot(process.cwd(), secrets);
 			if (top !== null) {
 				config.repos = [{ name: repositoryName(top), path: top }];
 				saveRepos(paths.config, config.repos);
@@ -112,6 +114,7 @@ export async function runDaemon(options: {
 			feed: createFeed(() => buildSnapshot(context), log),
 			log,
 			config,
+			secrets,
 			agent: {
 				id: agentId,
 				version: packageJson.version,

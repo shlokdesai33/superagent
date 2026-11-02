@@ -31,7 +31,7 @@ bun src/cli.ts status --json  # the raw feed snapshot
 
 The terminal UI connects to the daemon for the same data folder and reconnects by itself when it isn't running. It picks a light or dark theme from the terminal's background; press `?` for its keys.
 
-The daemon keeps everything in one data folder, `~/.superagent` unless `SUPERAGENT_HOME` is set: `config.json`, the socket `agent.sock`, the lock `daemon.pid`, the SQLite state `state.db` and `daemon.log`. Clients talk HTTP over the socket, sending `Superagent-Protocol: 1`:
+The daemon keeps everything in one data folder that only you can read, `~/.superagent` unless `SUPERAGENT_HOME` is set: `config.json` (mode `0600`), the socket `agent.sock`, the lock `daemon.pid`, the SQLite state `state.db` and `daemon.log`. Clients talk HTTP over the socket, sending `Superagent-Protocol: 1`:
 
 ```sh
 curl -N --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
@@ -43,7 +43,7 @@ curl -N --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
 `superagent daemon --script-channel` turns on `POST /v1/events`, which injects a message on a test channel, `script`, the same way GitHub and Slack will arrive. It's for tests and development:
 
 ```sh
-curl --unix-socket ~/.superagent/agent.sock -H "Authorization: Bearer $(cat ~/.superagent/token)" -H 'Superagent-Protocol: 1' \
+curl --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
   http://superagent/v1/events -d '{"externalId":"evt-17","thread":{"key":"support/77","title":"#support","url":null},
   "author":{"id":"u-bob","name":"bob","isBot":false},"text":"@superagent export is broken","mentionsAgent":true}'
 ```
@@ -58,7 +58,7 @@ The agent runs on Particle's `particle-1` model, the only model it will ever sup
 
 Console messages go to the Router, one persistent model session that decides what to do and answers through a `reply` tool (at most 100 words in the console). Messages that arrive while it's deciding join the same batch. Its state is on the feed as `router` lines, every model call is recorded in `model_calls` with usage and an estimated cost, and Particle errors show in the model's health: account errors pause the Router (retried every 2 minutes), other errors back off from 30 seconds to 10 minutes. ## Tasks
 
-Real work goes to tasks. The Router starts one with `start_task`, which gives it a four-character handle such as `t97c` and a Worker: a model session with shell and file tools that works in `tasks/<handle>/work` inside the data folder. A command runs with bash in that folder, in its own process group, with the daemon's environment and your login shell's `PATH`. After 30 seconds it keeps running in the background and the Worker hears when it ends. At most `maxWorkingTasks` tasks (default 4) work at once, and at most 5 Worker model calls run at once, so one is always left for the Router.
+Real work goes to tasks. The Router starts one with `start_task`, which gives it a four-character handle such as `t97c` and a Worker: a model session with shell and file tools that works in `tasks/<handle>/work` inside the data folder. A command runs with bash in that folder, in its own process group, with the daemon's environment minus the agent's own keys, and your login shell's `PATH`. If a command's output, a file the Worker reads or an edit's diff contains the Particle key, it shows as `[redacted]` to the Worker, the TUI and the log. After 30 seconds it keeps running in the background and the Worker hears when it ends. At most `maxWorkingTasks` tasks (default 4) work at once, and at most 5 Worker model calls run at once, so one is always left for the Router.
 
 Tasks in a repository work in their own git worktree, `worktrees/<repo>/<handle>` in the data folder, on a branch `superagent/<handle>` from `origin/<default branch>` (or the repository's `HEAD` when there's no origin or the fetch fails). Repositories are listed in `config.json` as `{ "name", "path" }`; when the list is empty and you start `superagent daemon` inside a repository, that one is added. Edits show as steps with a diff and `+N −M` counts. Worktrees of tasks that ended over 7 days ago are removed at startup and daily (their branches stay), and command logs older than 30 days are deleted.
 
