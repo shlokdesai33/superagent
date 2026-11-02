@@ -560,8 +560,7 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 			'enter',
 			selected.task.status === 'needs_you' ? 'answer' : 'open',
 		]);
-	} else if (selected?.kind === 'observed')
-		pairs.push(['a/x', 'act or ignore']);
+	}
 	pairs.push(['/', 'write']);
 	if (selected?.kind === 'task' && stoppable(selected.task))
 		pairs.push(['s s', selected.task.status === 'failed' ? 'dismiss' : 'stop']);

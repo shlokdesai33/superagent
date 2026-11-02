@@ -20,8 +20,6 @@ const ACTION_TYPES: ReadonlySet<string> = new Set<Action['type']>([
 	'answer_question',
 	'stop_task',
 	'resume_tasks',
-	'act_observed',
-	'ignore_observed',
 ]);
 
 export type ActionOutcome =
@@ -138,10 +136,6 @@ export async function runAction(
 			result = resumeTasks(daemon, handles);
 			break;
 		}
-		case 'act_observed':
-		case 'ignore_observed':
-			result = notAvailable("observe mode isn't built");
-			break;
 	}
 	daemon.actionResults.set(requestId, { at: now, result });
 	return { ok: true, result };
@@ -371,15 +365,6 @@ function unknownTask(handle: string): ActionResult {
 
 function clock(at: number): string {
 	return new Date(at).toTimeString().slice(0, 5);
-}
-
-function notAvailable(detail: string): ActionResult {
-	return {
-		ok: false,
-		code: 'not_available',
-		subject: 'Not available yet',
-		detail,
-	};
 }
 
 function isActionType(type: string): type is Action['type'] {

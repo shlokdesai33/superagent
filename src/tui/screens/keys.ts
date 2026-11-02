@@ -8,7 +8,6 @@ const KEYS: Array<[string, string]> = [
 		'answer the selected question · open a task · open health for a problem',
 	],
 	['o', 'open the selected task'],
-	['a  x', 'act on or ignore an observed match'],
 	[
 		's s',
 		'stop the selected task; the first press asks, any other key cancels',

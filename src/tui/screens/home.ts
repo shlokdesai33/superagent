@@ -1,9 +1,4 @@
-import type {
-	Message,
-	Observed,
-	Problem,
-	TaskSummary,
-} from '../../protocol.ts';
+import type { Message, Problem, TaskSummary } from '../../protocol.ts';
 import {
 	type Line,
 	type Seg,
@@ -119,20 +114,6 @@ export function homeBody(
 			);
 		});
 		if (all.working.some((task) => task.status === 'working')) animating = true;
-	}
-
-	if (all.observed.length > 0) {
-		section(() => {
-			lines.push(
-				label(
-					'OBSERVED',
-					all.observed.length,
-					`would have acted · proactive mode is ${live.health.proactive}`,
-				),
-			);
-			for (const observed of all.observed)
-				lines.push(observedRow(observed, ctx));
-		});
 	}
 
 	if (all.done.length > 0 || leaving('done').length > 0) {
@@ -395,31 +376,6 @@ function sparkline(task: TaskSummary, now: number): Seg[] {
 		)
 		.join('');
 	return [{ t: bars, fg: (values[7] ?? 0) > 0 ? 'accent' : 'ghost' }];
-}
-
-function observedRow(observed: Observed, ctx: Context): Line {
-	const key = `observed:${observed.id}`;
-	const selected = ctx.ui.selected === key;
-	return row(
-		key,
-		ctx,
-		[
-			{ t: '◇ ', fg: 'faint' },
-			handleSeg(`o${observed.id}`, selected),
-			{ t: `"${oneLine(observed.summary)}"`, fg: 'fg', b: selected },
-			{ t: `  ${observed.source}`, fg: 'faint' },
-			{ t: ' · ', fg: 'ghost' },
-			{ t: `rule ${observed.rule}`, fg: 'faint' },
-		],
-		selected
-			? bracketed([
-					['a', 'act'],
-					['x', 'ignore'],
-				])
-			: undefined,
-		undefined,
-		false,
-	);
 }
 
 function doneRow(
