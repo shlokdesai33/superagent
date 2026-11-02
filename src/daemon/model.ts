@@ -30,8 +30,7 @@ const PROBE_MS = watchdogMs(2 * 60_000);
 
 export const NO_API_KEY = 'No Particle API key: paste one in superagent';
 /** What fixes a key Particle rejected. */
-const REJECTED_KEY_FIX =
-	'press p on health to paste a new key, or run superagent login particle';
+const REJECTED_KEY_FIX = 'paste a new key: ctrl-k on health';
 /** How often every loop tries Particle again after an account failure; shorter in tests. */
 export const ACCOUNT_RETRY_MS =
 	Number(Bun.env.SUPERAGENT_PARTICLE_RETRY_MS) || 2 * 60_000;
@@ -438,7 +437,7 @@ function accountFix(error: unknown): string {
 		return 'add credit on the Billing page at https://platform.particle.ai';
 	}
 	if (status === 403) {
-		return 'create a key that can use chat completions at https://platform.particle.ai, then press p on health to paste it, or run superagent login particle';
+		return 'create a key that can use chat completions at https://platform.particle.ai, then paste it: ctrl-k on health';
 	}
 	return REJECTED_KEY_FIX;
 }

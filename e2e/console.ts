@@ -321,7 +321,7 @@ try {
 		'403 says the key may not use chat completions',
 		noScope?.text ===
 			"Particle's API key isn't allowed to use chat completions" &&
-			noScope.fix?.includes('superagent login particle') === true,
+			noScope.fix?.includes('ctrl-k on health') === true,
 		noScope?.text,
 	);
 	from = agent.lines.length;
@@ -339,7 +339,7 @@ try {
 	check(
 		'401 says the key was rejected and how to fix it',
 		rejected?.text === 'Particle rejected the API key' &&
-			rejected.fix?.includes('superagent login particle') === true,
+			rejected.fix?.includes('ctrl-k on health') === true,
 		rejected?.text,
 	);
 	await held(from, 'Particle rejected the API key');

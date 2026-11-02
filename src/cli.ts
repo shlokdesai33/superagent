@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { closeSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import packageJson from '../package.json' with { type: 'json' };
 import {
 	type StartResult,
@@ -12,14 +12,7 @@ import { DaemonUnreachable, NOT_RUNNING } from './client.ts';
 import { runDaemon } from './daemon/main.ts';
 import { StartupError } from './daemon/setup.ts';
 import { BACKGROUND_ENV, dataPaths } from './home.ts';
-import { writeKeyFile } from './keys.ts';
-import {
-	API_KEY_ENV,
-	checkApiKey,
-	looksLikeApiKey,
-} from './particle/client.ts';
 import type { Snapshot } from './protocol.ts';
-import { Cancelled, readSecret } from './read-secret.ts';
 import { formatStatus } from './status.ts';
 import { runTui } from './tui/main.ts';
 
@@ -32,7 +25,6 @@ Commands:
   restart         Restart the agent
   status          Print the agent's status
   logs            Print the agent's log
-  login particle  Save your Particle API key
   daemon          Run the agent in this terminal (for debugging)
 
 Options:
@@ -101,13 +93,6 @@ async function main(): Promise<void> {
 			else await logs(rest.length > 0);
 			break;
 		}
-		// Never echo the arguments: one may be a key typed in by mistake.
-		case 'login':
-			if (rest[0] !== 'particle') fail('Usage: superagent login particle');
-			else if (rest.length > 1) {
-				fail('superagent login particle takes no arguments');
-			} else await loginParticle();
-			break;
 		case 'daemon': {
 			const unexpected = rest.find((arg) => arg !== '--script-channel');
 			if (unexpected !== undefined) fail(`Unexpected argument: ${unexpected}`);
@@ -290,46 +275,6 @@ function readableLogLine(line: string): string {
 		.map(([key, value]) => ` ${key}=${JSON.stringify(value)}`)
 		.join('');
 	return `${stamp} ${String(level).padEnd(5)} ${String(message)}${details}`;
-}
-
-async function loginParticle(): Promise<void> {
-	let key: string;
-	try {
-		key = await readSecret('Particle API key (input hidden): ');
-	} catch (error) {
-		if (!(error instanceof Cancelled)) throw error;
-		process.exitCode = 130;
-		return;
-	}
-	if (!looksLikeApiKey(key)) {
-		console.error(
-			key === ''
-				? 'No key given.'
-				: "That isn't a Particle API key (they start with pai-).",
-		);
-		process.exitCode = 1;
-		return;
-	}
-	const baseUrl = Bun.env.PARTICLE_BASE_URL;
-	const check = await checkApiKey(
-		baseUrl ? { apiKey: key, baseUrl } : { apiKey: key },
-	);
-	if (check.result === 'rejected') {
-		console.error('Particle rejected this key.');
-		process.exitCode = 1;
-		return;
-	}
-	const paths = dataPaths();
-	mkdirSync(paths.home, { recursive: true, mode: 0o700 });
-	writeKeyFile(paths.particleKey, key);
-	console.log(
-		check.result === 'valid'
-			? 'Saved the key.'
-			: `Couldn't check the key with Particle (${check.problem}). Saved it anyway.`,
-	);
-	if (Bun.env[API_KEY_ENV]) {
-		console.log(`${API_KEY_ENV} is set here and overrides the saved key.`);
-	}
 }
 
 function fail(message: string): void {

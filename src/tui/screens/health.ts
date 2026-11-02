@@ -17,7 +17,7 @@ const BAR = 32;
 const KEY: Record<Health['model']['key'], string | null> = {
 	env: 'from PARTICLE_API_KEY',
 	file: null,
-	missing: 'missing · press p to add one',
+	missing: 'missing · ctrl-k to add one',
 };
 
 export function healthBody(live: Live, content: number, now: number): Line[] {

@@ -35,7 +35,7 @@ cd ~/code/webapp
 superagent
 ```
 
-The first time, it asks for your Particle API key. Paste it and press `enter`. `esc` skips it for now; `ctrl-t` then `ctrl-k` brings the screen back to add or replace the key.
+The first time, it asks for your Particle API key. Paste it and press `enter`. `esc` skips it for now; `ctrl-t` then `ctrl-k` brings the screen back to add or replace the key. You can also set `PARTICLE_API_KEY` before starting it.
 
 ## Using it
 
@@ -81,16 +81,15 @@ The first time, it asks for your Particle API key. Paste it and press `enter`. `
 
 The work happens in a background agent that `superagent` starts when it isn't running. Quitting the UI leaves it running, tasks and all. It doesn't start at login: after a reboot, run `superagent` again and the tasks carry on.
 
-| Command                     | What it does                                        |
-| --------------------------- | --------------------------------------------------- |
-| `superagent`                | Open the UI, starting the agent if needed           |
-| `superagent start`          | Start the agent                                     |
-| `superagent stop`           | Stop it; working tasks resume on the next start     |
-| `superagent restart`        | Stop it and start it again                          |
-| `superagent status`         | Its tasks and health; `--json` for the raw snapshot |
-| `superagent logs`           | Its log; `-f` keeps printing new lines              |
-| `superagent login particle` | Save your Particle API key from the command line    |
-| `superagent daemon`         | Run the agent in this terminal, for debugging       |
+| Command              | What it does                                        |
+| -------------------- | --------------------------------------------------- |
+| `superagent`         | Open the UI, starting the agent if needed           |
+| `superagent start`   | Start the agent                                     |
+| `superagent stop`    | Stop it; working tasks resume on the next start     |
+| `superagent restart` | Stop it and start it again                          |
+| `superagent status`  | Its tasks and health; `--json` for the raw snapshot |
+| `superagent logs`    | Its log; `-f` keeps printing new lines              |
+| `superagent daemon`  | Run the agent in this terminal, for debugging       |
 
 ## Updating
 
