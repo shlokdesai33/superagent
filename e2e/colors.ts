@@ -1,7 +1,9 @@
 // End to end: on a terminal without 24-bit colour (Terminal.app before
 // macOS 26), the UI draws with the xterm 256 palette only. The selected NEEDS
 // YOU row and the input band while typing use the theme's 256-colour roles,
-// and every word on screen reads at 4.5:1 or better, in both themes. Run with
+// and every word on screen reads at 4.5:1 or better, in both themes. Console
+// messages are one colour on every line, wrapped ones too, at both depths;
+// truecolor sent to that Terminal.app turned first lines faint. Run with
 // `bun run e2e`; it exits non-zero if a check fails.
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,15 +20,28 @@ import {
 } from '../src/tui/theme.ts';
 import { startFakeParticle } from './fake-particle.ts';
 import { startAgent } from './harness.ts';
+import {
+	COLUMNS,
+	contrast,
+	find,
+	findIn,
+	replay,
+	replayOldTerminal,
+	text,
+} from './screen.ts';
 import { type Tui, openTui } from './tui.ts';
 
 type TaskLine = Extract<FeedLine, { type: 'task' }>;
+type MessageLine = Extract<FeedLine, { type: 'message' }>;
 
 const TITLE = 'Settle the flaky login retries';
 const QUESTION = 'Retry the login step 2 or 3 times?';
 const TYPED = 'three attempts';
-const COLUMNS = 100;
-const ROWS = 30;
+const SHORT_REPLY = 'Started a task for the retries.';
+// Wraps: the console's text column is 92 wide at 100 columns.
+const LONG_REPLY =
+	'The login test fails about one run in twenty because the session cookie is read before the redirect lands, so it keeps going.';
+const LONG_TAIL = 'so it keeps going.';
 // Words, not lines: `ghost` is never used for text (tui-design.md §5).
 const WORD_ROLES: Role[] = [
 	'fg',
@@ -45,6 +60,11 @@ const particle = startFakeParticle((request) => {
 			? { calls: [{ name: 'wait_for', args: { what: 'an answer' } }] }
 			: { calls: [{ name: 'ask', args: { question: QUESTION } }] };
 	}
+	const replies = [...request.fresh.matchAll(/\(C(\d)\)/g)].map(([, id]) => ({
+		name: 'reply',
+		args: { thread: 'console', text: id === '1' ? SHORT_REPLY : LONG_REPLY },
+	}));
+	if (replies.length > 0) return { calls: replies };
 	if (request.fresh.includes('(ASK)')) {
 		return {
 			calls: [
@@ -71,119 +91,6 @@ function check(name: string, ok: boolean, detail = ''): void {
 	);
 }
 
-function luminance(rgb: Rgb): number {
-	const [r, g, b] = rgb.map((value) => {
-		const s = value / 255;
-		return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-	});
-	return 0.2126 * (r ?? 0) + 0.7152 * (g ?? 0) + 0.0722 * (b ?? 0);
-}
-
-function contrast(a: Rgb, b: Rgb): number {
-	const [hi, lo] = [luminance(a), luminance(b)].toSorted((x, y) => y - x);
-	return ((hi ?? 0) + 0.05) / ((lo ?? 0) + 0.05);
-}
-
-type ScreenCell = {
-	ch: string;
-	fg: number | null;
-	bg: number | null;
-	bold: boolean;
-	italic: boolean;
-};
-
-type Screen = {
-	cells: ScreenCell[][];
-	/** SGR parameters that aren't a reset, bold, italic, underline or a 256-colour index. */
-	foreign: Set<string>;
-};
-
-function empty(): ScreenCell {
-	return { ch: ' ', fg: null, bg: null, bold: false, italic: false };
-}
-
-/** Replays the output on a grid, as a terminal that only reads `38;5;n` would. */
-function replay(raw: string): Screen {
-	const cells = Array.from({ length: ROWS }, () =>
-		Array.from({ length: COLUMNS }, empty),
-	);
-	const foreign = new Set<string>();
-	let row = 0;
-	let column = 0;
-	let pen = empty();
-	let i = 0;
-	while (i < raw.length) {
-		const ch = raw[i] ?? '';
-		if (ch === '\x1b' && raw[i + 1] === '[') {
-			let end = i + 2;
-			while (end < raw.length && !/[@-~]/.test(raw[end] ?? '')) end += 1;
-			const params = raw.slice(i + 2, end);
-			const final = raw[end];
-			i = end + 1;
-			if (final === 'H') {
-				const [y = '1', x = '1'] = params.split(';');
-				row = Number(y) - 1;
-				column = Number(x) - 1;
-			} else if (final === 'J') {
-				for (const line of cells) line.fill(empty());
-			} else if (final === 'm' && !params.startsWith('?')) {
-				const codes = params === '' ? ['0'] : params.split(';');
-				for (let k = 0; k < codes.length; k += 1) {
-					const code = codes[k];
-					if (code === '0') pen = empty();
-					else if (code === '1') pen = { ...pen, bold: true };
-					else if (code === '3') pen = { ...pen, italic: true };
-					else if (code === '4') continue;
-					else if ((code === '38' || code === '48') && codes[k + 1] === '5') {
-						const index = Number(codes[k + 2]);
-						if (!(index >= 16 && index <= 255))
-							foreign.add(`${code};5;${index}`);
-						pen = code === '38' ? { ...pen, fg: index } : { ...pen, bg: index };
-						k += 2;
-					} else {
-						foreign.add(codes.slice(k, k + 2).join(';'));
-					}
-				}
-			}
-			continue;
-		}
-		if (ch === '\x1b' && raw[i + 1] === ']') {
-			const bel = raw.indexOf('\x07', i);
-			const st = raw.indexOf('\x1b\\', i);
-			if (st !== -1 && (bel === -1 || st < bel)) i = st + 2;
-			else i = bel === -1 ? raw.length : bel + 1;
-			continue;
-		}
-		if (ch === '\x1b') {
-			i += 2;
-			continue;
-		}
-		const point = String.fromCodePoint(raw.codePointAt(i) ?? 32);
-		i += point.length;
-		if (point < ' ') continue;
-		const line = cells[row];
-		if (line && column < COLUMNS) line[column] = { ...pen, ch: point };
-		column += 1;
-	}
-	return { cells, foreign };
-}
-
-function text(line: ScreenCell[]): string {
-	return line.map((cell) => cell.ch).join('');
-}
-
-/** The cells of `word` in the first row that has it. */
-function find(
-	screen: Screen,
-	word: string,
-): { row: ScreenCell[]; cells: ScreenCell[] } | null {
-	for (const row of screen.cells) {
-		const at = text(row).indexOf(word);
-		if (at !== -1) return { row, cells: row.slice(at, at + word.length) };
-	}
-	return null;
-}
-
 const agent = await startAgent(particle.url);
 const outside = mkdtempSync(join(tmpdir(), 'sa-colors-'));
 const settle = () => Bun.sleep(900);
@@ -197,6 +104,76 @@ const appleTerminal = (theme: ThemeName, version = '455.1') => ({
 	// Nothing answers OSC 11 in the test's pseudo-terminal, so this picks the theme.
 	COLORFGBG: theme === 'light' ? '0;15' : '15;0',
 });
+
+function same(a: Rgb | null, b: Rgb): boolean {
+	return a !== null && a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+}
+
+/**
+ * Every console message's text, first and wrapped lines alike, is plain `fg`;
+ * only the author column is styled (`you` accent, others `dim`). At 256
+ * colours, Terminal.app before macOS 26 shows it the same, never faint.
+ */
+async function consoleChecks(name: ThemeName, version: string): Promise<void> {
+	const env = appleTerminal(name, version);
+	const depth = colorDepth(env);
+	const theme = THEMES[depth][name];
+	const tui = await openTui(agent.home, outside, env);
+	try {
+		await tui.waitFor(LONG_TAIL);
+		await settle();
+		const raw = tui.raw();
+		const screen = replay(raw);
+		const words = [
+			'one more (C1)',
+			SHORT_REPLY,
+			LONG_REPLY.slice(0, 30),
+			LONG_TAIL,
+		];
+		const textCells = words.map((word) => findIn(screen.cells, word));
+		const tailRow = find(screen, LONG_TAIL)?.row ?? [];
+		check(
+			`${depth} ${name}: console text is plain fg on every line, wrapped lines too`,
+			textCells.every(
+				(cells, index) =>
+					cells.length === words[index]?.length &&
+					cells.every(
+						(cell) => same(cell.fgRgb, theme.fg) && !cell.bold && !cell.italic,
+					),
+			) && text(tailRow).startsWith(' '.repeat(7)),
+			textCells
+				.map((cells) =>
+					[...new Set(cells.map((cell) => cell.fgRgb?.join(',')))].join('/'),
+				)
+				.join(' · '),
+		);
+		const labels = screen.cells
+			.filter((row) => text(row).startsWith('agent  '))
+			.map((row) => row.slice(0, 5));
+		check(
+			`${depth} ${name}: only the author column differs: agent in dim`,
+			labels.length === 2 &&
+				labels.every((cells) =>
+					cells.every((cell) => same(cell.fgRgb, theme.dim)),
+				),
+		);
+		if (depth === '256') {
+			const old = replayOldTerminal(raw);
+			const fg = String(nearest256(theme.fg));
+			const oldCells = words.map((word) => findIn(old, word));
+			check(
+				`${depth} ${name}: as Terminal.app before macOS 26 reads it, no console line is faint`,
+				oldCells.every(
+					(cells, index) =>
+						cells.length === words[index]?.length &&
+						cells.every((cell) => !cell.faint && cell.fg === fg),
+				),
+			);
+		}
+	} finally {
+		await tui.quit();
+	}
+}
 
 async function themeChecks(name: ThemeName, handle: string): Promise<void> {
 	const theme = THEMES['256'][name];
@@ -355,6 +332,27 @@ try {
 
 	await themeChecks('dark', handle);
 	await themeChecks('light', handle);
+
+	for (const id of [1, 2]) {
+		const from = agent.lines.length;
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		await agent.action({ type: 'send_console', text: `one more (C${id})` });
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		await agent.waitFor(
+			`the Router's reply to (C${id})`,
+			(line): line is MessageLine =>
+				agent.lines.indexOf(line) >= from &&
+				line.type === 'message' &&
+				line.message.threadId === 'console' &&
+				line.message.author !== 'you',
+		);
+	}
+	for (const version of ['455.1', '470']) {
+		for (const name of ['dark', 'light'] as const) {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			await consoleChecks(name, version);
+		}
+	}
 
 	const modern = await openTui(
 		agent.home,
