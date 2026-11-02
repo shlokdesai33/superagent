@@ -7,7 +7,7 @@ const KEYS: Array<[string, string]> = [
 		'enter',
 		'answer the selected question · open a task · open health for a problem',
 	],
-	['o', 'open the selected task'],
+	['o', 'open the selected task · in a task, its PR or issue in your browser'],
 	[
 		's s',
 		'stop the selected task; the first press asks, any other key cancels',

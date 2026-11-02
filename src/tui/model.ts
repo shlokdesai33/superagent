@@ -277,6 +277,20 @@ export function needsCount(live: Live): number {
 }
 
 /** Tasks the `s s` key can stop; on a failed task it dismisses. */
+/** What `o` opens in a task view: its PR, else the last thread it follows with a link. */
+export function linkOf(
+	task: TaskSummary,
+): { title: string; url: string } | null {
+	const linked = task.threads.flatMap((thread) =>
+		thread.url === null ? [] : [{ title: thread.title, url: thread.url }],
+	);
+	return (
+		linked.findLast((thread) => thread.url.includes('/pull/')) ??
+		linked.at(-1) ??
+		null
+	);
+}
+
 export function stoppable(task: TaskSummary): boolean {
 	return (
 		task.status === 'working' ||

@@ -79,7 +79,7 @@ const github = startFakeGitHub({
 // The fake models: a Router that starts the task each console message asks
 // for, and Workers that finish, wait on an issue until it's closed, or print
 // what a leak would show and finish.
-const kinds = new Map<string, 'off' | 'leak' | 'issue'>();
+const kinds = new Map<string, 'off' | 'leak' | 'issue' | 'watch'>();
 let issueHandle: string | null = null;
 const particle = startFakeParticle((request) => {
 	if (request.session === 'compaction') return { content: 'Summary.' };
@@ -117,6 +117,72 @@ const particle = startFakeParticle((request) => {
 			request.results.some((r) => r.includes('in app on'))
 		) {
 			issueHandle = started;
+		}
+		// After a crash, a real Router doesn't repeat replies it already sent.
+		if (request.fresh.includes('An earlier attempt to decide these')) {
+			return { content: 'Already handled.' };
+		}
+		const replyTo = request.fresh.match(/REPLYTO(\d*) (\d+) (.+)/);
+		if (replyTo?.[2] && replyTo[3]) {
+			return {
+				calls: [
+					{
+						name: 'reply',
+						args: {
+							thread: `github:acme/app#${replyTo[1] || '7'}`,
+							text: replyTo[3],
+							reply_to: Number(replyTo[2]),
+						},
+					},
+				],
+			};
+		}
+		if (request.fresh.includes('PR12 take over')) {
+			return {
+				calls: [
+					{
+						name: 'start_task',
+						args: {
+							title: 'Review PR 12',
+							instructions: 'WATCH-TASK: follow acme/app#12.',
+							threads: ['github:acme/app#12'],
+						},
+					},
+				],
+			};
+		}
+		if (request.fresh.includes('READ8')) {
+			return {
+				calls: [{ name: 'read_thread', args: { id: 'github:acme/app#8' } }],
+			};
+		}
+		if (request.fresh.includes('REPLYLONG')) {
+			return {
+				calls: [
+					{
+						name: 'reply',
+						args: {
+							thread: 'github:acme/app#7',
+							text: Array.from({ length: 301 }, () => 'word').join(' '),
+						},
+					},
+				],
+			};
+		}
+		const replyOn = request.fresh.match(/REPLY(\d+) (.+)/);
+		if (replyOn?.[1] && replyOn[2]) {
+			return {
+				calls: [
+					{
+						name: 'reply',
+						args: {
+							thread: `github:acme/app#${replyOn[1]}`,
+							text: replyOn[2],
+							...(issueHandle ? { task: issueHandle } : {}),
+						},
+					},
+				],
+			};
 		}
 		if (request.fresh.includes('ISSUE fix')) {
 			return {
@@ -173,16 +239,31 @@ const particle = startFakeParticle((request) => {
 				? 'leak'
 				: request.fresh.includes('ISSUE-TASK')
 					? 'issue'
-					: 'off',
+					: request.fresh.includes('WATCH-TASK')
+						? 'watch'
+						: 'off',
 		);
 	}
-	if (
-		kinds.get(handle) === 'issue' &&
-		!request.fresh.includes('was closed by')
-	) {
+	if (kinds.get(handle) === 'issue') {
+		// Finishes when the issue closes or its PR merges; finishing while the
+		// PR is open is refused, and then it waits.
+		const refused = request.results.some((result) =>
+			result.includes('is still open'),
+		);
+		const ending =
+			request.fresh.includes('was merged') ||
+			request.fresh.includes('was closed by');
+		if (refused || !ending) {
+			return {
+				content: 'Waiting.',
+				calls: [{ name: 'wait_for', args: { what: 'the issue and its PR' } }],
+			};
+		}
+	}
+	if (kinds.get(handle) === 'watch') {
 		return {
-			content: 'Waiting on the issue.',
-			calls: [{ name: 'wait_for', args: { what: 'the issue' } }],
+			content: 'Watching the PR.',
+			calls: [{ name: 'wait_for', args: { what: 'the PR' } }],
 		};
 	}
 	if (kinds.get(handle) === 'leak' && !request.called.includes('run')) {
@@ -261,6 +342,30 @@ const githubIs = async (
 	);
 	if (found === null) throw new Error(`no health line for ${what}`);
 	return found;
+};
+
+type ThreadDetail = {
+	messages: Array<{
+		direction: string;
+		text: string;
+		delivery: string;
+	}>;
+};
+
+// The daemon is trusted to send the shape it promises.
+function isThreadDetail(value: unknown): value is ThreadDetail {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'messages' in value &&
+		Array.isArray(value.messages)
+	);
+}
+
+const threadDetail = async (id: string): Promise<ThreadDetail> => {
+	const detail = await agent.get(`/v1/threads/${encodeURIComponent(id)}`);
+	if (!isThreadDetail(detail)) throw new Error(`not a thread: ${id}`);
+	return detail;
 };
 
 const githubProblems = (value: Health) =>
@@ -460,10 +565,10 @@ try {
 			first.fresh.includes('EARLY-COMMENT') &&
 			first.fresh.includes('labels: bug'),
 	);
-	const detail = await agent.get(`/v1/tasks/${handle}`);
+	const taskDetail = await agent.get(`/v1/tasks/${handle}`);
 	check(
 		"the task works in the issue's repository",
-		JSON.stringify(detail).includes('"branch":"superagent/'),
+		JSON.stringify(taskDetail).includes('"branch":"superagent/'),
 	);
 	await agent.until(
 		'polling of #7',
@@ -524,6 +629,126 @@ try {
 		threadRead?.split('\n')[2] ?? 'no read_thread',
 	);
 
+	// 3. Replies out: signed, marked, delivered, and recognized when they come back.
+	const commentsWith = (n: number, text: string) =>
+		github
+			.comments('acme/app', n)
+			.filter((comment) => comment.body.includes(text));
+	const postsWith = (n: number, text: string) =>
+		github.requests.filter(
+			(request) =>
+				request.method === 'POST' &&
+				request.path === `/repos/acme/app/issues/${n}/comments` &&
+				request.body.includes(text),
+		);
+	const delivery = async (n: number, text: string) => {
+		const found = await agent.until(
+			`the reply ${text} to settle`,
+			async () => threadDetail(`github:acme/app#${n}`),
+			(detail) =>
+				detail.messages.some(
+					(message) =>
+						message.direction === 'out' &&
+						message.text.includes(text) &&
+						message.delivery !== 'pending',
+				),
+		);
+		return found.messages.find((message) => message.text.includes(text))
+			?.delivery;
+	};
+	await agent.action({
+		type: 'send_console',
+		text: 'REPLY7 R1 Working on it.',
+	});
+	check(
+		'a Router reply on GitHub is delivered',
+		(await delivery(7, 'R1 Working on it.')) === 'delivered',
+	);
+	const r1 = commentsWith(7, 'R1 Working on it.');
+	check(
+		'it is posted once, signed, with the hidden marker',
+		r1.length === 1 &&
+			(r1[0]?.body ?? '').includes(
+				`<sub>Posted by superagent for @shlok · task ${handle}</sub>`,
+			) &&
+			/<!-- superagent m\d+ -->$/.test(r1[0]?.body ?? ''),
+		r1[0]?.body.split('\n').slice(-2).join(' | ') ?? 'not posted',
+	);
+	const r1Back = await agent.waitFor(
+		'R1 polled back',
+		(line): line is RoutedLine =>
+			line.type === 'routed' &&
+			line.event.channel === 'github' &&
+			line.event.preview.startsWith('R1 Working'),
+	);
+	check(
+		'when polling brings it back, it is filtered as the agent’s own',
+		r1Back.event.destination.kind === 'filtered' &&
+			r1Back.event.destination.reason === 'own message',
+	);
+
+	await agent.action({
+		type: 'send_console',
+		text: `REPLYTO ${c1.event.id} R2 Thanks, that's fixed now.`,
+	});
+	await delivery(7, 'R2 Thanks');
+	check(
+		'reply_to on a comment quotes it',
+		(commentsWith(7, 'R2 Thanks')[0]?.body ?? '').startsWith(
+			'> **@alice**:\n> LATER-COMMENT (C1)',
+		),
+	);
+
+	await agent.action({ type: 'send_console', text: 'REPLYLONG please' });
+	await agent.until(
+		'the long reply to be refused',
+		async () =>
+			particle.requests
+				.filter((request) => request.session === 'router')
+				.flatMap((request) => request.results),
+		(results) => results.some((result) => result.includes('at most 300')),
+	);
+	check('a GitHub reply over 300 words is refused', true);
+
+	github.failNextWrites(1, 502);
+	await agent.action({ type: 'send_console', text: 'REPLY7 R3 Retried.' });
+	check(
+		'a reply that hit a 502 is retried and delivered',
+		(await delivery(7, 'R3 Retried.')) === 'delivered',
+	);
+	check(
+		'after checking for its marker, it is posted only once',
+		commentsWith(7, 'R3 Retried.').length === 1 &&
+			postsWith(7, 'R3 Retried.').length === 2,
+		`${postsWith(7, 'R3 Retried.').length} posts`,
+	);
+
+	github.lockIssue('acme/app', 10);
+	await agent.action({ type: 'send_console', text: 'REPLY10 R4 Locked out.' });
+	check(
+		'a reply GitHub refuses for good fails',
+		(await delivery(10, 'R4 Locked out.')) === 'failed',
+	);
+	const undelivered = await agent.until(
+		'the undelivered problem',
+		async () => latestHealth(),
+		(value) =>
+			value?.problems.some((problem) =>
+				problem.id.startsWith('undelivered:'),
+			) ?? false,
+	);
+	check(
+		'it is a problem saying why',
+		undelivered?.problems.some((problem) =>
+			problem.text.startsWith(
+				"Couldn't comment on app#10: GitHub answered 422 to POST /repos/acme/app/issues/10/comments: Unable to create comment because issue is locked.",
+			),
+		) ?? false,
+		undelivered?.problems.find((problem) =>
+			problem.id.startsWith('undelivered:'),
+		)?.text,
+	);
+
 	// 7. Asleep: comments posted meanwhile arrive once each, in order, labeled late.
 	const beforeSleep = agent.lines.length;
 	agent.signal('SIGSTOP');
@@ -566,9 +791,432 @@ try {
 			),
 	);
 
-	// Closing the issue reaches the task, which finishes; polling then stops.
+	// 8. A crash mid-delivery: the comment lands, the daemon dies before it
+	// hears so, and on restart it finds its marker instead of posting again.
+	const held = github.holdNextWrite();
+	await agent.action({
+		type: 'send_console',
+		text: 'REPLY7 R5 Posted across a crash.',
+	});
+	await held.arrived;
+	await agent.crash();
+	held.release();
+	await agent.until(
+		'the held comment to land',
+		async () => commentsWith(7, 'R5 Posted across a crash.'),
+		(found) => found.length === 1,
+	);
+	await agent.restart();
+	check(
+		'after the restart, the reply is marked delivered',
+		(await delivery(7, 'R5 Posted across a crash.')) === 'delivered',
+	);
+	await Bun.sleep(500);
+	check(
+		'and it was posted exactly once',
+		commentsWith(7, 'R5 Posted across a crash.').length === 1 &&
+			postsWith(7, 'R5 Posted across a crash.').length === 1,
+		`${commentsWith(7, 'R5 Posted across a crash.').length} comments, ${postsWith(7, 'R5 Posted across a crash.').length} posts`,
+	);
+
+	// 4. The task's PR: found by its branch, signed, and followed.
+	github.openPr('acme/app', 8, {
+		title: 'Fix the Safari export',
+		body: 'Fixes #7.',
+		by: 'shlok',
+		head: `superagent/${handle}`,
+	});
+	github.openPr('acme/app', 11, {
+		title: 'Not the agent’s',
+		body: 'From another branch.',
+		by: 'carol',
+		head: 'carol/other',
+	});
+	await workerSaw('You now follow github:acme/app#8');
+	check(
+		"the daemon finds the task's PR by its branch and tells the Worker",
+		true,
+	);
+	const withPr = await agent.waitFor(
+		'the task to follow its PR',
+		(line): line is TaskLine =>
+			line.type === 'task' &&
+			line.task.handle === handle &&
+			line.task.threads.some((followed) => followed.id === 'github:acme/app#8'),
+	);
+	check(
+		'the PR is one of the task’s threads',
+		withPr.task.threads.some(
+			(followed) =>
+				followed.title === 'app#8' &&
+				followed.url === 'https://github.com/acme/app/pull/8',
+		),
+		JSON.stringify(withPr.task.threads.map((followed) => followed.title)),
+	);
+	const signed = await agent.until(
+		'the PR to be signed',
+		async () => github.prBody('acme/app', 8),
+		(body) => body.includes('<!-- superagent t'),
+	);
+	check(
+		'the PR body gains the sign-off and marker, after what the Worker wrote',
+		signed.startsWith('Fixes #7.\n\n') &&
+			signed.includes(
+				`<sub>Posted by superagent for @shlok · task ${handle}</sub>`,
+			),
+		signed.split('\n').at(-2) ?? '',
+	);
+	check(
+		'a PR from another branch is never followed',
+		!github.requests.some((request) =>
+			request.path.startsWith('/repos/acme/app/pulls/11'),
+		),
+	);
+
+	// 5. Review comments, reviews, and a reply in a review thread.
+	const reviewCommentId = github.reviewComment('acme/app', 8, {
+		by: 'shlok',
+		body: 'RC1 rename this',
+		path: 'src/export.ts',
+		line: 42,
+	});
+	const rc1 = await routed('RC1');
+	check(
+		"a review comment goes straight to the task's Worker, with its line",
+		rc1.event.destination.kind === 'task' &&
+			rc1.event.destination.handle === handle &&
+			rc1.event.preview.startsWith('src/export.ts:42: RC1'),
+		rc1.event.preview,
+	);
+	github.review('acme/app', 8, {
+		by: 'bugbot',
+		bot: true,
+		state: 'COMMENTED',
+		body: 'RV1 possible null dereference',
+	});
+	const botReview = await workerSaw('Review (commented): RV1');
+	check(
+		"a bot's review reaches the task, marked as a bot",
+		botReview.some((request) => request.fresh.includes('bugbot (bot)')),
+	);
+	github.review('acme/app', 8, { by: 'alice', state: 'APPROVED' });
+	await workerSaw('alice approved #8');
+	check('an approval without a body is an activity for the task', true);
+
+	// More than a page of reviews: one submitted after the first hundred,
+	// which lands on the second page, still arrives.
+	const reviewPolls = () =>
+		github.requests.filter((request) =>
+			request.path.startsWith('/repos/acme/app/pulls/8/reviews'),
+		).length;
+	for (let n = 0; n < 100; n += 1) {
+		github.review('acme/app', 8, { by: 'carol', state: 'COMMENTED' });
+	}
+	const polledBefore = reviewPolls();
+	await agent.until(
+		'two polls of the reviews',
+		async () => reviewPolls(),
+		(count) => count >= polledBefore + 2,
+	);
+	github.review('acme/app', 8, {
+		by: 'dave',
+		state: 'CHANGES_REQUESTED',
+		body: 'RV103 on the second page',
+	});
+	await workerSaw('RV103 on the second page');
+	check('a review past the first page of 100 still reaches the task', true);
+
+	await agent.action({
+		type: 'send_console',
+		text: `REPLYTO8 ${rc1.event.id} RR1 Renamed it.`,
+	});
+	check(
+		'reply_to on a review comment is delivered',
+		(await delivery(8, 'RR1 Renamed it.')) === 'delivered',
+	);
+	const threaded = github
+		.reviewComments('acme/app', 8)
+		.filter((comment) => comment.body.includes('RR1 Renamed it.'));
+	check(
+		'it is posted once, in that review thread, signed and marked',
+		threaded.length === 1 &&
+			threaded[0]?.inReplyTo === reviewCommentId &&
+			/<!-- superagent m\d+ -->$/.test(threaded[0]?.body ?? ''),
+		JSON.stringify(threaded.map((comment) => comment.inReplyTo)),
+	);
+	const rr1Back = await agent.waitFor(
+		'RR1 polled back',
+		(line): line is RoutedLine =>
+			line.type === 'routed' &&
+			line.event.channel === 'github' &&
+			line.event.preview.includes('RR1 Renamed'),
+	);
+	check(
+		'it comes back as a review comment and is filtered as the agent’s own',
+		rr1Back.event.destination.kind === 'filtered' &&
+			rr1Back.event.destination.reason === 'own message',
+	);
+	await agent.action({ type: 'send_console', text: 'READ8 please' });
+	const prRead = await agent.until(
+		'read_thread on the PR',
+		async () =>
+			particle.requests
+				.filter((request) => request.session === 'router')
+				.flatMap((request) => request.results)
+				.find((result) => result.startsWith('thread github:acme/app#8')),
+		(result) => result !== undefined,
+	);
+	check(
+		"read_thread shows the PR's state and reviews",
+		(prRead ?? '').includes('GitHub PR · open · "Fix the Safari export"') &&
+			(prRead ?? '').includes('reviews: alice approved'),
+		prRead?.split('\n')[2] ?? '',
+	);
+
+	// CI on the PR's head commit: nothing while it runs, one event when it
+	// turns red, and one when a pushed fix turns green.
+	const ciRouted = () =>
+		agent.lines.filter(
+			(line): line is RoutedLine =>
+				line.type === 'routed' &&
+				line.event.channel === 'github' &&
+				line.event.preview.startsWith('CI '),
+		);
+	const head1 = github.prHead('acme/app', 8);
+	github.setChecks('acme/app', head1, {
+		runs: [
+			{ name: 'test (ubuntu-latest)', status: 'in_progress' },
+			{ name: 'lint', status: 'queued' },
+		],
+		statuses: [{ context: 'ci/legacy', state: 'pending' }],
+	});
+	const checkPolls = (sha: string) =>
+		github.requests.filter((request) =>
+			request.path.startsWith(`/repos/acme/app/commits/${sha}/check-runs`),
+		).length;
+	const checksBefore = checkPolls(head1);
+	await agent.until(
+		'two polls of the running checks',
+		async () => checkPolls(head1),
+		(count) => count >= checksBefore + 2,
+	);
+	check('checks still running send nothing', ciRouted().length === 0);
+	github.setChecks('acme/app', head1, {
+		runs: [
+			{
+				name: 'test (ubuntu-latest)',
+				status: 'completed',
+				conclusion: 'failure',
+			},
+			{ name: 'lint', status: 'completed', conclusion: 'success' },
+		],
+		statuses: [{ context: 'ci/legacy', state: 'success' }],
+	});
+	await workerSaw(
+		`CI failed on ${head1.slice(0, 7)}: test (ubuntu-latest) failed; 2 of 3 passed`,
+	);
+	const red = ciRouted()[0];
+	check(
+		'a red result is one ci event, straight to the task',
+		red?.event.destination.kind === 'task' &&
+			red.event.destination.handle === handle,
+		red ? JSON.stringify(red.event.destination) : 'none',
+	);
+	const head2 = 'c0ffee'.repeat(6).padEnd(40, '0');
+	github.pushCommit('acme/app', 8, head2);
+	github.setChecks('acme/app', head2, {
+		runs: [
+			{
+				name: 'test (ubuntu-latest)',
+				status: 'completed',
+				conclusion: 'success',
+			},
+			{ name: 'lint', status: 'completed', conclusion: 'success' },
+		],
+		statuses: [{ context: 'ci/legacy', state: 'success' }],
+	});
+	await workerSaw(`CI passed on ${head2.slice(0, 7)} (3 checks)`);
+	await Bun.sleep(600);
+	check(
+		'one event per head commit and outcome, however often it is polled',
+		ciRouted().length === 2,
+		ciRouted()
+			.map((line) => line.event.preview.slice(0, 22))
+			.join(' | '),
+	);
+	check(
+		'the Router never sees CI results',
+		!particle.requests.some(
+			(request) =>
+				request.session === 'router' && request.fresh.includes('CI failed'),
+		),
+	);
+	// The status read fails right after the check runs were read: the next
+	// poll must still know the runs, not reuse an empty list after a 304.
+	const head3 = 'facade'.repeat(6).padEnd(40, '0');
+	github.setChecks('acme/app', head3, {
+		runs: [
+			{
+				name: 'test (ubuntu-latest)',
+				status: 'completed',
+				conclusion: 'failure',
+			},
+			{ name: 'lint', status: 'completed', conclusion: 'success' },
+		],
+		statuses: [{ context: 'ci/legacy', state: 'success' }],
+	});
+	github.failNextRead(`/repos/acme/app/commits/${head3}/status`, 404);
+	github.pushCommit('acme/app', 8, head3);
+	await workerSaw(`CI failed on ${head3.slice(0, 7)}`);
+	await Bun.sleep(600);
+	check(
+		'a failed status read loses no check runs: red, and never green',
+		!ciRouted().some((line) =>
+			line.event.preview.startsWith(`CI passed on ${head3.slice(0, 7)}`),
+		),
+		ciRouted()
+			.map((line) => line.event.preview.slice(0, 22))
+			.join(' | '),
+	);
+
+	// A failing commit status past the first page of statuses still makes it red.
+	const head4 = 'beaded'.repeat(6).padEnd(40, '0');
+	github.setChecks('acme/app', head4, {
+		runs: [{ name: 'lint', status: 'completed', conclusion: 'success' }],
+		statuses: Array.from({ length: 105 }, (_, n) => ({
+			context: `deploy/${n + 1}`,
+			state: n === 104 ? 'failure' : 'success',
+		})),
+	});
+	github.pushCommit('acme/app', 8, head4);
+	const late4 = await workerSaw(`on ${head4.slice(0, 7)}`);
+	check(
+		'a failing status past the first page still turns it red',
+		late4.some((request) =>
+			request.fresh.includes(`CI failed on ${head4.slice(0, 7)}`),
+		) &&
+			!ciRouted().some((line) =>
+				line.event.preview.startsWith(`CI passed on ${head4.slice(0, 7)}`),
+			),
+		late4
+			.map((request) => request.fresh.match(/CI \w+ on \w+[^\n]*/)?.[0])
+			.join(' | '),
+	);
+	// A last fix, green, for what follows.
+	const head5 = 'decade'.repeat(6).padEnd(40, '0');
+	github.setChecks('acme/app', head5, {
+		runs: [{ name: 'lint', status: 'completed', conclusion: 'success' }],
+	});
+	github.pushCommit('acme/app', 8, head5);
+	await workerSaw(`CI passed on ${head5.slice(0, 7)} (1 check)`);
+
+	await agent.action({ type: 'send_console', text: 'READ8 with CI' });
+	const ciRead = await agent.until(
+		'read_thread with CI',
+		async () =>
+			particle.requests
+				.filter((request) => request.session === 'router')
+				.flatMap((request) => request.results)
+				.findLast((result) => result.startsWith('thread github:acme/app#8')),
+		(result) => (result ?? '').includes('CI passed'),
+	);
+	check(
+		"read_thread shows the PR's new head and CI",
+		(ciRead ?? '').includes(`head ${head5.slice(0, 7)} · CI passed`),
+		ciRead?.split('\n')[2] ?? '',
+	);
+
+	// An existing PR handed over from the console: its review comments and
+	// reviews so far are in the Worker's first message, and new ones follow.
+	github.openPr('acme/app', 12, {
+		title: 'Carol’s feature',
+		body: 'Adds a feature.',
+		by: 'carol',
+		head: 'carol/feature',
+	});
+	github.reviewComment('acme/app', 12, {
+		by: 'alice',
+		body: 'EXISTING-RC1 typo here',
+		path: 'src/feature.ts',
+		line: 3,
+	});
+	github.review('acme/app', 12, {
+		by: 'alice',
+		state: 'CHANGES_REQUESTED',
+		body: 'EXISTING-RV1 needs tests',
+	});
+	await agent.action({ type: 'send_console', text: 'PR12 take over' });
+	const watcher = (
+		await agent.waitFor(
+			'the PR 12 task',
+			(line): line is TaskLine =>
+				line.type === 'task' && line.task.title === 'Review PR 12',
+		)
+	).task.handle;
+	const watcherSaw = (text: string) =>
+		agent.until(
+			`the PR 12 Worker to see ${text}`,
+			async () =>
+				particle.requests.filter(
+					(request) =>
+						request.session === 'worker' &&
+						request.handle === watcher &&
+						request.fresh.includes(text),
+				),
+			(found) => found.length > 0,
+		);
+	const watcherFirst = (await watcherSaw('GitHub PR acme/app#12'))[0];
+	check(
+		"a handed-over PR's first message has its review comments and reviews",
+		(watcherFirst?.fresh ?? '').includes('EXISTING-RC1') &&
+			(watcherFirst?.fresh ?? '').includes('EXISTING-RV1'),
+	);
+	github.reviewComment('acme/app', 12, {
+		by: 'alice',
+		body: 'NEW-RC2 and here',
+		path: 'src/feature.ts',
+		line: 9,
+	});
+	github.review('acme/app', 12, {
+		by: 'alice',
+		state: 'COMMENTED',
+		body: 'NEW-RV2 one more thing',
+	});
+	await watcherSaw('NEW-RC2 and here');
+	await watcherSaw('NEW-RV2 one more thing');
+	check(
+		'later review comments and reviews follow, without repeating the old ones',
+		!agent.lines.some(
+			(line) =>
+				line.type === 'routed' &&
+				(line.event.preview.includes('EXISTING-RC1') ||
+					line.event.preview.includes('EXISTING-RV1')),
+		),
+	);
+
+	check(
+		'a PR with no checks sends no CI events',
+		ciRouted().every((line) => line.event.threadTitle === 'app#8'),
+	);
+
+	// Closing the issue doesn't end the task while its PR is open; the merge does.
 	github.closeIssue('acme/app', 7, 'alice');
+	await agent.until(
+		'finishing to be refused',
+		async () =>
+			particle.requests
+				.filter(
+					(request) =>
+						request.session === 'worker' && request.handle === handle,
+				)
+				.flatMap((request) => request.results),
+		(results) => results.some((result) => result.includes('is still open')),
+	);
+	check("a task can't finish while its PR is open", true);
+	github.merge('acme/app', 8, 'shlok');
+	await workerSaw('#8 was merged by shlok');
 	await taskDone('Fix issue 7');
+	check('the merge reaches the task, which then finishes', true);
 	const timeline = await agent.get(
 		`/v1/threads/${encodeURIComponent('github:acme/app#7')}`,
 	);
@@ -577,14 +1225,17 @@ try {
 		JSON.stringify(timeline).includes('#7 was closed by alice'),
 	);
 	const polls = () =>
-		github.requests.filter((request) =>
-			request.path.startsWith('/repos/acme/app/issues/7'),
+		github.requests.filter(
+			(request) =>
+				request.path.startsWith('/repos/acme/app/issues/7') ||
+				request.path.startsWith('/repos/acme/app/issues/8') ||
+				request.path.startsWith('/repos/acme/app/pulls/8'),
 		).length;
 	await Bun.sleep(500);
 	const settled = polls();
 	await Bun.sleep(1_000);
 	check(
-		'after the task ends, its issues are no longer polled',
+		'after the task ends, its issue and PR are no longer polled',
 		polls() === settled,
 		`${polls() - settled} more requests`,
 	);

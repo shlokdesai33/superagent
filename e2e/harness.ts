@@ -34,6 +34,10 @@ export type Agent = {
 	): Promise<T>;
 	/** Sends the daemon a signal, such as `SIGSTOP` to stand in for the machine sleeping. */
 	signal(name: NodeJS.Signals): void;
+	/** `kill -9`: no shutdown at all. */
+	crash(): Promise<void>;
+	/** Starts the daemon again on the same data folder; its feed lines are added to `lines`. */
+	restart(): Promise<void>;
 	/** Stops the daemon, runs `inspect` on its data folder, then removes it. */
 	stop(inspect?: (home: string) => void | Promise<void>): Promise<void>;
 };
@@ -99,21 +103,23 @@ export async function startAgent(
 	const agent = Bun.env.SUPERAGENT_BIN
 		? [Bun.env.SUPERAGENT_BIN]
 		: ['bun', CLI];
-	const child = Bun.spawn([...agent, 'daemon', '--script-channel'], {
-		cwd: home,
-		env: {
-			...Bun.env,
-			SUPERAGENT_HOME: home,
-			PARTICLE_BASE_URL: particleUrl,
-			PARTICLE_API_KEY: 'pai-e2e',
-			// Never the real gh: off unless a test brings a fake one.
-			SUPERAGENT_GH: join(home, 'no-gh'),
-			...options.env,
-		},
-		stdin: 'ignore',
-		stdout: 'ignore',
-		stderr: Bun.env.E2E_VERBOSE ? 'inherit' : 'ignore',
-	});
+	const spawn = () =>
+		Bun.spawn([...agent, 'daemon', '--script-channel'], {
+			cwd: home,
+			env: {
+				...Bun.env,
+				SUPERAGENT_HOME: home,
+				PARTICLE_BASE_URL: particleUrl,
+				PARTICLE_API_KEY: 'pai-e2e',
+				// Never the real gh: off unless a test brings a fake one.
+				SUPERAGENT_GH: join(home, 'no-gh'),
+				...options.env,
+			},
+			stdin: 'ignore',
+			stdout: 'ignore',
+			stderr: Bun.env.E2E_VERBOSE ? 'inherit' : 'ignore',
+		});
+	let child = spawn();
 
 	const request = async (path: string, init: RequestInit = {}) => {
 		const headers = new Headers(init.headers);
@@ -127,25 +133,28 @@ export async function startAgent(
 
 	const lines: FeedLine[] = [];
 	const waiters = new Set<() => void>();
-	const started = Date.now();
-	for (;;) {
-		try {
-			// oxlint-disable-next-line eslint/no-await-in-loop
-			const response = await request('/v1/feed');
-			if (response.ok && response.body) {
-				readFeed(response.body);
-				break;
+	const connect = async () => {
+		const started = Date.now();
+		for (;;) {
+			try {
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				const response = await request('/v1/feed');
+				if (response.ok && response.body) {
+					readFeed(response.body);
+					return;
+				}
+			} catch {
+				// Not listening yet.
 			}
-		} catch {
-			// Not listening yet.
+			if (Date.now() - started > WAIT_MS) {
+				child.kill();
+				throw new Error(`the daemon didn't start; see ${home}/daemon.log`);
+			}
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			await Bun.sleep(100);
 		}
-		if (Date.now() - started > WAIT_MS) {
-			child.kill();
-			throw new Error(`the daemon didn't start; see ${home}/daemon.log`);
-		}
-		// oxlint-disable-next-line eslint/no-await-in-loop
-		await Bun.sleep(100);
-	}
+	};
+	await connect();
 
 	function readFeed(body: ReadableStream<Uint8Array>) {
 		void (async () => {
@@ -229,6 +238,14 @@ export async function startAgent(
 		},
 		signal(name) {
 			child.kill(name);
+		},
+		async crash() {
+			child.kill('SIGKILL');
+			await child.exited;
+		},
+		async restart() {
+			child = spawn();
+			await connect();
 		},
 		async stop(inspect) {
 			child.kill('SIGTERM');

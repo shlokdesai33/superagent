@@ -1,6 +1,10 @@
 // End to end: thread ownership, direct delivery, filtering, release and
-// reopen, and a question answered on a thread (build step 5). Run with
-// `bun run e2e`; it exits non-zero if a check fails.
+// reopen, a question answered on a thread (build step 5), and cleanup of an
+// old task's temp folder. Run with `bun run e2e`; it exits non-zero if a
+// check fails.
+import { Database } from 'bun:sqlite';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import type { FeedLine, RoutedEvent, TaskSummary } from '../src/protocol.ts';
 import { startFakeParticle } from './fake-particle.ts';
 import { type ScriptEvent, startAgent } from './harness.ts';
@@ -389,6 +393,31 @@ try {
 			(channel) => channel.name === 'script' && channel.state === 'up',
 		),
 	);
+
+	// 6. Cleanup: a task that ended over 7 days ago loses its temp folder.
+	const tmp = join(agent.home, 'tasks', handle, 'tmp');
+	check('a task has its own temp folder', existsSync(tmp));
+	// It may have finished already; either way it has ended.
+	const stopped = await agent.action({ type: 'stop_task', handle });
+	check(
+		'the task has ended',
+		stopped.ok || stopped.code === 'not_running',
+		stopped.ok ? stopped.subject : stopped.code,
+	);
+	await agent.crash();
+	const db = new Database(join(agent.home, 'state.db'));
+	db.run('UPDATE tasks SET ended_at = ? WHERE handle = ?', [
+		Date.now() - 8 * 24 * 60 * 60_000,
+		handle,
+	]);
+	db.close();
+	await agent.restart();
+	await agent.until(
+		"the old task's temp folder to be removed",
+		async () => existsSync(tmp),
+		(exists) => !exists,
+	);
+	check('cleanup removes the temp folder of a task ended 8 days ago', true);
 } catch (error) {
 	failures += 1;
 	process.stdout.write(

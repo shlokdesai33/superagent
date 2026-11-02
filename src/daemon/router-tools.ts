@@ -32,6 +32,7 @@ import {
 
 const CHAT_CHANNELS = new Set(['console', 'slack']);
 const CHAT_WORD_LIMIT = 100;
+const GITHUB_WORD_LIMIT = 300;
 const TITLE_CHARS = 80;
 const TRIGGER_PAGE_CHARS = 8_000;
 const THREAD_MESSAGES = 30;
@@ -49,11 +50,14 @@ const TASK_STATES = new Set([
 export const ROUTER_TOOLS: FunctionTool[] = [
 	tool(
 		'reply',
-		`Send a message to a thread. The only way to reach a person. In chat channels (the console) replies are at most ${CHAT_WORD_LIMIT} words.`,
+		`Send a message to a thread. The only way to reach a person. In chat channels (the console) replies are at most ${CHAT_WORD_LIMIT} words. On GitHub threads they're comments of at most ${GITHUB_WORD_LIMIT} words, markdown allowed, posted as the operator with a sign-off saying it's the agent.`,
 		{
-			thread: string("The thread's ID, such as console"),
+			thread: string("The thread's ID, such as console or github:acme/app#42"),
 			text: string('The message'),
 			task: string('The handle of the task this reply is about, if any'),
+			reply_to: integer(
+				'GitHub only: the event this answers, 57 for #57; a review comment is answered in its thread, anything else is quoted',
+			),
 		},
 		['thread', 'text'],
 	),
@@ -376,16 +380,31 @@ function reply(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 		)
 		.get(threadId);
 	if (!thread) throw new ToolError(`no thread ${JSON.stringify(threadId)}`);
-	if (thread.channel === 'github') {
+	const github = thread.channel === 'github';
+	const limit = github
+		? GITHUB_WORD_LIMIT
+		: CHAT_CHANNELS.has(thread.channel)
+			? CHAT_WORD_LIMIT
+			: null;
+	const words = text.split(/\s+/).length;
+	if (limit !== null && words > limit) {
 		throw new ToolError(
-			"not sent: replies on GitHub threads aren't available yet; tell the operator in the console instead",
+			`not sent: the reply has ${words} words and ${thread.channel} replies are at most ${limit}. Shorten it and call reply again.`,
 		);
 	}
-	const words = text.split(/\s+/).length;
-	if (CHAT_CHANNELS.has(thread.channel) && words > CHAT_WORD_LIMIT) {
-		throw new ToolError(
-			`not sent: the reply has ${words} words and ${thread.channel} replies are at most ${CHAT_WORD_LIMIT}. Shorten it and call reply again.`,
-		);
+	const replyTo = optionalInteger(args, 'reply_to');
+	if (replyTo !== null) {
+		if (!github) throw new ToolError('reply_to is only for GitHub threads');
+		const answered = db
+			.query<unknown, [number, string]>(
+				"SELECT 1 FROM events WHERE id = ? AND thread_id = ? AND kind = 'message'",
+			)
+			.get(replyTo, threadId);
+		if (!answered) {
+			throw new ToolError(
+				`#${replyTo} isn't a message on ${threadId}; read_thread lists them`,
+			);
+		}
 	}
 	const taskId =
 		handle === null
@@ -399,14 +418,15 @@ function reply(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 		throw new ToolError(`no task ${JSON.stringify(handle)}`);
 	}
 
-	// Console and script threads are delivered by storing the message.
+	// Console and script threads are delivered by storing the message; GitHub
+	// replies wait for the delivery loop.
 	const id = Number(
 		db
 			.query<unknown, Params>(
 				`INSERT INTO messages (at, channel, thread_id, task_id, direction, author, text,
-					batch_id, delivery, attempts)
+					batch_id, delivery, attempts, reply_to)
 				VALUES ($at, $channel, $threadId, $taskId, 'out', 'agent', $text,
-					$batchId, 'delivered', 1)`,
+					$batchId, $delivery, $attempts, $replyTo)`,
 			)
 			.run({
 				at: Date.now(),
@@ -415,8 +435,12 @@ function reply(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 				taskId,
 				text,
 				batchId,
+				delivery: github ? 'pending' : 'delivered',
+				attempts: github ? 0 : 1,
+				replyTo,
 			}).lastInsertRowid,
 	);
+	if (github) daemon.wakeDelivery();
 	db.query<unknown, [number, string]>(
 		'UPDATE threads SET last_event_at = ? WHERE id = ?',
 	).run(Date.now(), threadId);
@@ -424,7 +448,7 @@ function reply(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 		.query<MessageRow, [number]>(`SELECT ${MESSAGE_COLUMNS} WHERE m.id = ?`)
 		.get(id);
 	return {
-		result: 'sent',
+		result: github ? 'sent; it is posted on GitHub in a moment' : 'sent',
 		messages: message ? [message] : [],
 		action: `replied in ${thread.title}`,
 	};
