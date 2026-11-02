@@ -457,7 +457,8 @@ export function destination(ui: Ui): string {
 function newTasksIn(model: Model, ui: Ui): string | null {
 	const { path } = ui.repo;
 	if (path === null || model.live === null) return null;
-	return `new tasks in ${repoName(path, model.live.health.repos)}`;
+	// An agent from before `health.repos` sends none.
+	return `new tasks in ${repoName(path, model.live.health.repos ?? [])}`;
 }
 
 function inputLine(model: Model, ui: Ui, content: number, now: number): Line {
