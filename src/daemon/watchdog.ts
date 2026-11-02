@@ -79,7 +79,9 @@ export function startWatchdog(
 ): Watchdog {
 	const failing = new Map<string, number>();
 	let timer: Timer | null = null;
-	let lastTick = Date.now();
+	// When the previous tick ran; before the first, as if one ran a tick
+	// before it's due, so a sleep during the start delay is seen too.
+	let lastTick = Date.now() + (START_TICKS - 1) * TICK_MS;
 	let ticks = 0;
 	let graceUntil = 0;
 	const sleeps: Sleep[] = [];
@@ -88,7 +90,7 @@ export function startWatchdog(
 		const now = Date.now();
 		ticks += 1;
 		const gap = now - lastTick;
-		if (ticks > 1 && gap > WAKE_GAP_TICKS * TICK_MS) {
+		if (gap > WAKE_GAP_TICKS * TICK_MS) {
 			daemon.log('info', 'watchdog saw the machine wake', {
 				after: `${Math.round(gap / 1000)} s`,
 			});
@@ -144,7 +146,6 @@ export function startWatchdog(
 		}, ms);
 	};
 	schedule(START_TICKS * TICK_MS);
-	lastTick = Date.now() + (START_TICKS - 1) * TICK_MS;
 
 	return {
 		stop: async () => {

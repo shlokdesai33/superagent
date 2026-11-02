@@ -200,6 +200,26 @@ try {
 		);
 	});
 
+	await scenario('A sleep before the first check', async (agent) => {
+		// The first check runs 2 ticks (120 ms) after start; stop the daemon
+		// before it, when the harness is quick enough to.
+		if (watchdogLines(agent).length > 0) {
+			process.stdout.write(
+				'- skipped: the first check ran before the daemon could be stopped\n',
+			);
+			return;
+		}
+		agent.signal('SIGSTOP');
+		await Bun.sleep(600);
+		agent.signal('SIGCONT');
+		await agent.until(
+			'the wake in the log',
+			async () => readFileSync(join(agent.home, 'daemon.log'), 'utf8'),
+			(log) => log.includes('watchdog saw the machine wake'),
+		);
+		check('a sleep during the start delay is seen and subtracted', true);
+	});
+
 	await scenario('Sleep', async (agent) => {
 		await agent.action({ type: 'send_console', text: 'please run waiter' });
 		await taskLine(
