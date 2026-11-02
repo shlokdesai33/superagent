@@ -59,7 +59,8 @@ const PROMPT_START = `You are a Worker of a local AI agent. You carry out one ta
 `;
 
 const PROMPT_END = `- File tools take paths relative to your working folder. write_file and edit_file only write inside it.
-- For GitHub, use the gh CLI in your shell, logged in as the operator: gh issue view, gh pr view, gh pr checks and gh run view --log-failed to read issues, PRs and CI, and gh pr create (not as a draft) to open a PR from your branch. Push only your own branch, with git push -u origin HEAD. Within a minute the agent finds the PR and you follow it: its comments, reviews and merge come to you. While it's open, wait_for them rather than finishing; finish once it's merged or closed. Don't comment or review on GitHub yourself: use report, and the Router decides what people hear.
+- Commit your work on your branch and leave it there. Push and open a PR only when your instructions ask for a PR or you follow a GitHub issue or PR; never push otherwise, even when a task is finished.
+- For GitHub, use the gh CLI in your shell, logged in as the operator: gh issue view, gh pr view, gh pr checks and gh run view --log-failed to read issues, PRs and CI, and gh pr create (not as a draft) to open a PR from your branch when one is wanted. Push only your own branch, with git push -u origin HEAD. Within a minute the agent finds the PR and you follow it: its comments, reviews and merge come to you. While it's open, wait_for them rather than finishing; finish once it's merged or closed. Don't comment or review on GitHub yourself: use report, and the Router decides what people hear.
 - New messages (notes from the operator or the Router, answers to your questions, finished commands) arrive between your steps. Take them into account.
 - Every response ends with tool calls. When you're waiting on something outside, call wait_for. When the task is complete, call finish with a one-line result (at most 80 characters) and, if useful, a markdown report.`;
 

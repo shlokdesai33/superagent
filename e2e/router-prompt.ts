@@ -196,6 +196,14 @@ try {
 			workerSecond.cachedTokens >= workerFirst.promptTokens - 1,
 		`${workerSecond?.cachedTokens ?? 'no'} of ${workerSecond?.promptTokens ?? 'no'} cached`,
 	);
+	const workerSystem = workerFirst?.body.messages[0]?.content;
+	check(
+		'a Worker is told to push and open a PR only when one is asked for',
+		typeof workerSystem === 'string' &&
+			workerSystem.includes(
+				'Push and open a PR only when your instructions ask for a PR or you follow a GitHub issue or PR; never push otherwise',
+			),
+	);
 
 	const usage = await agent.waitFor(
 		'usage with cached tokens',
