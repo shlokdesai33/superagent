@@ -637,6 +637,8 @@ type Ci = {
 	sha: string;
 	runs: CiRun[];
 	statuses: CiStatus[];
+	/** Every commit status, listed or not. */
+	statusTotal: number;
 	combined: string;
 	outcome: 'pending' | 'failure' | 'success' | null;
 	failing: string[];
@@ -667,12 +669,18 @@ async function pollCi(
 	const previous = isCi(known) && known.sha === head ? known : null;
 	const base = `/repos/${row.repo}/commits/${head}`;
 
-	// Each listing keeps its ETag for this commit; a 304 reuses what was seen.
+	// Each listing keeps its ETag for this commit, saved with what it saw in
+	// one transaction below, so a 304 always has the data it stands for.
+	const etagFor = (key: string) => {
+		const cursor = loadCursor(db, key);
+		return previous !== null && cursor?.since === head
+			? (cursor.etag ?? null)
+			: null;
+	};
 	const runsKey = `${row.id}:check-runs`;
-	const runsCursor = loadCursor(db, runsKey);
 	let runs = previous?.runs ?? [];
 	const runsChanged: CiRun[] = [];
-	let runsEtag = runsCursor?.since === head ? (runsCursor.etag ?? null) : null;
+	let runsEtag = etagFor(runsKey);
 	let total = Infinity;
 	for (
 		let page = 1;
@@ -702,25 +710,41 @@ async function pollCi(
 		if (batch.length < PER_PAGE) break;
 	}
 	if (Number.isFinite(total)) runs = runsChanged;
-	saveCursor(db, runsKey, head, runsEtag);
 
+	// The combined state covers every status; the list itself is paged.
 	const statusKey = `${row.id}:status`;
-	const statusCursor = loadCursor(db, statusKey);
 	let statuses = previous?.statuses ?? [];
 	let combined = previous?.combined ?? 'pending';
-	const status = await api.request('GET', `${base}/status`, {
-		etag: statusCursor?.since === head ? (statusCursor.etag ?? null) : null,
-	});
-	if (status.status !== 304) {
-		combined = text(status.body, 'state') || 'pending';
-		const listed = field(status.body, 'statuses');
-		statuses = (Array.isArray(listed) ? listed : []).map((entry) => ({
-			context: text(entry, 'context'),
-			state: text(entry, 'state'),
-			url: text(entry, 'target_url'),
-		}));
+	let statusTotal = previous?.statusTotal ?? statuses.length;
+	let statusEtag = etagFor(statusKey);
+	const listedStatuses: CiStatus[] = [];
+	for (let page = 1; page <= REVIEW_PAGES; page++) {
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		const response = await api.request(
+			'GET',
+			`${base}/status?per_page=${PER_PAGE}&page=${page}`,
+			{ etag: page === 1 ? statusEtag : null },
+		);
+		if (response.status === 304) break;
+		const listed = field(response.body, 'statuses');
+		const batch = Array.isArray(listed) ? listed : [];
+		if (page === 1) {
+			statusEtag = response.etag;
+			combined = text(response.body, 'state') || 'pending';
+			statusTotal = Number(field(response.body, 'total_count') ?? batch.length);
+		}
+		listedStatuses.push(
+			...batch.map((entry) => ({
+				context: text(entry, 'context'),
+				state: text(entry, 'state'),
+				url: text(entry, 'target_url'),
+			})),
+		);
+		statuses = listedStatuses;
+		if (batch.length < PER_PAGE || listedStatuses.length >= statusTotal) {
+			break;
+		}
 	}
-	saveCursor(db, statusKey, head, status.etag);
 
 	const failing = [
 		...runs
@@ -732,12 +756,21 @@ async function pollCi(
 			.filter((entry) => entry.state === 'failure' || entry.state === 'error')
 			.map((entry) => entry.context),
 	];
-	const checks = runs.length + statuses.length;
+	const statusFailed = combined === 'failure' || combined === 'error';
+	if (
+		statusFailed &&
+		!statuses.some(
+			(entry) => entry.state === 'failure' || entry.state === 'error',
+		)
+	) {
+		failing.push('a commit status not listed');
+	}
+	const checks = runs.length + statusTotal;
 	const outcome: Ci['outcome'] =
 		checks === 0
 			? null
 			: runs.some((run) => run.status !== 'completed') ||
-				  (statuses.length > 0 && combined === 'pending')
+				  (statusTotal > 0 && combined === 'pending')
 				? 'pending'
 				: failing.length > 0
 					? 'failure'
@@ -750,7 +783,10 @@ async function pollCi(
 		const passed =
 			runs.filter(
 				(run) => run.status === 'completed' && CI_PASSED.has(run.conclusion),
-			).length + statuses.filter((entry) => entry.state === 'success').length;
+			).length +
+			(combined === 'success'
+				? statusTotal
+				: statuses.filter((entry) => entry.state === 'success').length);
 		const short = head.slice(0, 7);
 		// A re-run that ends the same way again is a new event.
 		const key = `ci:${row.repo}:${head}:${outcome}:${sent?.sha === head ? Date.now() : 0}`;
@@ -794,20 +830,25 @@ async function pollCi(
 		sha: head,
 		runs,
 		statuses,
+		statusTotal,
 		combined,
 		outcome,
 		failing,
 		sent,
 	};
 	summary.ci = ci;
-	db.query<unknown, Params>(
-		`UPDATE github_items SET summary = $summary, ci_outcome = $outcome
-		WHERE thread_id = $id`,
-	).run({
-		id: row.id,
-		summary: JSON.stringify(summary),
-		outcome: sent?.sha === head ? sent.outcome : null,
-	});
+	db.transaction(() => {
+		db.query<unknown, Params>(
+			`UPDATE github_items SET summary = $summary, ci_outcome = $outcome
+			WHERE thread_id = $id`,
+		).run({
+			id: row.id,
+			summary: JSON.stringify(summary),
+			outcome: sent?.sha === head ? sent.outcome : null,
+		});
+		saveCursor(db, runsKey, head, runsEtag);
+		saveCursor(db, statusKey, head, statusEtag);
+	})();
 }
 
 // Written by pollCi itself, so its shape is trusted once these hold.

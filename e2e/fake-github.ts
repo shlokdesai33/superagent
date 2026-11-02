@@ -101,6 +101,8 @@ export type FakeGitHub = {
 	holdNextWrite(): { arrived: Promise<void>; release: () => void };
 	/** The next `count` writes fail with `status`. */
 	failNextWrites(count: number, status: number): void;
+	/** The next read of a path starting with `prefix` fails with `status`. */
+	failNextRead(prefix: string, status: number): void;
 	/** What `gh pr create` would do: a PR from `head` into `base`. */
 	openPr(
 		repo: string,
@@ -328,6 +330,7 @@ export function startFakeGitHub(options: {
 	let base = '';
 	let hold: { arrived: () => void; released: Promise<void> } | null = null;
 	let failing = { count: 0, status: 500 };
+	const failingReads: Array<{ prefix: string; status: number }> = [];
 
 	const respond = (
 		request: Request,
@@ -343,6 +346,13 @@ export function startFakeGitHub(options: {
 					documentation_url: 'https://docs.github.com/rest',
 				},
 			};
+		}
+		const failRead = failingReads.findIndex((entry) =>
+			path.startsWith(entry.prefix),
+		);
+		if (request.method === 'GET' && failRead !== -1) {
+			const [entry] = failingReads.splice(failRead, 1);
+			return { status: entry?.status ?? 500, body: { message: 'Failed' } };
 		}
 		if (request.method !== 'GET') {
 			if (failing.count > 0) {
@@ -468,12 +478,18 @@ export function startFakeGitHub(options: {
 				};
 			}
 			const states = onCommit.statuses.map((entry) => entry.state);
+			// Like GitHub: the state covers every status; the list is paged.
+			const perPage = Number(url.searchParams.get('per_page') ?? 30);
+			const page = Number(url.searchParams.get('page') ?? 1);
 			return {
 				status: 200,
 				body: {
 					sha: commit[2],
 					total_count: onCommit.statuses.length,
-					statuses: onCommit.statuses,
+					statuses: onCommit.statuses.slice(
+						(page - 1) * perPage,
+						page * perPage,
+					),
 					state:
 						states.length === 0 || states.includes('pending')
 							? 'pending'
@@ -589,6 +605,9 @@ export function startFakeGitHub(options: {
 		},
 		failNextWrites(count, status) {
 			failing = { count, status };
+		},
+		failNextRead(prefix, status) {
+			failingReads.push({ prefix, status });
 		},
 		openPr(repo, number, pr) {
 			const now = stamp(Date.now());

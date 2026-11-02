@@ -1051,6 +1051,65 @@ try {
 				request.session === 'router' && request.fresh.includes('CI failed'),
 		),
 	);
+	// The status read fails right after the check runs were read: the next
+	// poll must still know the runs, not reuse an empty list after a 304.
+	const head3 = 'facade'.repeat(6).padEnd(40, '0');
+	github.setChecks('acme/app', head3, {
+		runs: [
+			{
+				name: 'test (ubuntu-latest)',
+				status: 'completed',
+				conclusion: 'failure',
+			},
+			{ name: 'lint', status: 'completed', conclusion: 'success' },
+		],
+		statuses: [{ context: 'ci/legacy', state: 'success' }],
+	});
+	github.failNextRead(`/repos/acme/app/commits/${head3}/status`, 404);
+	github.pushCommit('acme/app', 8, head3);
+	await workerSaw(`CI failed on ${head3.slice(0, 7)}`);
+	await Bun.sleep(600);
+	check(
+		'a failed status read loses no check runs: red, and never green',
+		!ciRouted().some((line) =>
+			line.event.preview.startsWith(`CI passed on ${head3.slice(0, 7)}`),
+		),
+		ciRouted()
+			.map((line) => line.event.preview.slice(0, 22))
+			.join(' | '),
+	);
+
+	// A failing commit status past the first page of statuses still makes it red.
+	const head4 = 'beaded'.repeat(6).padEnd(40, '0');
+	github.setChecks('acme/app', head4, {
+		runs: [{ name: 'lint', status: 'completed', conclusion: 'success' }],
+		statuses: Array.from({ length: 105 }, (_, n) => ({
+			context: `deploy/${n + 1}`,
+			state: n === 104 ? 'failure' : 'success',
+		})),
+	});
+	github.pushCommit('acme/app', 8, head4);
+	const late4 = await workerSaw(`on ${head4.slice(0, 7)}`);
+	check(
+		'a failing status past the first page still turns it red',
+		late4.some((request) =>
+			request.fresh.includes(`CI failed on ${head4.slice(0, 7)}`),
+		) &&
+			!ciRouted().some((line) =>
+				line.event.preview.startsWith(`CI passed on ${head4.slice(0, 7)}`),
+			),
+		late4
+			.map((request) => request.fresh.match(/CI \w+ on \w+[^\n]*/)?.[0])
+			.join(' | '),
+	);
+	// A last fix, green, for what follows.
+	const head5 = 'decade'.repeat(6).padEnd(40, '0');
+	github.setChecks('acme/app', head5, {
+		runs: [{ name: 'lint', status: 'completed', conclusion: 'success' }],
+	});
+	github.pushCommit('acme/app', 8, head5);
+	await workerSaw(`CI passed on ${head5.slice(0, 7)} (1 check)`);
+
 	await agent.action({ type: 'send_console', text: 'READ8 with CI' });
 	const ciRead = await agent.until(
 		'read_thread with CI',
@@ -1063,7 +1122,7 @@ try {
 	);
 	check(
 		"read_thread shows the PR's new head and CI",
-		(ciRead ?? '').includes(`head ${head2.slice(0, 7)} · CI passed`),
+		(ciRead ?? '').includes(`head ${head5.slice(0, 7)} · CI passed`),
 		ciRead?.split('\n')[2] ?? '',
 	);
 
