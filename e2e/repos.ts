@@ -230,7 +230,7 @@ try {
 		'outside a repository, the UI names no repository for new tasks',
 		!tui.seen().includes('new tasks in'),
 	);
-	await tui.type('/tidy my notes (R1)');
+	await tui.type('tidy my notes (R1)');
 	await tui.waitFor('→ the Router');
 	check(
 		'outside a repository, tab has nothing to change',
@@ -256,7 +256,7 @@ try {
 	await tui.waitFor('new tasks in webapp');
 	check('inside a repository, the UI names it for new tasks', true);
 	mark = tui.mark();
-	await tui.type('/fix the login bug (R2)');
+	await tui.type('fix the login bug (R2)');
 	await tui.waitFor('→ the Router · new tasks in webapp', mark);
 	check(
 		'while typing, the preview says where new tasks go, and tab can change it',
@@ -289,7 +289,7 @@ try {
 	);
 
 	// 3. A message that names another repository goes there.
-	await tui.type('/in other: bump the version (R3)\r');
+	await tui.type('in other: bump the version (R3)\r');
 	const r3 = await task('R3');
 	check(
 		'a message naming another repository starts its task there',
@@ -298,7 +298,6 @@ try {
 	);
 
 	// 4. A message to a task ignores the default.
-	await tui.type('/');
 	mark = tui.mark();
 	await tui.type(`@${r2.handle} also check Safari`);
 	await tui.waitFor(`→ straight to ${r2.handle}`, mark);
@@ -311,7 +310,7 @@ try {
 
 	// 5. Tab steps to the agent's other repository, then to none.
 	mark = tui.mark();
-	await tui.type('/draft release notes (R4)\t');
+	await tui.type('draft release notes (R4)\t');
 	await tui.waitFor('→ the Router · new tasks in other', mark);
 	check('tab changes the default to another repository', true);
 	mark = tui.mark();
@@ -335,7 +334,7 @@ try {
 		),
 	);
 	mark = tui.mark();
-	await tui.type('/');
+	await tui.type('x');
 	await tui.waitFor('→ the Router', mark);
 	check(
 		'the cleared default stays cleared for the session',
