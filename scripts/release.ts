@@ -50,6 +50,20 @@ if (!dryRun) {
 }
 
 const binaries = await build(TARGETS);
+// Bun signs the macOS executables ad hoc, but a cross-compiled darwin-x64's
+// signature doesn't match its contents. Apple's codesign redoes both.
+if (process.platform === 'darwin') {
+	for (const target of ['darwin-arm64', 'darwin-x64'] as const) {
+		const file = join(DIST, binaryName(target));
+		if (run(['codesign', '--force', '--sign', '-', file]).code !== 0) {
+			stop(`codesign couldn't sign ${file}`);
+		}
+	}
+} else {
+	process.stderr.write(
+		'warning: not on macOS, so the macOS executables keep the signatures Bun gave them; darwin-x64 may not run. Release from a Mac.\n',
+	);
+}
 const assets: string[] = [...binaries];
 const sums: string[] = [];
 for (const file of binaries) {
