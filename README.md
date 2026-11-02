@@ -81,54 +81,97 @@ The first time, it asks for your Particle API key. Paste it and press `enter`. `
 
 The terminal UI is a window onto a background agent. Inside it, the Router reads your messages and hands real work to tasks. Each task has a Worker that works in its own git worktree and branch, and its commands can only write there. The GitHub follower brings each task the activity on the issues and PRs it follows, and the Watchdog keeps an eye on all of it. Every model call goes to Particle.
 
-```mermaid
-flowchart LR
-  you(["You"]) <--> tui["Terminal UI"]
-  tui <--> router
-  subgraph agent ["Background agent"]
-    router["Router"] --> workers
-    subgraph workers ["Tasks, up to 4 working at once"]
-      w1["Worker<br>own worktree and branch"]
-      w2["Worker<br>own worktree and branch"]
-    end
-    follower["GitHub follower"] --> workers
-    watchdog["Watchdog"] -.-> workers
-  end
-  agent <--> particle[("Particle")]
-  follower <--> github[("GitHub")]
+```text
+ +-----+        +-------------+
+ | You | <----> | Terminal UI |
+ +-----+        +-------------+
+                       ^
+                       |
++----------------------|------ Background agent ------------------+
+|                      v                                          |
+|                 +--------+                                      |
+|                 | Router |                                      |
+|                 +--------+                                      |
+|                      |                                          |
+|                      v                                          |
+|  +------------- Tasks, up to 4 working at once ------------+    |
+|  |                                                         |    |
+|  |  +----------------------+   +----------------------+    |    |
+|  |  | Worker               |   | Worker               |    |    |
+|  |  | own worktree, branch |   | own worktree, branch |    |    |
+|  |  +----------------------+   +----------------------+    |    |
+|  |                                                         |    |
+|  +---------------------------------------------------------+    |
+|           ^                                 ^                   |
+|           | brings activity                 : watches           |
+|  +-----------------+                  +----------+              |
+|  | GitHub follower |                  | Watchdog |              |
+|  +-----------------+                  +----------+              |
+|           ^                                                     |
++-----------|-------------------------------------------|---------+
+            v                                           v
+        ( GitHub )                                ( Particle )
+                                                every model call
 ```
 
 A message goes to the Router, which decides what to do with it. Messages that arrive while it's deciding are handled together. It replies, starts a task, or passes the message to a task already on it; `@handle` skips the Router and goes straight to the task. The Worker then plans, edits and runs commands until it's done, and stops to ask you when it needs a decision. It pushes and opens a PR only when you ask for one or the work came from GitHub, and then keeps following the PR's reviews and CI until it's merged or closed.
 
-```mermaid
-flowchart TD
-  msg["You send a message"] --> router{"Router"}
-  msg -->|"@handle"| worker
-  router -->|"a quick question"| reply["Reply under CONSOLE"]
-  router -->|"new work"| worker
-  router -->|"more for a running task"| worker
-  subgraph worker ["Worker"]
-    plan["Plan"] --> edit["Edit files"] --> run["Run commands"] --> plan
-  end
-  worker -->|"needs a decision"| ask["Question under NEEDS YOU"]
-  ask -->|"you answer"| worker
-  worker -->|"finished"| report["Report under DONE"]
-  worker -->|"PR wanted"| pr["Push and open a PR"]
-  pr --> follow["Follow reviews and CI"]
-  follow -->|"changes requested or CI fails"| worker
-  follow -->|"merged or closed"| report
+```text
+                         You send a message
+                                  |
+                   +--------------+-------------------------------+
+                   |                                              |
+                   v                                              | @handle
+ Reply under   +--------+                                         |
+ CONSOLE <-----| Router |                                         |
+   a quick     +--------+                                         |
+   question        |                                              |
+                   | new work, or more for                        |
+                   | a task already running                       |
+                   v                                              |
+       +----------------------------------------------------+     |
+  +--> | Worker                                             | <---+
+  |    |                                                    |
+  |    |  +------+     +------------+     +--------------+  | <-----------+
+  |    |  | Plan | --> | Edit files | --> | Run commands |  |             |
+  |    |  +------+     +------------+     +--------------+  |             |
+  |    |     ^                                    |         |             |
+  |    |     |                                    |         |             |
+  |    |     +--------- until it's done ----------+         |             |
+  |    |                                                    |             |
+  |    +----------------------------------------------------+             |
+  |          |                |                |                          |
+  |          | PR wanted      | finished       | needs a decision         | you answer
+  |          v                |                |                          |
+  |   Push and open a PR      |                v                          |
+  |          |                |    Question under NEEDS YOU --------------+
+  |          v                |
+  |   Follow reviews and CI   |
+  |     |           |         |
+  +-----+           | merged  |
+  changes requested | or      |
+  or CI fails       | closed  |
+                    v         v
+                 Report under DONE
 ```
 
 The Watchdog checks every minute that work is really moving. It fixes what it can itself and asks you about the rest, and it never starts work of its own.
 
-```mermaid
-flowchart LR
-  watchdog["Watchdog, every minute"]
-  watchdog --> stuck["A Worker stopped moving"] --> wake["Wake or restart it"]
-  watchdog --> spin["A task busy without progress"] --> pause["Nudge it, then pause it with a question"]
-  watchdog --> hung["A command hung past its time limit"] --> stop["End the command"]
-  watchdog --> down["Particle unreachable"] --> wait["Pause tasks, resume when it's back"]
-  watchdog --> other["Something only you can fix"] --> problem["Show it under NEEDS YOU"]
+```text
+                     +--> A Worker stopped moving
+                     |      -> wake or restart it
+                     |
+                     +--> A task busy without progress
+                     |      -> nudge it, then pause it with a question
+                     |
+ Watchdog,           +--> A command hung past its time limit
+ every minute -------+      -> end the command
+                     |
+                     +--> Particle unreachable
+                     |      -> pause tasks, resume when it's back
+                     |
+                     +--> Something only you can fix
+                            -> show it under NEEDS YOU
 ```
 
 ## The background agent
