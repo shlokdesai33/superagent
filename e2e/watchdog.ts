@@ -28,6 +28,19 @@ const workers: Record<string, (request: FakeRequest) => FakeReply> = {
 		calls: [{ name: 'finish', args: { result: 'Done slowly' } }],
 		delayMs: 3_600,
 	}),
+	// Read the same missing file forever, slowly enough that the quiet calls
+	// after a verdict (20 after a note, 40 after progressing) outlast the 30
+	// minutes (1.8 s) between a task's reviews, so the call counts decide.
+	looper: () => ({
+		content: 'Looking again.',
+		calls: [{ name: 'read_file', args: { path: 'notes.txt' } }],
+		delayMs: 100,
+	}),
+	thinker: () => ({
+		content: 'Thinking it over.',
+		calls: [{ name: 'read_file', args: { path: 'notes.txt' } }],
+		delayMs: 60,
+	}),
 	// Reads the same missing file forever: calls without progress.
 	spinner: () => ({
 		content: 'Looking again.',
@@ -94,8 +107,49 @@ const titles = new Map<string, string>();
 
 // The Router starts a task titled `<name>` for `please run <name>`, and stays
 // silent otherwise; each Worker follows its title's behavior.
+// The fake reviewer's verdict for each task, by title; `progressing` otherwise.
+const verdicts: Record<
+	string,
+	{ verdict: string; reason: string; advice: string }
+> = {
+	looper: {
+		verdict: 'looping',
+		reason: 'It reads the same missing file again and again.',
+		advice: 'Stop reading notes.txt: create it, or ask the operator.',
+	},
+};
+// Every review the fake reviewer answered, with the Worker's calls by then.
+const reviews: Array<{
+	handle: string;
+	title: string;
+	workerCalls: number;
+	input: string;
+}> = [];
+
 const particle = startFakeParticle((request) => {
 	if (request.session === 'compaction') return { content: 'Summary.' };
+	if (request.session === 'watchdog') {
+		const [, handle = '', title = ''] =
+			request.fresh.match(/^Task (\w+): (\w+)/) ?? [];
+		reviews.push({
+			handle,
+			title,
+			workerCalls: workerCalls(handle),
+			input: request.fresh,
+		});
+		return {
+			calls: [
+				{
+					name: 'verdict',
+					args: verdicts[title] ?? {
+						verdict: 'progressing',
+						reason: 'Each step tries something new.',
+						advice: 'Keep going.',
+					},
+				},
+			],
+		};
+	}
 	if (request.session === 'router') {
 		if (controls.breakRouter > 0) {
 			controls.breakRouter -= 1;
@@ -238,6 +292,10 @@ try {
 			'health shows the Watchdog checking, again and again',
 			checks.every((at, index) => index === 0 || at > (checks[index - 1] ?? 0)),
 			`${checks.length} checks`,
+		);
+		check(
+			'with nothing wrong, the Watchdog makes no model calls',
+			!particle.requests.some((request) => request.session === 'watchdog'),
 		);
 		const last = watchdogLines(agent).at(-1)?.health;
 		check(
@@ -545,6 +603,92 @@ try {
 		);
 	});
 
+	await scenario(
+		'A looping Worker is told, then paused',
+		async (agent) => {
+			await agent.action({ type: 'send_console', text: 'please run looper' });
+			const paused = await taskLine(
+				agent,
+				'the looper paused',
+				(task) => task.title === 'looper' && task.status === 'needs_you',
+			);
+			const mine = reviews.filter((review) => review.handle === paused.handle);
+			const [first, second] = mine;
+			check(
+				'after 4 repeats of the same call, one review sees the task and the repeated call',
+				first !== undefined &&
+					first.workerCalls < 20 &&
+					first.input.includes('looper') &&
+					first.input.includes('read_file'),
+				`at ${first?.workerCalls ?? '?'} calls`,
+			);
+			check(
+				'its first verdict reaches the Worker as a note',
+				particle.requests.some(
+					(request) =>
+						request.handle === paused.handle &&
+						request.fresh.includes('note from watchdog') &&
+						request.fresh.includes('Stop reading notes.txt'),
+				),
+			);
+			check(
+				'a second review, at least 20 calls later, pauses it',
+				mine.length === 2 &&
+					second !== undefined &&
+					first !== undefined &&
+					second.workerCalls - first.workerCalls >= 20,
+				`${mine.length} reviews`,
+			);
+			check(
+				"the pause says why, not the backstop's count",
+				paused.question?.text.startsWith('Watchdog:') === true &&
+					paused.question.text.includes('reads the same missing file'),
+				paused.question?.text ?? '',
+			);
+			const counted = await agent.until(
+				'health to count both reviews',
+				async () =>
+					watchdogLines(agent).at(-1)?.health.watchdog.reviewsToday ?? 0,
+				(count) => count >= 2,
+			);
+			check('health counts the reviews', counted >= 2, `${counted} today`);
+			await agent.action({ type: 'stop_task', handle: paused.handle });
+		},
+		/^reviews:/,
+	);
+
+	await scenario('A progressing verdict is silent', async (agent) => {
+		await agent.action({ type: 'send_console', text: 'please run thinker' });
+		const { handle } = await taskLine(
+			agent,
+			'the thinker working',
+			(task) => task.title === 'thinker',
+		);
+		await agent.until(
+			'two reviews',
+			async () => reviews.filter((review) => review.handle === handle),
+			(mine) => mine.length >= 2,
+		);
+		const [first, second] = reviews.filter(
+			(review) => review.handle === handle,
+		);
+		check(
+			'after `progressing`, no review for 40 more calls',
+			first !== undefined &&
+				second !== undefined &&
+				second.workerCalls - first.workerCalls >= 40,
+			`${(second?.workerCalls ?? 0) - (first?.workerCalls ?? 0)} calls apart`,
+		);
+		check(
+			'and the Worker hears nothing from the Watchdog',
+			!particle.requests.some(
+				(request) =>
+					request.handle === handle && request.fresh.includes('watchdog'),
+			),
+		);
+		await agent.action({ type: 'stop_task', handle });
+	});
+
 	await scenario('Edits are progress', async (agent) => {
 		await agent.action({ type: 'send_console', text: 'please run editor' });
 		const done = await taskLine(
@@ -751,6 +895,17 @@ try {
 			`${workerCalls(failed.handle)} calls · ${failed.result ?? ''}`,
 		);
 	});
+	process.stdout.write('\nReviews\n');
+	const leaked = particle.requests.filter(
+		(request) =>
+			request.session === 'watchdog' &&
+			JSON.stringify(request.body).includes('pai-e2e'),
+	).length;
+	check(
+		'no review request holds the Particle key',
+		reviews.length > 0 && leaked === 0,
+		`${reviews.length} reviews`,
+	);
 } finally {
 	particle.stop();
 }

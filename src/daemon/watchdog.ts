@@ -1,8 +1,10 @@
 import type { Problem } from '../protocol.ts';
 import { stopCommand } from './commands.ts';
+import { ingest } from './ingest.ts';
 import { pauseTask } from './tasks.ts';
 import { watchdogMs } from './scale.ts';
-import { type Daemon, type Params, health } from './state.ts';
+import { type Daemon, type Params, cut, dayStart, health } from './state.ts';
+import { type Verdict, repeatedCalls, reviewTask } from './watchdog-review.ts';
 
 const TICK_MS = watchdogMs(60_000);
 // Recovery's own effects settle before anything is judged.
@@ -19,6 +21,16 @@ const REPLY_KICK_MS = watchdogMs(15 * 60_000);
 const REPLY_LATE_MS = watchdogMs(60 * 60_000);
 // Model calls without a single progress mark before a task is paused.
 const BACKSTOP_CALLS = 150;
+// A review: at this many calls since progress, or the same call this many
+// times within at least `LOOP_MIN_CALLS` calls since progress.
+const SPINNING_CALLS = 60;
+const LOOP_REPEATS = 4;
+const LOOP_MIN_CALLS = 8;
+const REVIEWS_PER_DAY = 20;
+const REVIEW_EVERY_MS = watchdogMs(30 * 60_000);
+const QUIET_AFTER_PROGRESSING = 40;
+const QUIET_AFTER_NOTE = 20;
+const QUESTION_CHARS = 300;
 
 /** A stored finding: one check's condition that holds, acted on once. */
 export type Finding = {
@@ -76,10 +88,10 @@ const FINDING_COLUMNS = `id, key, task_id AS taskId, opened_at AS openedAt, stag
  * Runs the checks every minute until stopped. Each check runs alone, so a
  * broken one doesn't stop the others; what they find is in `watchdog_findings`.
  */
-export function startWatchdog(
-	daemon: Daemon,
-	checks: Check[] = CHECKS,
-): Watchdog {
+export function startWatchdog(daemon: Daemon): Watchdog {
+	const stopping = new AbortController();
+	const inReview = new Map<number, Promise<void>>();
+	const checks = [...CHECKS, reviews(stopping.signal, inReview)];
 	const failing = new Map<string, number>();
 	let timer: Timer | null = null;
 	// When the previous tick ran; before the first, as if one ran a tick
@@ -154,6 +166,8 @@ export function startWatchdog(
 		stop: async () => {
 			if (timer) clearTimeout(timer);
 			timer = null;
+			stopping.abort();
+			await Promise.all(inReview.values());
 		},
 	};
 }
@@ -493,6 +507,174 @@ const runaway: Check = {
 		}
 	},
 };
+
+/**
+ * Workers spending calls without progress, or repeating a call, get a model
+ * review: is it getting anywhere? At most one per task at a time, one per
+ * task per 30 minutes and 20 a day, and none while the model is unwell.
+ */
+function reviews(
+	signal: AbortSignal,
+	inReview: Map<number, Promise<void>>,
+): Check {
+	return {
+		name: 'reviews',
+		timed: false,
+		run: (round) => {
+			const { daemon, now } = round;
+			const { db } = daemon;
+			for (const task of db
+				.query<
+					{
+						id: number;
+						handle: string;
+						title: string;
+						instructions: string;
+						calls: number;
+						idle: number;
+						since: number;
+					},
+					[number]
+				>(
+					`SELECT id, handle, title, instructions, model_calls AS calls,
+						model_calls - progress_calls AS idle,
+						COALESCE(last_progress_at, created_at) AS since
+					FROM tasks WHERE state = 'active' AND model_calls - progress_calls >= ?`,
+				)
+				.all(LOOP_MIN_CALLS)) {
+				const loop = repeatedCalls(db, task.id, task.since).find(
+					(entry) => entry.count >= LOOP_REPEATS,
+				);
+				if (task.idle < SPINNING_CALLS && !loop) continue;
+				const finding = round.hold(`reviews:${task.handle}`, task.id);
+				if (
+					inReview.has(task.id) ||
+					(finding.snoozeCalls !== null && task.calls < finding.snoozeCalls) ||
+					(finding.snoozeUntil !== null && now < finding.snoozeUntil) ||
+					daemon.particle === null ||
+					daemon.model.state !== 'ok' ||
+					reviewsToday(daemon, now) >= REVIEWS_PER_DAY
+				) {
+					continue;
+				}
+				const trigger = loop
+					? `the same ${loop.call.split(' ')[0] ?? 'tool'} call ${loop.count} times`
+					: `${task.idle} calls since its last progress`;
+				daemon.log('info', 'watchdog reviews a task', {
+					task: task.handle,
+					trigger,
+				});
+				const review = (async () => {
+					const verdict = await reviewTask(daemon, task, trigger, signal);
+					inReview.delete(task.id);
+					if (signal.aborted) return;
+					try {
+						applyVerdict(daemon, finding.id, task, verdict);
+					} catch (error) {
+						daemon.log('warn', 'watchdog verdict failed', {
+							task: task.handle,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				})();
+				inReview.set(task.id, review);
+			}
+		},
+	};
+}
+
+function reviewsToday(daemon: Daemon, now: number): number {
+	return (
+		daemon.db
+			.query<{ count: number }, [number]>(
+				"SELECT COUNT(*) AS count FROM model_calls WHERE purpose = 'watchdog' AND started_at >= ?",
+			)
+			.get(dayStart(now))?.count ?? 0
+	);
+}
+
+const VERDICT_WORDS: Record<
+	Exclude<Verdict['verdict'], 'progressing'>,
+	string
+> = {
+	stuck: 'stuck',
+	looping: 'looping',
+	off_goal: 'off the task',
+};
+
+/**
+ * `progressing` is silent. The first other verdict in an episode is a note to
+ * the Worker; the next pauses the task with a question. A finding resolved
+ * meanwhile (the task made progress) ignores the verdict.
+ */
+function applyVerdict(
+	daemon: Daemon,
+	findingId: number,
+	task: { id: number; handle: string },
+	verdict: Verdict | null,
+): void {
+	const { db } = daemon;
+	const finding = db
+		.query<{ state: string; stage: string | null }, [number]>(
+			'SELECT state, stage FROM watchdog_findings WHERE id = ?',
+		)
+		.get(findingId);
+	if (!finding || finding.state !== 'open') return;
+	const now = Date.now();
+	const calls =
+		db
+			.query<{ calls: number }, [number]>(
+				'SELECT model_calls AS calls FROM tasks WHERE id = ?',
+			)
+			.get(task.id)?.calls ?? 0;
+	const settle = (stage: string | null, quietCalls: number | null) => {
+		db.query<unknown, Params>(
+			`UPDATE watchdog_findings SET stage = COALESCE($stage, stage),
+				snooze_calls = $snoozeCalls, snooze_until = $snoozeUntil WHERE id = $id`,
+		).run({
+			stage,
+			snoozeCalls: quietCalls === null ? null : calls + quietCalls,
+			snoozeUntil: now + REVIEW_EVERY_MS,
+			id: findingId,
+		});
+	};
+	if (verdict === null) {
+		settle(null, null);
+		return;
+	}
+	daemon.log('info', 'watchdog verdict', {
+		task: task.handle,
+		verdict: verdict.verdict,
+		reason: verdict.reason,
+	});
+	if (verdict.verdict === 'progressing') {
+		settle(null, QUIET_AFTER_PROGRESSING);
+		return;
+	}
+	const word = VERDICT_WORDS[verdict.verdict];
+	if (finding.stage !== 'noted') {
+		ingest(daemon, {
+			channel: 'console',
+			externalId: null,
+			thread: null,
+			kind: 'note',
+			author: { name: 'watchdog', id: null, isBot: false, isSelf: false },
+			text: `The watchdog thinks you're ${word}: ${verdict.reason}\n\n${verdict.advice}`,
+			mentionsAgent: false,
+			taskId: task.id,
+		});
+		settle('noted', QUIET_AFTER_NOTE);
+		return;
+	}
+	const paused = pauseTask(daemon, task.id, {
+		text: cut(
+			`Watchdog: ${task.handle} seems ${word}: ${verdict.reason} It's paused. Continue or stop?`,
+			QUESTION_CHARS,
+		),
+		context: `**Why:** ${verdict.reason}\n\n**Advice it was given:** ${verdict.advice}`,
+	});
+	if (paused) settle('paused', null);
+}
 
 const CHECKS: Check[] = [workers, router, github, commands, runaway];
 

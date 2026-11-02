@@ -192,6 +192,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 		if (
 			decision.route === 'task' &&
 			event.channel !== 'internal' &&
+			event.author.name !== 'watchdog' &&
 			ANSWER_KINDS.has(event.kind)
 		) {
 			answered =
