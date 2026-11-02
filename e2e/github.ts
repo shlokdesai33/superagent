@@ -973,6 +973,100 @@ try {
 		prRead?.split('\n')[2] ?? '',
 	);
 
+	// CI on the PR's head commit: nothing while it runs, one event when it
+	// turns red, and one when a pushed fix turns green.
+	const ciRouted = () =>
+		agent.lines.filter(
+			(line): line is RoutedLine =>
+				line.type === 'routed' &&
+				line.event.channel === 'github' &&
+				line.event.preview.startsWith('CI '),
+		);
+	const head1 = github.prHead('acme/app', 8);
+	github.setChecks('acme/app', head1, {
+		runs: [
+			{ name: 'test (ubuntu-latest)', status: 'in_progress' },
+			{ name: 'lint', status: 'queued' },
+		],
+		statuses: [{ context: 'ci/legacy', state: 'pending' }],
+	});
+	const checkPolls = (sha: string) =>
+		github.requests.filter((request) =>
+			request.path.startsWith(`/repos/acme/app/commits/${sha}/check-runs`),
+		).length;
+	const checksBefore = checkPolls(head1);
+	await agent.until(
+		'two polls of the running checks',
+		async () => checkPolls(head1),
+		(count) => count >= checksBefore + 2,
+	);
+	check('checks still running send nothing', ciRouted().length === 0);
+	github.setChecks('acme/app', head1, {
+		runs: [
+			{
+				name: 'test (ubuntu-latest)',
+				status: 'completed',
+				conclusion: 'failure',
+			},
+			{ name: 'lint', status: 'completed', conclusion: 'success' },
+		],
+		statuses: [{ context: 'ci/legacy', state: 'success' }],
+	});
+	await workerSaw(
+		`CI failed on ${head1.slice(0, 7)}: test (ubuntu-latest) failed; 2 of 3 passed`,
+	);
+	const red = ciRouted()[0];
+	check(
+		'a red result is one ci event, straight to the task',
+		red?.event.destination.kind === 'task' &&
+			red.event.destination.handle === handle,
+		red ? JSON.stringify(red.event.destination) : 'none',
+	);
+	const head2 = 'c0ffee'.repeat(6).padEnd(40, '0');
+	github.pushCommit('acme/app', 8, head2);
+	github.setChecks('acme/app', head2, {
+		runs: [
+			{
+				name: 'test (ubuntu-latest)',
+				status: 'completed',
+				conclusion: 'success',
+			},
+			{ name: 'lint', status: 'completed', conclusion: 'success' },
+		],
+		statuses: [{ context: 'ci/legacy', state: 'success' }],
+	});
+	await workerSaw(`CI passed on ${head2.slice(0, 7)} (3 checks)`);
+	await Bun.sleep(600);
+	check(
+		'one event per head commit and outcome, however often it is polled',
+		ciRouted().length === 2,
+		ciRouted()
+			.map((line) => line.event.preview.slice(0, 22))
+			.join(' | '),
+	);
+	check(
+		'the Router never sees CI results',
+		!particle.requests.some(
+			(request) =>
+				request.session === 'router' && request.fresh.includes('CI failed'),
+		),
+	);
+	await agent.action({ type: 'send_console', text: 'READ8 with CI' });
+	const ciRead = await agent.until(
+		'read_thread with CI',
+		async () =>
+			particle.requests
+				.filter((request) => request.session === 'router')
+				.flatMap((request) => request.results)
+				.findLast((result) => result.startsWith('thread github:acme/app#8')),
+		(result) => (result ?? '').includes('CI passed'),
+	);
+	check(
+		"read_thread shows the PR's new head and CI",
+		(ciRead ?? '').includes(`head ${head2.slice(0, 7)} · CI passed`),
+		ciRead?.split('\n')[2] ?? '',
+	);
+
 	// An existing PR handed over from the console: its review comments and
 	// reviews so far are in the Worker's first message, and new ones follow.
 	github.openPr('acme/app', 12, {
@@ -1039,6 +1133,11 @@ try {
 				(line.event.preview.includes('EXISTING-RC1') ||
 					line.event.preview.includes('EXISTING-RV1')),
 		),
+	);
+
+	check(
+		'a PR with no checks sends no CI events',
+		ciRouted().every((line) => line.event.threadTitle === 'app#8'),
 	);
 
 	// Closing the issue doesn't end the task while its PR is open; the merge does.

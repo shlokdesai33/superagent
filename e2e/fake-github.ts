@@ -142,6 +142,19 @@ export type FakeGitHub = {
 		},
 	): void;
 	merge(repo: string, number: number, by: string): void;
+	/** The PR's head commit. */
+	prHead(repo: string, number: number): string;
+	/** What a push to the PR's branch does: a new head commit. */
+	pushCommit(repo: string, number: number, sha: string): void;
+	/** Replaces a commit's check runs and commit statuses. */
+	setChecks(
+		repo: string,
+		sha: string,
+		checks: {
+			runs: Array<{ name: string; status: string; conclusion?: string }>;
+			statuses?: Array<{ context: string; state: string }>;
+		},
+	): void;
 	stop(): void;
 };
 
@@ -174,6 +187,19 @@ export function startFakeGitHub(options: {
 	let remaining = LIMIT;
 	const reset = Math.floor(Date.now() / 1000) + 3600;
 	const issues = new Map<string, Issue>();
+	const checks = new Map<
+		string,
+		{
+			runs: Array<{
+				id: number;
+				name: string;
+				status: string;
+				conclusion: string | null;
+				html_url: string;
+			}>;
+			statuses: Array<{ context: string; state: string; target_url: string }>;
+		}
+	>();
 	let nextId = 5_000;
 	const user = (login: string, bot = false): User => ({
 		login,
@@ -419,6 +445,44 @@ export function startFakeGitHub(options: {
 			if (pull[3] === '/comments') return listing(url, issue.pr.reviewComments);
 			return paged(url, issue.pr.reviews);
 		}
+		const commit = path.match(
+			/^\/repos\/([^/]+\/[^/]+)\/commits\/([0-9a-f]+)\/(check-runs|status)$/,
+		);
+		if (commit) {
+			const onCommit = checks.get(`${commit[1]}@${commit[2]}`) ?? {
+				runs: [],
+				statuses: [],
+			};
+			if (commit[3] === 'check-runs') {
+				const perPage = Number(url.searchParams.get('per_page') ?? 30);
+				const page = Number(url.searchParams.get('page') ?? 1);
+				return {
+					status: 200,
+					body: {
+						total_count: onCommit.runs.length,
+						check_runs: onCommit.runs.slice(
+							(page - 1) * perPage,
+							page * perPage,
+						),
+					},
+				};
+			}
+			const states = onCommit.statuses.map((entry) => entry.state);
+			return {
+				status: 200,
+				body: {
+					sha: commit[2],
+					total_count: onCommit.statuses.length,
+					statuses: onCommit.statuses,
+					state:
+						states.length === 0 || states.includes('pending')
+							? 'pending'
+							: states.some((state) => state === 'failure' || state === 'error')
+								? 'failure'
+								: 'success',
+				},
+			};
+		}
 		const repo = path.match(/^\/repos\/([^/]+\/[^/]+)$/)?.[1];
 		const found = repo === undefined ? undefined : options.repos[repo];
 		if (repo !== undefined && found !== undefined) {
@@ -583,6 +647,31 @@ export function startFakeGitHub(options: {
 				html_url: `${html(issue)}#pullrequestreview-${id}`,
 			});
 			issue.updated_at = stamp(Date.now());
+		},
+		prHead(repo, number) {
+			return issues.get(`${repo}#${number}`)?.pr?.sha ?? '';
+		},
+		pushCommit(repo, number, sha) {
+			const issue = issues.get(`${repo}#${number}`);
+			if (!issue?.pr) throw new Error(`no PR ${repo}#${number}`);
+			issue.pr.sha = sha;
+			issue.updated_at = stamp(Date.now());
+		},
+		setChecks(repo, sha, set) {
+			checks.set(`${repo}@${sha}`, {
+				runs: set.runs.map((run) => ({
+					id: ++nextId,
+					name: run.name,
+					status: run.status,
+					conclusion: run.conclusion ?? null,
+					html_url: `https://github.com/${repo}/runs/${nextId}`,
+				})),
+				statuses: (set.statuses ?? []).map((entry) => ({
+					context: entry.context,
+					state: entry.state,
+					target_url: `https://ci.example.com/${sha}/${entry.context}`,
+				})),
+			});
 		},
 		merge(repo, number, by) {
 			const issue = issues.get(`${repo}#${number}`);

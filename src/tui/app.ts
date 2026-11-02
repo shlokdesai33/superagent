@@ -10,6 +10,7 @@ import type {
 	FeedLine,
 	Step,
 	TaskDetail,
+	TaskSummary,
 } from '../protocol.ts';
 import { connect } from './connection.ts';
 import type { InputEvent } from './input.ts';
@@ -19,6 +20,7 @@ import {
 	apply,
 	fromSnapshot,
 	homeItems,
+	linkOf,
 	placeOf,
 	sectionOf,
 	stoppable,
@@ -459,6 +461,41 @@ export class App {
 		this.loadDetail(handle);
 	}
 
+	/** Opens the task's PR or issue in your browser. */
+	private openLink(task: TaskSummary): void {
+		const link = linkOf(task);
+		if (link === null) {
+			this.showToast({
+				glyph: '✗',
+				subject: 'Nothing to open',
+				detail: `${task.handle} follows no GitHub issue or PR`,
+				ms: ERROR_TOAST_MS,
+			});
+			return;
+		}
+		const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+		if (Bun.which(opener) === null) {
+			this.showToast({
+				glyph: '✗',
+				subject: `Couldn't open ${link.title}`,
+				detail: `${opener} isn't installed · ${link.url}`,
+				ms: ERROR_TOAST_MS,
+			});
+			return;
+		}
+		Bun.spawn([opener, link.url], {
+			stdin: 'ignore',
+			stdout: 'ignore',
+			stderr: 'ignore',
+		}).unref();
+		this.showToast({
+			glyph: '✓',
+			subject: `Opened ${link.title}`,
+			detail: 'in your browser',
+			ms: TOAST_MS,
+		});
+	}
+
 	private goHome(): void {
 		this.ui.screen = { name: 'home' };
 		this.ui.scroll.page = 0;
@@ -506,6 +543,7 @@ export class App {
 			if (screen.name === 'task') {
 				const task = this.model.live?.tasks.get(screen.handle);
 				if (key === 'enter') this.answer(screen.handle);
+				if (ch === 'o' && task) this.openLink(task);
 				if (ch === 's' && task && stoppable(task))
 					this.ui.confirmStop = task.handle;
 			}
