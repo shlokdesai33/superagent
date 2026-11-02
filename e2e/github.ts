@@ -79,7 +79,7 @@ const github = startFakeGitHub({
 // The fake models: a Router that starts the task each console message asks
 // for, and Workers that finish, wait on an issue until it's closed, or print
 // what a leak would show and finish.
-const kinds = new Map<string, 'off' | 'leak' | 'issue'>();
+const kinds = new Map<string, 'off' | 'leak' | 'issue' | 'watch'>();
 let issueHandle: string | null = null;
 const particle = startFakeParticle((request) => {
 	if (request.session === 'compaction') return { content: 'Summary.' };
@@ -122,19 +122,38 @@ const particle = startFakeParticle((request) => {
 		if (request.fresh.includes('An earlier attempt to decide these')) {
 			return { content: 'Already handled.' };
 		}
-		const replyTo = request.fresh.match(/REPLYTO (\d+) (.+)/);
-		if (replyTo?.[1] && replyTo[2]) {
+		const replyTo = request.fresh.match(/REPLYTO(\d*) (\d+) (.+)/);
+		if (replyTo?.[2] && replyTo[3]) {
 			return {
 				calls: [
 					{
 						name: 'reply',
 						args: {
-							thread: 'github:acme/app#7',
-							text: replyTo[2],
-							reply_to: Number(replyTo[1]),
+							thread: `github:acme/app#${replyTo[1] || '7'}`,
+							text: replyTo[3],
+							reply_to: Number(replyTo[2]),
 						},
 					},
 				],
+			};
+		}
+		if (request.fresh.includes('PR12 take over')) {
+			return {
+				calls: [
+					{
+						name: 'start_task',
+						args: {
+							title: 'Review PR 12',
+							instructions: 'WATCH-TASK: follow acme/app#12.',
+							threads: ['github:acme/app#12'],
+						},
+					},
+				],
+			};
+		}
+		if (request.fresh.includes('READ8')) {
+			return {
+				calls: [{ name: 'read_thread', args: { id: 'github:acme/app#8' } }],
 			};
 		}
 		if (request.fresh.includes('REPLYLONG')) {
@@ -220,16 +239,31 @@ const particle = startFakeParticle((request) => {
 				? 'leak'
 				: request.fresh.includes('ISSUE-TASK')
 					? 'issue'
-					: 'off',
+					: request.fresh.includes('WATCH-TASK')
+						? 'watch'
+						: 'off',
 		);
 	}
-	if (
-		kinds.get(handle) === 'issue' &&
-		!request.fresh.includes('was closed by')
-	) {
+	if (kinds.get(handle) === 'issue') {
+		// Finishes when the issue closes or its PR merges; finishing while the
+		// PR is open is refused, and then it waits.
+		const refused = request.results.some((result) =>
+			result.includes('is still open'),
+		);
+		const ending =
+			request.fresh.includes('was merged') ||
+			request.fresh.includes('was closed by');
+		if (refused || !ending) {
+			return {
+				content: 'Waiting.',
+				calls: [{ name: 'wait_for', args: { what: 'the issue and its PR' } }],
+			};
+		}
+	}
+	if (kinds.get(handle) === 'watch') {
 		return {
-			content: 'Waiting on the issue.',
-			calls: [{ name: 'wait_for', args: { what: 'the issue' } }],
+			content: 'Watching the PR.',
+			calls: [{ name: 'wait_for', args: { what: 'the PR' } }],
 		};
 	}
 	if (kinds.get(handle) === 'leak' && !request.called.includes('run')) {
@@ -785,9 +819,246 @@ try {
 		`${commentsWith(7, 'R5 Posted across a crash.').length} comments, ${postsWith(7, 'R5 Posted across a crash.').length} posts`,
 	);
 
-	// Closing the issue reaches the task, which finishes; polling then stops.
+	// 4. The task's PR: found by its branch, signed, and followed.
+	github.openPr('acme/app', 8, {
+		title: 'Fix the Safari export',
+		body: 'Fixes #7.',
+		by: 'shlok',
+		head: `superagent/${handle}`,
+	});
+	github.openPr('acme/app', 11, {
+		title: 'Not the agent’s',
+		body: 'From another branch.',
+		by: 'carol',
+		head: 'carol/other',
+	});
+	await workerSaw('You now follow github:acme/app#8');
+	check(
+		"the daemon finds the task's PR by its branch and tells the Worker",
+		true,
+	);
+	const withPr = await agent.waitFor(
+		'the task to follow its PR',
+		(line): line is TaskLine =>
+			line.type === 'task' &&
+			line.task.handle === handle &&
+			line.task.threads.some((followed) => followed.id === 'github:acme/app#8'),
+	);
+	check(
+		'the PR is one of the task’s threads',
+		withPr.task.threads.some(
+			(followed) =>
+				followed.title === 'app#8' &&
+				followed.url === 'https://github.com/acme/app/pull/8',
+		),
+		JSON.stringify(withPr.task.threads.map((followed) => followed.title)),
+	);
+	const signed = await agent.until(
+		'the PR to be signed',
+		async () => github.prBody('acme/app', 8),
+		(body) => body.includes('<!-- superagent t'),
+	);
+	check(
+		'the PR body gains the sign-off and marker, after what the Worker wrote',
+		signed.startsWith('Fixes #7.\n\n') &&
+			signed.includes(
+				`<sub>Posted by superagent for @shlok · task ${handle}</sub>`,
+			),
+		signed.split('\n').at(-2) ?? '',
+	);
+	check(
+		'a PR from another branch is never followed',
+		!github.requests.some((request) =>
+			request.path.startsWith('/repos/acme/app/pulls/11'),
+		),
+	);
+
+	// 5. Review comments, reviews, and a reply in a review thread.
+	const reviewCommentId = github.reviewComment('acme/app', 8, {
+		by: 'shlok',
+		body: 'RC1 rename this',
+		path: 'src/export.ts',
+		line: 42,
+	});
+	const rc1 = await routed('RC1');
+	check(
+		"a review comment goes straight to the task's Worker, with its line",
+		rc1.event.destination.kind === 'task' &&
+			rc1.event.destination.handle === handle &&
+			rc1.event.preview.startsWith('src/export.ts:42: RC1'),
+		rc1.event.preview,
+	);
+	github.review('acme/app', 8, {
+		by: 'bugbot',
+		bot: true,
+		state: 'COMMENTED',
+		body: 'RV1 possible null dereference',
+	});
+	const botReview = await workerSaw('Review (commented): RV1');
+	check(
+		"a bot's review reaches the task, marked as a bot",
+		botReview.some((request) => request.fresh.includes('bugbot (bot)')),
+	);
+	github.review('acme/app', 8, { by: 'alice', state: 'APPROVED' });
+	await workerSaw('alice approved #8');
+	check('an approval without a body is an activity for the task', true);
+
+	// More than a page of reviews: one submitted after the first hundred,
+	// which lands on the second page, still arrives.
+	const reviewPolls = () =>
+		github.requests.filter((request) =>
+			request.path.startsWith('/repos/acme/app/pulls/8/reviews'),
+		).length;
+	for (let n = 0; n < 100; n += 1) {
+		github.review('acme/app', 8, { by: 'carol', state: 'COMMENTED' });
+	}
+	const polledBefore = reviewPolls();
+	await agent.until(
+		'two polls of the reviews',
+		async () => reviewPolls(),
+		(count) => count >= polledBefore + 2,
+	);
+	github.review('acme/app', 8, {
+		by: 'dave',
+		state: 'CHANGES_REQUESTED',
+		body: 'RV103 on the second page',
+	});
+	await workerSaw('RV103 on the second page');
+	check('a review past the first page of 100 still reaches the task', true);
+
+	await agent.action({
+		type: 'send_console',
+		text: `REPLYTO8 ${rc1.event.id} RR1 Renamed it.`,
+	});
+	check(
+		'reply_to on a review comment is delivered',
+		(await delivery(8, 'RR1 Renamed it.')) === 'delivered',
+	);
+	const threaded = github
+		.reviewComments('acme/app', 8)
+		.filter((comment) => comment.body.includes('RR1 Renamed it.'));
+	check(
+		'it is posted once, in that review thread, signed and marked',
+		threaded.length === 1 &&
+			threaded[0]?.inReplyTo === reviewCommentId &&
+			/<!-- superagent m\d+ -->$/.test(threaded[0]?.body ?? ''),
+		JSON.stringify(threaded.map((comment) => comment.inReplyTo)),
+	);
+	const rr1Back = await agent.waitFor(
+		'RR1 polled back',
+		(line): line is RoutedLine =>
+			line.type === 'routed' &&
+			line.event.channel === 'github' &&
+			line.event.preview.includes('RR1 Renamed'),
+	);
+	check(
+		'it comes back as a review comment and is filtered as the agent’s own',
+		rr1Back.event.destination.kind === 'filtered' &&
+			rr1Back.event.destination.reason === 'own message',
+	);
+	await agent.action({ type: 'send_console', text: 'READ8 please' });
+	const prRead = await agent.until(
+		'read_thread on the PR',
+		async () =>
+			particle.requests
+				.filter((request) => request.session === 'router')
+				.flatMap((request) => request.results)
+				.find((result) => result.startsWith('thread github:acme/app#8')),
+		(result) => result !== undefined,
+	);
+	check(
+		"read_thread shows the PR's state and reviews",
+		(prRead ?? '').includes('GitHub PR · open · "Fix the Safari export"') &&
+			(prRead ?? '').includes('reviews: alice approved'),
+		prRead?.split('\n')[2] ?? '',
+	);
+
+	// An existing PR handed over from the console: its review comments and
+	// reviews so far are in the Worker's first message, and new ones follow.
+	github.openPr('acme/app', 12, {
+		title: 'Carol’s feature',
+		body: 'Adds a feature.',
+		by: 'carol',
+		head: 'carol/feature',
+	});
+	github.reviewComment('acme/app', 12, {
+		by: 'alice',
+		body: 'EXISTING-RC1 typo here',
+		path: 'src/feature.ts',
+		line: 3,
+	});
+	github.review('acme/app', 12, {
+		by: 'alice',
+		state: 'CHANGES_REQUESTED',
+		body: 'EXISTING-RV1 needs tests',
+	});
+	await agent.action({ type: 'send_console', text: 'PR12 take over' });
+	const watcher = (
+		await agent.waitFor(
+			'the PR 12 task',
+			(line): line is TaskLine =>
+				line.type === 'task' && line.task.title === 'Review PR 12',
+		)
+	).task.handle;
+	const watcherSaw = (text: string) =>
+		agent.until(
+			`the PR 12 Worker to see ${text}`,
+			async () =>
+				particle.requests.filter(
+					(request) =>
+						request.session === 'worker' &&
+						request.handle === watcher &&
+						request.fresh.includes(text),
+				),
+			(found) => found.length > 0,
+		);
+	const watcherFirst = (await watcherSaw('GitHub PR acme/app#12'))[0];
+	check(
+		"a handed-over PR's first message has its review comments and reviews",
+		(watcherFirst?.fresh ?? '').includes('EXISTING-RC1') &&
+			(watcherFirst?.fresh ?? '').includes('EXISTING-RV1'),
+	);
+	github.reviewComment('acme/app', 12, {
+		by: 'alice',
+		body: 'NEW-RC2 and here',
+		path: 'src/feature.ts',
+		line: 9,
+	});
+	github.review('acme/app', 12, {
+		by: 'alice',
+		state: 'COMMENTED',
+		body: 'NEW-RV2 one more thing',
+	});
+	await watcherSaw('NEW-RC2 and here');
+	await watcherSaw('NEW-RV2 one more thing');
+	check(
+		'later review comments and reviews follow, without repeating the old ones',
+		!agent.lines.some(
+			(line) =>
+				line.type === 'routed' &&
+				(line.event.preview.includes('EXISTING-RC1') ||
+					line.event.preview.includes('EXISTING-RV1')),
+		),
+	);
+
+	// Closing the issue doesn't end the task while its PR is open; the merge does.
 	github.closeIssue('acme/app', 7, 'alice');
+	await agent.until(
+		'finishing to be refused',
+		async () =>
+			particle.requests
+				.filter(
+					(request) =>
+						request.session === 'worker' && request.handle === handle,
+				)
+				.flatMap((request) => request.results),
+		(results) => results.some((result) => result.includes('is still open')),
+	);
+	check("a task can't finish while its PR is open", true);
+	github.merge('acme/app', 8, 'shlok');
+	await workerSaw('#8 was merged by shlok');
 	await taskDone('Fix issue 7');
+	check('the merge reaches the task, which then finishes', true);
 	const timeline = await agent.get(
 		`/v1/threads/${encodeURIComponent('github:acme/app#7')}`,
 	);
@@ -796,14 +1067,17 @@ try {
 		JSON.stringify(timeline).includes('#7 was closed by alice'),
 	);
 	const polls = () =>
-		github.requests.filter((request) =>
-			request.path.startsWith('/repos/acme/app/issues/7'),
+		github.requests.filter(
+			(request) =>
+				request.path.startsWith('/repos/acme/app/issues/7') ||
+				request.path.startsWith('/repos/acme/app/issues/8') ||
+				request.path.startsWith('/repos/acme/app/pulls/8'),
 		).length;
 	await Bun.sleep(500);
 	const settled = polls();
 	await Bun.sleep(1_000);
 	check(
-		'after the task ends, its issues are no longer polled',
+		'after the task ends, its issue and PR are no longer polled',
 		polls() === settled,
 		`${polls() - settled} more requests`,
 	);

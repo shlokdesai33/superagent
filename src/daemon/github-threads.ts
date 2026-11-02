@@ -1,8 +1,14 @@
 import type { Database } from 'bun:sqlite';
-import { type GitHubApi, GitHubError, githubOff } from './github.ts';
+import {
+	type GitHubApi,
+	GitHubError,
+	type GitHubResponse,
+	githubOff,
+} from './github.ts';
 import { ingest } from './ingest.ts';
 import { redact } from './secrets.ts';
 import { type Daemon, type Params, cut } from './state.ts';
+import { publishTask } from './task-feed.ts';
 
 const THREAD_ID = /^github:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+)#([1-9][0-9]*)$/;
 /** Ends every comment the agent posts; it's how its own comments are recognized. */
@@ -10,6 +16,8 @@ export const MARKER = '<!-- superagent ';
 const MAX_FOLLOWED = 20;
 const INTRO_COMMENTS = 10;
 const INTRO_CHARS = 2_000;
+const PER_PAGE = 100;
+const REVIEW_PAGES = 10;
 
 export function parseGitHubThread(
 	id: string,
@@ -53,19 +61,47 @@ export function prepareGitHubThread(
 					: `${parsed.repo} isn't a configured repository; use one of ${repos.map((entry) => entry.fullName).join(', ')}`,
 		};
 	}
-	const threadId = `github:${repo.fullName}#${parsed.number}`;
+	return {
+		ok: true,
+		id: ensureThread(
+			daemon,
+			repo,
+			parsed.number,
+			`https://github.com/${repo.fullName}/issues/${parsed.number}`,
+		),
+	};
+}
+
+/** The thread of an issue or PR on a configured repository, created when new. */
+function ensureThread(
+	daemon: Daemon,
+	repo: { name: string; fullName: string },
+	number: number,
+	url: string,
+): string {
+	const id = `github:${repo.fullName}#${number}`;
 	daemon.db
 		.query<unknown, Params>(
 			`INSERT OR IGNORE INTO threads (id, channel, title, url, ownable, created_at)
 			VALUES ($id, 'github', $title, $url, 1, $at)`,
 		)
 		.run({
-			id: threadId,
-			title: `${repos.length > 1 ? repo.name : ''}#${parsed.number}`,
-			url: `https://github.com/${repo.fullName}/issues/${parsed.number}`,
+			id,
+			title: `${daemon.github.repos.length > 1 ? repo.name : ''}#${number}`,
+			url,
 			at: Date.now(),
 		});
-	return { ok: true, id: threadId };
+	return id;
+}
+
+/** The visible sign-off and the hidden marker that end everything the agent posts. */
+export function signOff(
+	daemon: Daemon,
+	handle: string | null,
+	marker: string,
+): string {
+	const { login: who } = daemon.github;
+	return `<sub>Posted by superagent${who ? ` for @${who}` : ''}${handle ? ` · task ${handle}` : ''}</sub>\n${MARKER}${marker} -->`;
 }
 
 /** The configured repository all these GitHub threads are on, if there's exactly one. */
@@ -129,6 +165,8 @@ export async function githubIntros(
 		const path = `/repos/${parsed.repo}/issues/${parsed.number}`;
 		let issue: unknown;
 		let comments: unknown[];
+		let reviewComments: unknown[] = [];
+		let reviews: unknown[] = [];
 		let etag: string | null;
 		try {
 			// oxlint-disable-next-line eslint/no-await-in-loop
@@ -137,6 +175,14 @@ export async function githubIntros(
 			({ etag } = response);
 			// oxlint-disable-next-line eslint/no-await-in-loop
 			comments = (await api.pages(`${path}/comments?per_page=100`)).items;
+			if (field(issue, 'pull_request') !== null) {
+				const pull = `/repos/${parsed.repo}/pulls/${parsed.number}`;
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				reviewComments = (await api.pages(`${pull}/comments?per_page=100`))
+					.items;
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				reviews = (await api.pages(`${pull}/reviews?per_page=100`)).items;
+			}
 		} catch (error) {
 			if (error instanceof GitHubError && error.status === 404) {
 				db.query<unknown, [string, number]>(
@@ -155,13 +201,12 @@ export async function githubIntros(
 		const at = Date.now();
 		const title = text(issue, 'title');
 		const isPr = field(issue, 'pull_request') !== null;
-		const newest = comments.reduce<string>(
-			(latest, comment) => {
-				const updated = text(comment, 'updated_at');
+		const created = text(issue, 'created_at');
+		const newestOf = (items: unknown[]) =>
+			items.reduce<string>((latest, item) => {
+				const updated = text(item, 'updated_at');
 				return updated > latest ? updated : latest;
-			},
-			text(issue, 'created_at'),
-		);
+			}, created);
 		db.transaction(() => {
 			db.query<unknown, Params>(
 				`INSERT INTO github_items (thread_id, repo, number, is_pr, title, state, polled_at, updated_at)
@@ -176,10 +221,30 @@ export async function githubIntros(
 				at,
 				updated: text(issue, 'updated_at'),
 			});
-			saveCursor(db, `${id}:item`, null, etag);
-			saveCursor(db, `${id}:comments`, newest, null);
+			// A PR's state comes from /pulls, whose ETag differs.
+			saveCursor(db, `${id}:item`, null, isPr ? null : etag);
+			saveCursor(db, `${id}:comments`, newestOf(comments), null);
+			if (isPr) {
+				saveCursor(db, `${id}:review-comments`, newestOf(reviewComments), null);
+				// Reviews have no `since`: polling reads from the last page on.
+				saveCursor(
+					db,
+					`${id}:reviews`,
+					created,
+					null,
+					Math.floor(reviews.length / PER_PAGE) + 1,
+				);
+			}
 			// Already in the Worker's message: recorded so polling skips them.
-			for (const comment of comments) {
+			const seen: Array<[string, unknown]> = [
+				...comments.map((item): [string, unknown] => ['issue-comment', item]),
+				...reviewComments.map((item): [string, unknown] => [
+					'review-comment',
+					item,
+				]),
+				...reviews.map((item): [string, unknown] => ['review', item]),
+			];
+			for (const [prefix, item] of seen) {
 				db.query<unknown, Params>(
 					`INSERT OR IGNORE INTO events (received_at, channel, external_id, thread_id, kind, author,
 						text, route, filter_reason, consumed_at)
@@ -187,14 +252,16 @@ export async function githubIntros(
 						'shown when the task took the thread', $at)`,
 				).run({
 					at,
-					externalId: `issue-comment:${idOf(field(comment, 'id')) ?? '?'}`,
+					externalId: `${prefix}:${idOf(field(item, 'id')) ?? '?'}`,
 					thread: id,
-					author: login(comment),
-					text: redact(daemon.secrets, text(comment, 'body')),
+					author: login(item),
+					text: redact(daemon.secrets, text(item, 'body')),
 				});
 			}
 		})();
-		parts.push(introText(daemon, id, parsed, issue, comments));
+		parts.push(
+			introText(daemon, id, parsed, issue, comments, reviewComments, reviews),
+		);
 	}
 	return parts.length > 0 ? parts.join('\n\n') : null;
 }
@@ -205,6 +272,8 @@ function introText(
 	parsed: { repo: string; number: number },
 	issue: unknown,
 	comments: unknown[],
+	reviewComments: unknown[],
+	reviews: unknown[],
 ): string {
 	const labels = field(issue, 'labels');
 	const labelNames = Array.isArray(labels)
@@ -242,18 +311,64 @@ function introText(
 			);
 		}
 	}
+	const shownReviewComments = reviewComments.slice(-INTRO_COMMENTS);
+	if (shownReviewComments.length > 0) {
+		lines.push(
+			'',
+			reviewComments.length > shownReviewComments.length
+				? `The last ${shownReviewComments.length} of ${reviewComments.length} review comments:`
+				: `Review comments (${shownReviewComments.length}):`,
+		);
+		for (const comment of shownReviewComments) {
+			const line = field(comment, 'line') ?? field(comment, 'original_line');
+			lines.push(
+				`${login(comment)}${isBot(comment) ? ' (bot)' : ''} · ${text(comment, 'path')}${typeof line === 'number' ? `:${line}` : ''}:`,
+				clip(daemon, text(comment, 'body'))
+					.split('\n')
+					.map((part) => `  ${part}`)
+					.join('\n'),
+			);
+		}
+	}
+	const shownReviews = reviews
+		.filter(
+			(review) =>
+				text(review, 'body') !== '' ||
+				(text(review, 'state') !== 'COMMENTED' &&
+					REVIEW_WORDS[text(review, 'state')] !== undefined),
+		)
+		.slice(-INTRO_COMMENTS);
+	if (shownReviews.length > 0) {
+		lines.push('', `Reviews (the last ${shownReviews.length}):`);
+		for (const review of shownReviews) {
+			const body = clip(daemon, text(review, 'body'));
+			lines.push(
+				`${login(review)}${isBot(review) ? ' (bot)' : ''} · ${REVIEW_WORDS[text(review, 'state')] ?? text(review, 'state').toLowerCase()}${body ? ':' : ''}`,
+				...(body
+					? [
+							body
+								.split('\n')
+								.map((part) => `  ${part}`)
+								.join('\n'),
+						]
+					: []),
+			);
+		}
+	}
 	lines.push('', 'New comments and changes on it come to you.');
 	return lines.join('\n');
 }
 
 /**
- * One round of polling: for each followed thread, its state and new
- * comments, as events for the owning task.
+ * One round of polling: PRs opened from tasks' branches, then for each
+ * followed thread its state, comments and, for PRs, review comments and
+ * reviews, as events for the owning task.
  */
 export async function pollFollowed(
 	daemon: Daemon,
 	api: GitHubApi,
 ): Promise<void> {
+	await findTaskPrs(daemon, api);
 	const rows = daemon.db
 		.query<ItemRow, [number]>(
 			`SELECT th.id, th.title, th.url, gi.repo, gi.number, gi.is_pr AS isPr, gi.state,
@@ -265,10 +380,21 @@ export async function pollFollowed(
 		.all(MAX_FOLLOWED);
 	for (const row of rows) {
 		try {
-			// oxlint-disable-next-line eslint/no-await-in-loop
-			await pollItem(daemon, api, row);
-			// oxlint-disable-next-line eslint/no-await-in-loop
-			await pollComments(daemon, api, row);
+			if (row.isPr === 1) {
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await pollPr(daemon, api, row);
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await pollComments(daemon, api, row, 'issue');
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await pollComments(daemon, api, row, 'review');
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await pollReviews(daemon, api, row);
+			} else {
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await pollItem(daemon, api, row);
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				await pollComments(daemon, api, row, 'issue');
+			}
 		} catch (error) {
 			if (!(error instanceof GitHubError) || error.status !== 404) {
 				throw error;
@@ -341,16 +467,22 @@ async function pollItem(
 	saveCursor(daemon.db, key, null, response.etag);
 }
 
+/** New conversation comments, or a PR's review comments on lines of its diff. */
 async function pollComments(
 	daemon: Daemon,
 	api: GitHubApi,
 	row: ItemRow,
+	kind: 'issue' | 'review',
 ): Promise<void> {
-	const key = `${row.id}:comments`;
+	const key = `${row.id}:${kind === 'issue' ? 'comments' : 'review-comments'}`;
 	const cursor = loadCursor(daemon.db, key);
 	const since = cursor?.since ?? new Date().toISOString();
+	const listing =
+		kind === 'issue'
+			? `/repos/${row.repo}/issues/${row.number}/comments`
+			: `/repos/${row.repo}/pulls/${row.number}/comments`;
 	const { items, etag, notModified } = await api.pages(
-		`/repos/${row.repo}/issues/${row.number}/comments?since=${encodeURIComponent(since)}&per_page=100`,
+		`${listing}?since=${encodeURIComponent(since)}&per_page=100`,
 		cursor?.etag ?? null,
 	);
 	if (notModified) return;
@@ -363,11 +495,14 @@ async function pollComments(
 	for (const comment of comments) {
 		const updated = text(comment, 'updated_at');
 		if (updated > newest) newest = updated;
-		const body = text(comment, 'body');
+		const body = redact(daemon.secrets, text(comment, 'body'));
 		const userId = idOf(field(field(comment, 'user'), 'id'));
+		const commentId = idOf(field(comment, 'id')) ?? '?';
+		const line = field(comment, 'line') ?? field(comment, 'original_line');
+		const where = `${text(comment, 'path')}${typeof line === 'number' ? `:${line}` : ''}`;
 		ingest(daemon, {
 			channel: 'github',
-			externalId: `issue-comment:${idOf(field(comment, 'id')) ?? '?'}`,
+			externalId: `${kind === 'issue' ? 'issue-comment' : 'review-comment'}:${commentId}`,
 			thread: { id: row.id, title: row.title, url: row.url, ownable: true },
 			kind: 'message',
 			author: {
@@ -376,7 +511,10 @@ async function pollComments(
 				isBot: isBot(comment),
 				isSelf: body.includes(MARKER),
 			},
-			text: redact(daemon.secrets, body) || '(empty comment)',
+			text:
+				kind === 'issue'
+					? body || '(empty comment)'
+					: `${where}: ${body || '(empty comment)'}`,
 			mentionsAgent: false,
 			data: {
 				...eventData(
@@ -384,12 +522,340 @@ async function pollComments(
 					text(comment, 'html_url'),
 					Date.parse(text(comment, 'created_at')),
 				),
-				comment: field(comment, 'id'),
+				...(kind === 'issue'
+					? { comment: field(comment, 'id') }
+					: {
+							reviewComment: field(comment, 'id'),
+							path: text(comment, 'path'),
+							line: typeof line === 'number' ? line : null,
+							diffHunk: text(comment, 'diff_hunk')
+								.split('\n')
+								.slice(-3)
+								.join('\n'),
+						}),
 			},
 		});
 	}
 	// A new `since` is a new URL, whose ETag isn't known yet.
 	saveCursor(daemon.db, key, newest, newest === since ? etag : null);
+}
+
+/** A followed PR's state: merged, closed or reopened become events; the rest is for `read_thread`. */
+async function pollPr(
+	daemon: Daemon,
+	api: GitHubApi,
+	row: ItemRow,
+): Promise<void> {
+	const key = `${row.id}:item`;
+	const cursor = loadCursor(daemon.db, key);
+	const response = await api.request(
+		'GET',
+		`/repos/${row.repo}/pulls/${row.number}`,
+		{ etag: cursor?.etag ?? null },
+	);
+	if (response.status === 304) return;
+	const pr = response.body;
+	const state =
+		field(pr, 'merged') === true || field(pr, 'merged_at') !== null
+			? 'merged'
+			: text(pr, 'state') === 'closed'
+				? 'closed'
+				: 'open';
+	const updated = text(pr, 'updated_at');
+	if (state !== row.state) {
+		const name = `#${row.number}`;
+		const mergedBy = login(field(pr, 'merged_by'));
+		const change =
+			state === 'merged'
+				? {
+						externalId: `merged:${row.repo}#${row.number}`,
+						author: mergedBy || 'GitHub',
+						text: `${name} was merged${mergedBy ? ` by ${mergedBy}` : ''}`,
+					}
+				: state === 'closed'
+					? {
+							externalId: `closed:${row.repo}#${row.number}:${text(pr, 'closed_at')}`,
+							author: 'GitHub',
+							text: `${name} was closed without merging`,
+						}
+					: {
+							externalId: `reopened:${row.repo}#${row.number}:${updated}`,
+							author: 'GitHub',
+							text: `${name} was reopened`,
+						};
+		ingest(daemon, {
+			channel: 'github',
+			externalId: change.externalId,
+			thread: { id: row.id, title: row.title, url: row.url, ownable: true },
+			kind: 'activity',
+			author: { name: change.author, id: null, isBot: false, isSelf: false },
+			text: change.text,
+			mentionsAgent: false,
+			data: eventData(row, text(pr, 'html_url'), Date.parse(updated)),
+		});
+	}
+	const summary = summaryOf(daemon.db, row.id);
+	summary.mergeable = field(pr, 'mergeable');
+	summary.draft = field(pr, 'draft') === true;
+	daemon.db
+		.query<unknown, Params>(
+			`UPDATE github_items SET state = $state, title = $title, head_sha = $head,
+				summary = $summary, updated_at = $updated
+			WHERE thread_id = $id`,
+		)
+		.run({
+			id: row.id,
+			state,
+			title: text(pr, 'title'),
+			head: text(field(pr, 'head'), 'sha') || null,
+			summary: JSON.stringify(summary),
+			updated,
+		});
+	saveCursor(daemon.db, key, null, response.etag);
+}
+
+const REVIEW_WORDS: Record<string, string> = {
+	APPROVED: 'approved',
+	CHANGES_REQUESTED: 'changes requested',
+	COMMENTED: 'commented',
+};
+
+/**
+ * Reviews submitted since the PR was followed: with a body, a message;
+ * an approval or a change request without one, an activity. A comment-only
+ * review without a body is skipped, since its line comments arrive on
+ * their own.
+ *
+ * GitHub lists reviews oldest first, with no `since`, so new ones land on
+ * the last page. Polling starts from the stored page: an unchanged page is
+ * a `304`, a full page moves the cursor to the next one, and only the
+ * pages from there on are read.
+ */
+async function pollReviews(
+	daemon: Daemon,
+	api: GitHubApi,
+	row: ItemRow,
+): Promise<void> {
+	const key = `${row.id}:reviews`;
+	const cursor = loadCursor(daemon.db, key);
+	const since = cursor?.since ?? new Date().toISOString();
+	let page = cursor?.page ?? 1;
+	let etag = cursor?.etag ?? null;
+	const items: unknown[] = [];
+	for (let read = 0; read < REVIEW_PAGES; read++) {
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		const response = await api.request(
+			'GET',
+			`/repos/${row.repo}/pulls/${row.number}/reviews?per_page=${PER_PAGE}&page=${page}`,
+			{ etag },
+		);
+		if (response.status === 304) break;
+		const batch = Array.isArray(response.body) ? response.body : [];
+		items.push(...batch);
+		if (batch.length < PER_PAGE) {
+			({ etag } = response);
+			break;
+		}
+		// Full: the next review goes on the next page.
+		page += 1;
+		etag = null;
+	}
+	saveCursor(daemon.db, key, since, etag, page);
+	if (items.length === 0) return;
+	const summary = summaryOf(daemon.db, row.id);
+	const known = field(summary, 'reviews');
+	const latest: Record<string, string> =
+		typeof known === 'object' && known !== null ? { ...known } : {};
+	for (const review of items) {
+		const state = text(review, 'state');
+		const word = REVIEW_WORDS[state];
+		const who = login(review) || 'someone';
+		if (word !== undefined && state !== 'COMMENTED') latest[who] = word;
+		const submitted = text(review, 'submitted_at');
+		if (word === undefined || submitted < since) continue;
+		const body = redact(daemon.secrets, text(review, 'body'));
+		if (body === '' && state === 'COMMENTED') continue;
+		const userId = idOf(field(field(review, 'user'), 'id'));
+		ingest(daemon, {
+			channel: 'github',
+			externalId: `review:${idOf(field(review, 'id')) ?? '?'}`,
+			thread: { id: row.id, title: row.title, url: row.url, ownable: true },
+			kind: body === '' ? 'activity' : 'message',
+			author: {
+				name: who,
+				id: userId,
+				isBot: isBot(review),
+				isSelf: body.includes(MARKER),
+			},
+			text:
+				body === ''
+					? state === 'APPROVED'
+						? `${who} approved #${row.number}`
+						: `${who} requested changes on #${row.number}`
+					: `Review (${word}): ${body}`,
+			mentionsAgent: false,
+			data: {
+				...eventData(row, text(review, 'html_url'), Date.parse(submitted)),
+				review: field(review, 'id'),
+			},
+		});
+	}
+	summary.reviews = latest;
+	daemon.db
+		.query<unknown, [string, string]>(
+			'UPDATE github_items SET summary = ? WHERE thread_id = ?',
+		)
+		.run(JSON.stringify(summary), row.id);
+}
+
+/**
+ * Each active task in a GitHub repository with no open PR followed yet:
+ * a PR from its branch, `superagent/<handle>`, opened with `gh pr create`
+ * or by hand. A new one is followed by the task, signed, and announced to
+ * its Worker.
+ */
+async function findTaskPrs(daemon: Daemon, api: GitHubApi): Promise<void> {
+	const tasks = daemon.db
+		.query<{ id: number; handle: string; repo: string }, []>(
+			`SELECT t.id, t.handle, t.repo FROM tasks t
+			WHERE t.state IN ('active', 'needs_you') AND t.repo IS NOT NULL
+				AND NOT EXISTS (
+					SELECT 1 FROM threads th JOIN github_items gi ON gi.thread_id = th.id
+					WHERE th.owner_task_id = t.id AND gi.is_pr = 1 AND gi.state = 'open'
+				)
+			ORDER BY t.id`,
+		)
+		.all();
+	for (const task of tasks) {
+		const repo = daemon.github.repos.find((entry) => entry.name === task.repo);
+		if (!repo) continue;
+		const owner = repo.fullName.split('/')[0] ?? '';
+		const key = `task:${task.handle}:pr`;
+		const cursor = loadCursor(daemon.db, key);
+		let response: GitHubResponse;
+		try {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			response = await api.request(
+				'GET',
+				`/repos/${repo.fullName}/pulls?head=${encodeURIComponent(`${owner}:superagent/${task.handle}`)}&state=open&per_page=10`,
+				{ etag: cursor?.etag ?? null },
+			);
+		} catch (error) {
+			if (
+				!(error instanceof GitHubError) ||
+				error.status === 401 ||
+				error.rateLimited
+			) {
+				throw error;
+			}
+			if (error.status === null || error.status >= 500) throw error;
+			daemon.log('warn', 'couldn’t look up the task’s PR', {
+				task: task.handle,
+				error: error.message,
+			});
+			continue;
+		}
+		saveCursor(daemon.db, key, null, response.etag);
+		if (response.status === 304 || !Array.isArray(response.body)) continue;
+		const pr = response.body
+			.filter((item) => typeof field(item, 'number') === 'number')
+			.toSorted(
+				(a, b) => Number(field(b, 'number')) - Number(field(a, 'number')),
+			)[0];
+		if (pr === undefined) continue;
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		await followPr(daemon, api, task, repo, pr);
+	}
+}
+
+async function followPr(
+	daemon: Daemon,
+	api: GitHubApi,
+	task: { id: number; handle: string },
+	repo: { name: string; fullName: string },
+	pr: unknown,
+): Promise<void> {
+	const { db } = daemon;
+	const number = Number(field(pr, 'number'));
+	const id = ensureThread(daemon, repo, number, text(pr, 'html_url'));
+	const owner = db
+		.query<{ owner: number | null }, [string]>(
+			'SELECT owner_task_id AS owner FROM threads WHERE id = ?',
+		)
+		.get(id)?.owner;
+	if (owner !== null && owner !== undefined && owner !== task.id) return;
+	const at = Date.now();
+	// From the PR's creation, so comments posted before it was found still come.
+	const since = text(pr, 'created_at') || new Date(at).toISOString();
+	db.transaction(() => {
+		db.query<unknown, [number, string]>(
+			'UPDATE threads SET owner_task_id = ? WHERE id = ?',
+		).run(task.id, id);
+		db.query<unknown, [number, string, number]>(
+			'INSERT OR IGNORE INTO task_threads (task_id, thread_id, since) VALUES (?, ?, ?)',
+		).run(task.id, id, at);
+		db.query<unknown, Params>(
+			`INSERT INTO github_items (thread_id, repo, number, is_pr, title, state, head_sha,
+				polled_at, updated_at)
+			VALUES ($id, $repo, $number, 1, $title, 'open', $head, $at, $updated)
+			ON CONFLICT (thread_id) DO UPDATE SET state = 'open', title = excluded.title`,
+		).run({
+			id,
+			repo: repo.fullName,
+			number,
+			title: text(pr, 'title'),
+			head: text(field(pr, 'head'), 'sha') || null,
+			at,
+			updated: text(pr, 'updated_at'),
+		});
+		for (const suffix of ['comments', 'review-comments', 'reviews']) {
+			if (loadCursor(db, `${id}:${suffix}`) === null) {
+				saveCursor(db, `${id}:${suffix}`, since, null);
+			}
+		}
+	})();
+	publishTask(daemon, task.id);
+	daemon.log('info', 'following the task’s PR', {
+		task: task.handle,
+		thread: id,
+	});
+	ingest(daemon, {
+		channel: 'internal',
+		externalId: null,
+		thread: null,
+		kind: 'note',
+		author: { name: 'the agent', id: null, isBot: false, isSelf: false },
+		text: `You now follow ${id}, the PR from your branch superagent/${task.handle}: ${JSON.stringify(text(pr, 'title'))}. Its comments, reviews and merge come to you. wait_for them instead of finishing; you can finish once it's merged or closed.`,
+		mentionsAgent: false,
+		taskId: task.id,
+	});
+	const body = text(pr, 'body');
+	if (body.includes(MARKER)) return;
+	try {
+		await api.request('PATCH', `/repos/${repo.fullName}/pulls/${number}`, {
+			body: {
+				body: `${body}${body ? '\n\n' : ''}${signOff(daemon, task.handle, `t${task.handle}`)}`,
+			},
+		});
+	} catch (error) {
+		if (!(error instanceof GitHubError)) throw error;
+		daemon.log('warn', 'couldn’t sign the PR', {
+			thread: id,
+			error: error.message,
+		});
+	}
+}
+
+/** The JSON `read_thread` shows for a PR: mergeable, draft, latest review per reviewer. */
+function summaryOf(db: Database, threadId: string): Record<string, unknown> {
+	const raw =
+		db
+			.query<{ summary: string | null }, [string]>(
+				'SELECT summary FROM github_items WHERE thread_id = ?',
+			)
+			.get(threadId)?.summary ?? null;
+	const value: unknown = raw === null ? null : JSON.parse(raw);
+	return typeof value === 'object' && value !== null ? { ...value } : {};
 }
 
 function eventData(
@@ -414,25 +880,55 @@ export function githubThreadState(
 ): string | null {
 	const item = db
 		.query<
-			{ isPr: number; title: string; state: string; polledAt: number },
+			{
+				isPr: number;
+				title: string;
+				state: string;
+				head: string | null;
+				polledAt: number;
+			},
 			[string]
 		>(
-			`SELECT is_pr AS isPr, title, state, polled_at AS polledAt FROM github_items
-			WHERE thread_id = ?`,
+			`SELECT is_pr AS isPr, title, state, head_sha AS head, polled_at AS polledAt
+			FROM github_items WHERE thread_id = ?`,
 		)
 		.get(threadId);
 	if (!item) return null;
 	const seconds = Math.max(0, Math.round((Date.now() - item.polledAt) / 1000));
-	return `GitHub ${item.isPr ? 'PR' : 'issue'} · ${item.state} · ${JSON.stringify(item.title)} · as of ${seconds} s ago`;
+	const parts = [
+		`GitHub ${item.isPr ? 'PR' : 'issue'}`,
+		item.state,
+		JSON.stringify(item.title),
+	];
+	if (item.isPr) {
+		const summary = summaryOf(db, threadId);
+		if (item.head) parts.push(`head ${item.head.slice(0, 7)}`);
+		if (summary.draft === true) parts.push('draft');
+		if (summary.mergeable === false) parts.push('has conflicts');
+		const reviews = field(summary, 'reviews');
+		if (typeof reviews === 'object' && reviews !== null) {
+			const entries = Object.entries(reviews);
+			if (entries.length > 0) {
+				parts.push(
+					`reviews: ${entries.map(([who, word]) => `${who} ${String(word)}`).join(', ')}`,
+				);
+			}
+		}
+	}
+	parts.push(`as of ${seconds} s ago`);
+	return parts.join(' · ');
 }
 
-function loadCursor(
-	db: Database,
-	key: string,
-): { since: string | null; etag: string | null } | null {
+type Cursor = {
+	since: string | null;
+	etag: string | null;
+	page: number | null;
+};
+
+function loadCursor(db: Database, key: string): Cursor | null {
 	return db
-		.query<{ since: string | null; etag: string | null }, [string]>(
-			'SELECT since, etag FROM github_cursors WHERE key = ?',
+		.query<Cursor, [string]>(
+			'SELECT since, etag, page FROM github_cursors WHERE key = ?',
 		)
 		.get(key);
 }
@@ -442,12 +938,14 @@ function saveCursor(
 	key: string,
 	since: string | null,
 	etag: string | null,
+	page: number | null = null,
 ): void {
 	db.query<unknown, Params>(
-		`INSERT INTO github_cursors (key, since, etag, updated_at) VALUES ($key, $since, $etag, $at)
+		`INSERT INTO github_cursors (key, since, etag, page, updated_at)
+		VALUES ($key, $since, $etag, $page, $at)
 		ON CONFLICT (key) DO UPDATE SET since = excluded.since, etag = excluded.etag,
-			updated_at = excluded.updated_at`,
-	).run({ key, since, etag, at: Date.now() });
+			page = excluded.page, updated_at = excluded.updated_at`,
+	).run({ key, since, etag, page, at: Date.now() });
 }
 
 function itemState(issue: unknown): string {

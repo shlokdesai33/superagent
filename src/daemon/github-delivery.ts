@@ -1,5 +1,5 @@
 import { type GitHubApi, GitHubError } from './github.ts';
-import { MARKER, parseGitHubThread } from './github-threads.ts';
+import { MARKER, parseGitHubThread, signOff } from './github-threads.ts';
 import { redact } from './secrets.ts';
 import {
 	type Daemon,
@@ -237,10 +237,7 @@ export function githubBody(
 		parts.push(`> **@${target.author}**:\n${lines.join('\n')}`);
 	}
 	parts.push(redact(daemon.secrets, message.text));
-	const login = daemon.github.login;
-	parts.push(
-		`<sub>Posted by superagent${login ? ` for @${login}` : ''}${message.handle ? ` · task ${message.handle}` : ''}</sub>\n${MARKER}m${message.id} -->`,
-	);
+	parts.push(signOff(daemon, message.handle, `m${message.id}`));
 	return parts.join('\n\n');
 }
 
