@@ -209,6 +209,12 @@ CREATE TABLE watchdog_findings (
 );
 CREATE UNIQUE INDEX watchdog_open ON watchdog_findings (key) WHERE state = 'open';
 `,
+	`
+ALTER TABLE tasks ADD COLUMN progress_calls INTEGER NOT NULL DEFAULT 0;
+-- Upgrading counts as a mark, so no running task is paused for earlier calls.
+UPDATE tasks SET progress_calls = model_calls;
+ALTER TABLE questions ADD COLUMN asked_by TEXT NOT NULL DEFAULT 'worker';
+`,
 ];
 
 // Letters and digits without look-alikes (no i, l, o, 0 or 1).

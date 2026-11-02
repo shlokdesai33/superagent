@@ -547,9 +547,6 @@ function noteStep(daemon: Daemon, taskId: number, text: string): void {
 				now,
 			}).lastInsertRowid,
 	);
-	db.query<unknown, [number, number]>(
-		'UPDATE tasks SET last_progress_at = ? WHERE id = ?',
-	).run(now, taskId);
 	publishStep(daemon, id);
 }
 

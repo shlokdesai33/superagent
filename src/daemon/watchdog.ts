@@ -1,5 +1,6 @@
 import type { Problem } from '../protocol.ts';
 import { stopCommand } from './commands.ts';
+import { pauseTask } from './tasks.ts';
 import { watchdogMs } from './scale.ts';
 import { type Daemon, type Params, health } from './state.ts';
 
@@ -16,6 +17,8 @@ const BATCH_STUCK_MS = watchdogMs(20 * 60_000);
 const POLLER_LATE_WAITS = 3;
 const REPLY_KICK_MS = watchdogMs(15 * 60_000);
 const REPLY_LATE_MS = watchdogMs(60 * 60_000);
+// Model calls without a single progress mark before a task is paused.
+const BACKSTOP_CALLS = 150;
 
 /** A stored finding: one check's condition that holds, acted on once. */
 export type Finding = {
@@ -465,7 +468,33 @@ const commands: Check = {
 	},
 };
 
-const CHECKS: Check[] = [workers, router, github, commands];
+/**
+ * Tasks spending model calls without progress. The backstop needs no model:
+ * 150 calls without a single mark is a runaway, and you can let it go on.
+ */
+const runaway: Check = {
+	name: 'runaway',
+	timed: false,
+	run: (round) => {
+		const { daemon } = round;
+		for (const task of daemon.db
+			.query<{ id: number; handle: string; idle: number }, [number]>(
+				`SELECT id, handle, model_calls - progress_calls AS idle FROM tasks
+				WHERE state = 'active' AND model_calls - progress_calls >= ?`,
+			)
+			.all(BACKSTOP_CALLS)) {
+			const finding = round.hold(`runaway:${task.handle}:backstop`, task.id);
+			if (finding.stage !== null) continue;
+			const paused = pauseTask(daemon, task.id, {
+				text: `Watchdog: ${task.handle} has made ${task.idle} model calls without progress (no edits, new command results, questions or new input). It's paused. Continue or stop?`,
+				context: `${task.idle} model calls since its last progress mark. Continue lets it go on and starts the count again; Stop stops the task.`,
+			});
+			if (paused) round.stage(finding, 'paused');
+		}
+	},
+};
+
+const CHECKS: Check[] = [workers, router, github, commands, runaway];
 
 function minutes(ms: number): string {
 	const total = Math.max(1, Math.round(ms / 60_000));
