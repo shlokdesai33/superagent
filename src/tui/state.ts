@@ -1,5 +1,6 @@
 import type { Step, TaskDetail, TaskSummary } from '../protocol.ts';
 import type { Seg } from './cells.ts';
+import type { Draft } from './draft.ts';
 import type { Section } from './model.ts';
 import type { Theme } from './theme.ts';
 
@@ -28,13 +29,27 @@ export type KeyScreen = {
 	error: { subject: string; detail: string | null } | null;
 };
 
-export type Typing = {
+/** The input box, always focused: an empty `text` means nothing is typed. */
+export type Typing = Draft & {
 	mode: 'free' | 'answer';
 	/** For answers: the task and its question. */
 	handle: string | null;
 	questionId: number | null;
-	text: string;
 };
+
+export function emptyTyping(): Typing {
+	return { mode: 'free', handle: null, questionId: null, text: '', cursor: 0 };
+}
+
+/** Something is typed: spaces alone count as nothing, as enter sends nothing. */
+export function typed(ui: Ui): boolean {
+	return ui.typing.text.trim() !== '';
+}
+
+/** Something is typed, or an answer is started. */
+export function drafting(ui: Ui): boolean {
+	return typed(ui) || ui.typing.mode === 'answer';
+}
 
 export type Toast = {
 	glyph: '✓' | '✗' | '·';
@@ -82,14 +97,18 @@ export type Ui = {
 	selected: string | null;
 	selectedIndex: number;
 	/**
-	 * First body row shown, per screen. `free` while j/k scroll home through
+	 * First body row shown, per screen. `free` while ↑/↓ scroll home through
 	 * rows the selection doesn't reach: a tall item, or what's below the last.
 	 */
 	scroll: { home: number; page: number; free: boolean };
 	/** From the last frame. */
 	overflow: Overflow;
-	typing: Typing | null;
+	/** From the last frame: where each row of the draft on screen starts. */
+	draftRows: number[];
+	typing: Typing;
 	confirmStop: string | null;
+	/** Ctrl-C was pressed once with a draft; a second press quits. */
+	confirmQuit: boolean;
 	toast: Toast | null;
 	arrivals: Arrival[];
 	leaving: Leaving[];
@@ -108,7 +127,7 @@ export type Ui = {
 /** Whether what's being typed goes to the Router, so the default repository applies. */
 export function toRouter(ui: Ui): boolean {
 	return (
-		ui.typing?.mode === 'free' &&
+		ui.typing.mode === 'free' &&
 		ui.screen.name !== 'task' &&
 		!/^\s*@/.test(ui.typing.text)
 	);
