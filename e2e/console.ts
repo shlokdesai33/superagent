@@ -210,7 +210,17 @@ const held = (from: number, reason: string) =>
 
 try {
 	// 1. Without a key the message says why it waits, until a key is saved.
-	const tui = await openTui(agent.home, outside);
+	//    The UI opens on the key screen; esc skips it for home.
+	const tui = await openTui(
+		agent.home,
+		outside,
+		{},
+		{
+			until: 'Paste your Particle API key',
+		},
+	);
+	await tui.type('\x1b');
+	await tui.waitFor('press / to ask');
 	let from = agent.lines.length;
 	let mark = tui.mark();
 	await tui.type('/hello there (OK1)\r');

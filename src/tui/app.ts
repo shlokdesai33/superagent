@@ -1,9 +1,13 @@
+import { mkdirSync } from 'node:fs';
 import {
 	DaemonUnreachable,
 	fetchStepDiff,
 	fetchTaskDetail,
 	postAction,
 } from '../client.ts';
+import { dataPaths } from '../home.ts';
+import { writeKeyFile } from '../keys.ts';
+import { checkApiKey, looksLikeApiKey } from '../particle/client.ts';
 import type {
 	Action,
 	ActionResult,
@@ -29,6 +33,7 @@ import { FRAME_MS } from './parts.ts';
 import { repoChoices } from './repo.ts';
 import {
 	FADE_MS,
+	type KeyScreen,
 	type Toast,
 	type Ui,
 	mergedSteps,
@@ -62,6 +67,9 @@ export class App {
 	private soon = false;
 	private closed = false;
 	private readonly detailRequests = new Map<string, number>();
+	/** The key problem the key screen last opened for, so it opens once per problem. */
+	private keyPrompted: KeyScreen['reason'] | null = null;
+	private keyAttempts = 0;
 	/** The phrase on screen now, to fade out when it changes. */
 	private lastPhrase = statusPhrase({
 		connection: { state: 'connecting' },
@@ -198,6 +206,7 @@ export class App {
 			}
 			if (line.type === 'step') this.maybeLoadDiff(line.taskHandle, line.step);
 		}
+		if (line.type === 'snapshot' || line.type === 'health') this.promptForKey();
 		this.flushToasts(now);
 		this.statusChanged();
 		this.render();
@@ -215,6 +224,133 @@ export class App {
 			previous: now - previous.changedAt >= FADE_MS ? this.lastPhrase : null,
 		};
 		this.lastPhrase = phrase.segs;
+	}
+
+	// ---- Particle key ----
+
+	/**
+	 * Opens the key screen when the agent has no key, or Particle rejected the
+	 * one in the key file: once per problem, so skipping it sticks until the
+	 * problem clears and comes back. A rejected `PARTICLE_API_KEY` is left to
+	 * health, since the file wouldn't be used. It opens even mid-draft; the
+	 * draft is kept for when you leave it.
+	 */
+	private promptForKey(): void {
+		const { live, connection } = this.model;
+		if (live === null || connection.state !== 'live') return;
+		const { model } = live.health;
+		const need =
+			model.key === 'missing'
+				? 'missing'
+				: model.key === 'file' && model.keyRejected
+					? 'rejected'
+					: null;
+		if (need === null) {
+			this.keyPrompted = null;
+			return;
+		}
+		if (need === this.keyPrompted) return;
+		this.keyPrompted = need;
+		if (this.ui.screen.name !== 'key') this.openKeyScreen(need);
+	}
+
+	private openKeyScreen(reason: KeyScreen['reason']): void {
+		const { screen } = this.ui;
+		if (screen.name === 'key') return;
+		this.ui.confirmStop = null;
+		this.ui.screen = {
+			name: 'key',
+			reason,
+			back: screen,
+			keyFile: dataPaths().particleKey,
+			text: '',
+			checking: null,
+			error: null,
+		};
+	}
+
+	private onKeyInput(event: InputEvent, screen: KeyScreen): void {
+		if (event.kind === 'key' && event.name === 'escape') {
+			this.ui.screen = screen.back;
+			return;
+		}
+		if (screen.checking !== null) return;
+		const before = screen.text;
+		if (event.kind === 'char') screen.text += event.ch.replaceAll(/\s/g, '');
+		else if (event.kind === 'paste')
+			screen.text += event.text.replaceAll(/\s/g, '');
+		else if (event.kind === 'ctrl' && event.letter === 'u') screen.text = '';
+		else if (event.kind === 'key' && event.name === 'backspace')
+			screen.text = Array.from(screen.text).slice(0, -1).join('');
+		else if (event.kind === 'key' && event.name === 'enter') {
+			void this.saveKey(screen);
+			return;
+		}
+		if (screen.text !== before) screen.error = null;
+	}
+
+	/**
+	 * Checks the key with Particle's free `GET /models`, then writes the key
+	 * file the agent watches. Nothing is saved unless Particle accepts it.
+	 */
+	private async saveKey(screen: KeyScreen): Promise<void> {
+		const key = screen.text;
+		const fail = (subject: string, detail: string | null, keep = false) => {
+			if (!keep) screen.text = '';
+			screen.error = { subject, detail };
+		};
+		if (key === '') {
+			fail('Paste your key first', null);
+			return;
+		}
+		if (!looksLikeApiKey(key)) {
+			fail("That isn't a Particle API key", 'they start with pai-');
+			return;
+		}
+		this.keyAttempts += 1;
+		const attempt = this.keyAttempts;
+		screen.checking = { since: Date.now(), attempt };
+		screen.error = null;
+		this.render();
+		const baseUrl = Bun.env.PARTICLE_BASE_URL;
+		const check = await checkApiKey(
+			baseUrl ? { apiKey: key, baseUrl } : { apiKey: key },
+		);
+		// Left with esc, or a newer try, while Particle answered.
+		if (this.ui.screen !== screen || screen.checking?.attempt !== attempt) {
+			return;
+		}
+		screen.checking = null;
+		if (check.result === 'rejected') {
+			fail('Particle rejected this key', 'paste another');
+		} else if (check.result === 'unchecked') {
+			fail("Couldn't reach Particle", 'enter tries again', true);
+		} else {
+			const paths = dataPaths();
+			try {
+				mkdirSync(paths.home, { recursive: true, mode: 0o700 });
+				writeKeyFile(screen.keyFile, key);
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				fail(
+					"Couldn't save the key",
+					message.replaceAll(key, '[redacted]'),
+					true,
+				);
+				this.render();
+				return;
+			}
+			screen.text = '';
+			this.ui.screen = screen.back;
+			const env = this.model.live?.health.model.key === 'env';
+			this.showToast({
+				glyph: '✓',
+				subject: 'Saved the key',
+				detail: env ? 'PARTICLE_API_KEY overrides it' : null,
+				ms: TOAST_MS,
+			});
+		}
+		this.render();
 	}
 
 	// ---- task detail ----
@@ -383,7 +519,8 @@ export class App {
 			this.quit();
 			return;
 		}
-		if (this.ui.typing) this.onTypingInput(event);
+		if (this.ui.screen.name === 'key') this.onKeyInput(event, this.ui.screen);
+		else if (this.ui.typing) this.onTypingInput(event);
 		else if (this.ui.confirmStop) {
 			const handle = this.ui.confirmStop;
 			this.ui.confirmStop = null;
@@ -581,6 +718,13 @@ export class App {
 			}
 			if (screen.name === 'health' && ch === 'r') {
 				this.act({ type: 'resume_tasks', handles: null });
+			}
+			if (screen.name === 'health' && ch === 'p') {
+				this.openKeyScreen(
+					this.model.live?.health.model.key === 'missing'
+						? 'missing'
+						: 'replace',
+				);
 			}
 			return;
 		}
