@@ -147,6 +147,15 @@ function sandbox(): Health['sandbox'] | null {
 	return null;
 }
 
+function alive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 const workerRequests = (handle: string) =>
 	particle.requests.filter(
 		(request) => request.session === 'worker' && request.handle === handle,
@@ -306,6 +315,31 @@ try {
 			'unsandboxed, its output says the helper may still run',
 			(escaped ?? '').includes('outside its process group'),
 			escaped,
+		);
+	}
+
+	// 5. A crash leaves the sandbox's socat bridges running; the next start
+	//    ends them.
+	if (sandbox() === 'on' && process.platform === 'linux') {
+		process.stdout.write('\nThe sandbox after a crash\n');
+		const daemonPid = readFileSync(
+			join(agent.home, 'daemon.pid'),
+			'utf8',
+		).trim();
+		const bridges = Bun.spawnSync(['pgrep', '-P', daemonPid, '-x', 'socat'])
+			.stdout.toString()
+			.trim()
+			.split('\n')
+			.filter(Boolean)
+			.map(Number);
+		await agent.crash();
+		const left = bridges.filter(alive).length;
+		await agent.restart();
+		await Bun.sleep(500);
+		check(
+			'the next start ends the socat bridges a crash left behind',
+			bridges.length > 0 && left === bridges.length && !bridges.some(alive),
+			`${bridges.length} bridges, ${left} left by the crash, ${bridges.filter(alive).length} after the restart`,
 		);
 	}
 } catch (error) {

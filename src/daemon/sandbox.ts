@@ -1,4 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import {
@@ -43,6 +51,7 @@ export async function startSandbox(
 	const cwd = join(paths.home, 'sandbox');
 	mkdirSync(cwd, { recursive: true });
 	process.chdir(cwd);
+	endCrashedBridges(paths.home);
 
 	if (process.platform === 'darwin') {
 		if (!existsSync(SANDBOX_EXEC)) {
@@ -309,7 +318,66 @@ export async function sandboxCommand(
 			},
 		},
 	);
+	recordBridges(daemon.paths.home);
 	return ['/bin/bash', '-c', wrapped];
+}
+
+// On Linux, sandbox-runtime's host-side socat bridges are plain children of
+// the agent, so a crash leaves them running; they're recorded once started,
+// and the next start ends those whose command line still matches.
+const BRIDGES_FILE = 'sandbox-bridges';
+let bridgesRecorded = false;
+
+function recordBridges(home: string): void {
+	if (bridgesRecorded || process.platform !== 'linux') return;
+	const found: string[] = [];
+	for (const entry of readdirSync('/proc')) {
+		if (!/^\d+$/.test(entry)) continue;
+		try {
+			// `pid (comm) state ppid …`; comm may hold spaces and parentheses.
+			const stat = readFileSync(`/proc/${entry}/stat`, 'utf8');
+			const close = stat.lastIndexOf(')');
+			const comm = stat.slice(stat.indexOf('(') + 1, close);
+			const ppid = Number(stat.slice(close + 2).split(' ')[1]);
+			if (comm === 'socat' && ppid === process.pid) {
+				found.push(
+					`${entry}\t${readFileSync(`/proc/${entry}/cmdline`, 'utf8')}`,
+				);
+			}
+		} catch {
+			// Gone meanwhile.
+		}
+	}
+	if (found.length === 0) return;
+	bridgesRecorded = true;
+	writeFileSync(join(home, BRIDGES_FILE), `${found.join('\n')}\n`, {
+		mode: 0o600,
+	});
+}
+
+function endCrashedBridges(home: string): void {
+	const file = join(home, BRIDGES_FILE);
+	let text: string;
+	try {
+		text = readFileSync(file, 'utf8');
+	} catch {
+		return;
+	}
+	for (const line of text.split('\n')) {
+		const tab = line.indexOf('\t');
+		if (tab === -1) continue;
+		const pid = line.slice(0, tab);
+		try {
+			if (
+				readFileSync(`/proc/${pid}/cmdline`, 'utf8') === line.slice(tab + 1)
+			) {
+				process.kill(Number(pid), 'SIGTERM');
+			}
+		} catch {
+			// Already gone.
+		}
+	}
+	rmSync(file, { force: true });
 }
 
 const gitDirs = new Map<string, string | null>();
