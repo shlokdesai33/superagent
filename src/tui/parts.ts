@@ -28,7 +28,7 @@ export function label(name: string, count?: number): Line {
 	return { segs };
 }
 
-/** `j/k move · enter open`: keys bold `dim`, words `faint`. */
+/** `↑↓ move · enter open`: keys bold `dim`, words `faint`. */
 export function hint(pairs: Array<[string, string]>): Seg[] {
 	return pairs.flatMap(([key, word], index) => [
 		...(index > 0 ? [sep] : []),
