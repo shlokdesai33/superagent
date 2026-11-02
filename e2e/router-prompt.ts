@@ -171,6 +171,13 @@ try {
 		typeof routerSystem === 'string' &&
 			routerSystem.includes("don't repeat or answer them yourself"),
 	);
+	check(
+		'the Router has tasks push or open a PR only when one is asked for',
+		typeof routerSystem === 'string' &&
+			routerSystem.includes(
+				'Have a task push or open a PR only when the operator asked for one',
+			),
+	);
 	const last = calls.at(-1);
 	const prefixTokens = Math.floor(prefix.length / 4);
 	check(
@@ -201,6 +208,14 @@ try {
 			staticPrefix(workerFirst.body) === staticPrefix(workerSecond.body) &&
 			workerSecond.cachedTokens >= workerFirst.promptTokens - 1,
 		`${workerSecond?.cachedTokens ?? 'no'} of ${workerSecond?.promptTokens ?? 'no'} cached`,
+	);
+	const workerSystem = workerFirst?.body.messages[0]?.content;
+	check(
+		'a Worker is told to push and open a PR only when one is asked for',
+		typeof workerSystem === 'string' &&
+			workerSystem.includes(
+				'Push and open a PR only when your instructions ask for a PR or you follow a GitHub issue or PR; never push otherwise',
+			),
 	);
 
 	const usage = await agent.waitFor(
