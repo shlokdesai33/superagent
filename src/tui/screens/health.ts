@@ -12,6 +12,12 @@ const PROACTIVE: Record<Health['proactive'], string> = {
 	act: 'matches are acted on',
 };
 
+const SANDBOX: Record<Health['sandbox'], string> = {
+	off: 'commands run unsandboxed',
+	on: 'commands run in the sandbox',
+	unavailable: 'the sandbox is unavailable',
+};
+
 export function healthBody(live: Live, content: number, now: number): Line[] {
 	const { health, usage } = live;
 	const measure = Math.min(MEASURE, content);
@@ -180,6 +186,8 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 					} satisfies Seg,
 				]
 			: []),
+		sep,
+		{ t: SANDBOX[health.sandbox], fg: 'faint' },
 	];
 	for (const segs of wrap(machine, measure)) lines.push({ segs });
 	lines.push(blank());

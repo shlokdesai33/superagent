@@ -162,6 +162,8 @@ export type Health = {
 	machine: MachineFacts;
 	/** Always `off` in this version. */
 	proactive: 'off' | 'observe' | 'act';
+	/** Always `off` in this version. */
+	sandbox: 'off' | 'on' | 'unavailable';
 };
 
 export type MachineFacts = {

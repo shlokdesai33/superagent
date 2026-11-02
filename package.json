@@ -17,6 +17,9 @@
 		"prepare": "bun -e \"if (!Bun.semver.satisfies(Bun.version, '>=1.4.4')) { console.error('Bun >=1.4.4 required, found ' + Bun.version); process.exit(1) }\"",
 		"typecheck": "tsc --noEmit"
 	},
+	"dependencies": {
+		"@anthropic-ai/sandbox-runtime": "0.0.81"
+	},
 	"devDependencies": {
 		"@types/bun": "1.4.4",
 		"oxfmt": "0.75.0",

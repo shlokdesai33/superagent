@@ -245,6 +245,7 @@ export function health(daemon: Daemon): Health {
 					],
 		machine: daemon.machine,
 		proactive: 'off',
+		sandbox: 'off',
 	};
 }
 
