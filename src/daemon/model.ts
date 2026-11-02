@@ -139,8 +139,8 @@ export function watchParticleKey(daemon: Daemon): () => void {
 
 /**
  * While Particle is failing and nothing has succeeded, asks `GET /models`,
- * which spends no tokens or credits. When it answers, the model is healthy
- * again: Workers waiting on it and the Router's backoff carry on.
+ * which spends no tokens or credits. Leaving `error` wakes the Workers waiting
+ * on Particle and the Router's backoff (`setModelHealth`).
  */
 async function probeParticle(daemon: Daemon): Promise<void> {
 	const { particleKey } = daemon;
@@ -156,8 +156,6 @@ async function probeParticle(daemon: Daemon): Promise<void> {
 	if (check.result === 'valid') {
 		daemon.log('info', 'Particle answers again');
 		setModelHealth(daemon, 'ok', null);
-		daemon.router.wake();
-		for (const live of daemon.workers.values()) live.wake();
 	} else if (check.result === 'rejected') {
 		setModelHealth(daemon, 'paused', 'Particle rejected the API key');
 	}

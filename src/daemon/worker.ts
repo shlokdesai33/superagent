@@ -193,9 +193,9 @@ async function workerLoop(
 			await sleep(null);
 			continue;
 		}
-		// Woken by any successful call or the probe; new messages don't make it
-		// try a Particle that's still down.
-		if (transientFailures > 0 && daemon.model.state !== 'ok') {
+		// Woken when Particle leaves `error` (a successful call, or the probe);
+		// new messages don't make it try a Particle that's still down.
+		if (transientFailures > 0 && daemon.model.state === 'error') {
 			setBlocked(daemon, live, UNREACHABLE);
 			await sleep(null);
 			continue;

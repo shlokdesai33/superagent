@@ -28,6 +28,8 @@ export type FakeParticle = {
 	requests: FakeRequest[];
 	/** `GET /models`, which the daemon's probe asks while Particle fails. */
 	models: { available: boolean; requests: number };
+	/** Every request gets a `401`, as for a revoked key. */
+	auth: { rejected: boolean };
 	stop(): void;
 };
 
@@ -36,10 +38,23 @@ export function startFakeParticle(
 ): FakeParticle {
 	const requests: FakeRequest[] = [];
 	const models = { available: true, requests: 0 };
+	const auth = { rejected: false };
 	let count = 0;
 	const server = Bun.serve({
 		port: 0,
 		async fetch(request) {
+			if (auth.rejected) {
+				return Response.json(
+					{
+						error: {
+							message: 'Invalid API key',
+							type: 'authentication_error',
+							code: 'invalid_api_key',
+						},
+					},
+					{ status: 401 },
+				);
+			}
 			if (
 				request.method === 'GET' &&
 				new URL(request.url).pathname === '/v1/models'
@@ -91,6 +106,7 @@ export function startFakeParticle(
 		url: `http://127.0.0.1:${server.port}/v1`,
 		requests,
 		models,
+		auth,
 		stop: () => {
 			void server.stop(true);
 		},

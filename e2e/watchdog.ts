@@ -2,7 +2,11 @@
 // them, and a free probe resumes them. Run with `bun run e2e`; it exits
 // non-zero if a check fails.
 import type { FeedLine, TaskSummary } from '../src/protocol.ts';
-import { type FakeReply, startFakeParticle } from './fake-particle.ts';
+import {
+	type FakeReply,
+	type FakeRequest,
+	startFakeParticle,
+} from './fake-particle.ts';
 import { type Agent, startAgent } from './harness.ts';
 
 type TaskLine = Extract<FeedLine, { type: 'task' }>;
@@ -12,7 +16,7 @@ type HealthLine = Extract<FeedLine, { type: 'health' }>;
 const SCALE = '0.001';
 
 // What each task's fake Worker does, by the task's title.
-const workers: Record<string, (called: string[]) => FakeReply> = {
+const workers: Record<string, (request: FakeRequest) => FakeReply> = {
 	// Breaks while `outage` is on, then finishes.
 	outage: () =>
 		controls.outage
@@ -25,6 +29,18 @@ const workers: Record<string, (called: string[]) => FakeReply> = {
 				},
 	// Every response breaks, though Particle itself answers.
 	flaky: () => ({ broken: true }),
+	// Waits for a note, then quietly waits again, telling the Router nothing.
+	waiter: (request) => ({
+		content: 'Waiting.',
+		calls: [
+			{
+				name: 'wait_for',
+				args: {
+					what: request.fresh.includes('go on') ? 'another note' : 'a note',
+				},
+			},
+		],
+	}),
 };
 
 const controls = { outage: false, breakRouter: 0 };
@@ -63,7 +79,7 @@ const particle = startFakeParticle((request) => {
 	titles.set(handle, title);
 	const behave = workers[title];
 	if (!behave) throw new Error(`no fake Worker for ${JSON.stringify(title)}`);
-	return behave(request.called);
+	return behave(request);
 });
 
 let failures = 0;
@@ -197,6 +213,100 @@ try {
 			routerCalls >= 2 && task.createdAt - started < 10_000,
 			`${routerCalls} Router calls · ${((task.createdAt - started) / 1000).toFixed(1)} s`,
 		);
+	});
+
+	await scenario('Any successful call wakes paused Workers', async (agent) => {
+		// The probe never succeeds here; only the Router's call can wake it.
+		particle.models.available = false;
+		controls.outage = true;
+		await agent.action({ type: 'send_console', text: 'please run outage' });
+		const paused = await taskLine(
+			agent,
+			'the task waiting on Particle',
+			(task) =>
+				task.title === 'outage' && task.waitingOn === 'Particle (unreachable)',
+		);
+		controls.outage = false;
+		await agent.action({ type: 'send_console', text: 'hello' });
+		const done = await taskLine(
+			agent,
+			'the task finishing',
+			(task) => task.handle === paused.handle && task.status === 'done',
+		);
+		check(
+			"the Router's successful call wakes a Worker waiting on Particle",
+			done.result === 'Done after the outage',
+			done.result ?? '',
+		);
+	});
+
+	await scenario(
+		"A Worker's successful call ends the Router's backoff",
+		async (agent) => {
+			particle.models.available = false;
+			await agent.action({ type: 'send_console', text: 'please run waiter' });
+			const waiting = await taskLine(
+				agent,
+				'the waiter waiting for a note',
+				(task) => task.title === 'waiter' && task.waitingOn === 'a note',
+			);
+			controls.breakRouter = 1;
+			const before = particle.requests.length;
+			await agent.action({ type: 'send_console', text: 'hello again' });
+			await agent.waitFor(
+				'the model in error',
+				(line): line is HealthLine =>
+					line.type === 'health' && line.health.model.state === 'error',
+			);
+			const failedAt = Date.now();
+			await agent.action({
+				type: 'send_note',
+				handle: waiting.handle,
+				text: 'go on',
+			});
+			await agent.until(
+				'the Router to decide again',
+				async () =>
+					particle.requests
+						.slice(before)
+						.filter((request) => request.session === 'router').length,
+				(count) => count >= 2,
+			);
+			check(
+				"the Worker's call ends the Router's 30-second backoff",
+				Date.now() - failedAt < 10_000,
+				`${((Date.now() - failedAt) / 1000).toFixed(1)} s`,
+			);
+		},
+	);
+
+	await scenario('A key rejected during an outage', async (agent) => {
+		particle.models.available = false;
+		controls.outage = true;
+		await agent.action({ type: 'send_console', text: 'please run outage' });
+		const paused = await taskLine(
+			agent,
+			'the task waiting on Particle',
+			(task) =>
+				task.title === 'outage' && task.waitingOn === 'Particle (unreachable)',
+		);
+		particle.auth.rejected = true;
+		try {
+			const rejected = await taskLine(
+				agent,
+				'the task waiting on the rejected key',
+				(task) =>
+					task.handle === paused.handle &&
+					task.waitingOn === 'Particle (API key rejected)',
+			);
+			check(
+				'a 401 from the probe moves the waiting task to the rejected-key pause',
+				rejected.status === 'waiting',
+			);
+		} finally {
+			particle.auth.rejected = false;
+			controls.outage = false;
+		}
 	});
 
 	await scenario('A request that keeps failing', async (agent) => {

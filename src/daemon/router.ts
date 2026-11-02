@@ -276,13 +276,13 @@ export function startRouter(daemon: Daemon): RouterLoop {
 						retryInSeconds: delay / 1000,
 					},
 				);
-				// After a transient failure, Particle answering again (a call or
-				// the probe) ends the backoff.
+				// After a transient failure, Particle leaving `error` (a call or the
+				// probe) ends the backoff.
 				const transient =
 					error instanceof ModelError && error.failure === 'transient';
 				await sleep(
 					delay,
-					transient ? () => daemon.model.state === 'ok' : null,
+					transient ? () => daemon.model.state !== 'error' : null,
 				);
 			}
 		}
