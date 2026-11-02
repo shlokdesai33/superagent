@@ -32,12 +32,15 @@ function plain(raw: string): string {
 
 /**
  * Opens `superagent` in `cwd` for the agent in `home`. `env` is added to the
- * environment; an `undefined` value removes the variable.
+ * environment; an `undefined` value removes the variable. With `background`
+ * (`#rrggbb`), the terminal answers the background query (OSC 11) as a
+ * terminal with that background does; without, nothing answers.
  */
 export async function openTui(
 	home: string,
 	cwd: string,
 	env: Record<string, string | undefined> = {},
+	background?: string,
 ): Promise<Tui> {
 	// Like the harness, SUPERAGENT_BIN runs a compiled executable instead.
 	const superagent = Bun.env.SUPERAGENT_BIN ?? `bun ${CLI}`;
@@ -65,16 +68,22 @@ export async function openTui(
 	);
 	let raw = '';
 	const decoder = new TextDecoder();
-	void (async () => {
-		for await (const chunk of child.stdout) {
-			raw += decoder.decode(chunk, { stream: true });
-		}
-	})();
-
 	const send = async (keys: string) => {
 		await child.stdin.write(keys);
 		await child.stdin.flush();
 	};
+	// Doubled, as `xterm` answers: `rgb:2828/2a2a/3636`.
+	const reply = background
+		? `\x1b]11;rgb:${[1, 3, 5].map((at) => background.slice(at, at + 2).repeat(2)).join('/')}\x1b\\`
+		: null;
+	const reading = (async () => {
+		for await (const chunk of child.stdout) {
+			const text = decoder.decode(chunk, { stream: true });
+			raw += text;
+			if (reply && text.includes('\x1b]11;?')) await send(reply);
+		}
+	})();
+
 	const tui: Tui = {
 		mark: () => raw.length,
 		seen: (from = 0) => plain(raw.slice(from)),
@@ -101,6 +110,7 @@ export async function openTui(
 			]);
 			if (!exited) child.kill();
 			await child.exited;
+			await reading;
 		},
 	};
 	await tui.waitFor('press / to ask');

@@ -10,7 +10,7 @@ export type ScreenCell = {
 	/** The 256-colour index, when set with `38;5;n` / `48;5;n`. */
 	fg: number | null;
 	bg: number | null;
-	/** The colour shown, at either depth. */
+	/** The colour shown, at either depth; `null` is the terminal's own. */
 	fgRgb: Rgb | null;
 	bgRgb: Rgb | null;
 	bold: boolean;
@@ -67,6 +67,8 @@ export function replay(raw: string): Screen {
 					else if (code === '1') pen = { ...pen, bold: true };
 					else if (code === '3') pen = { ...pen, italic: true };
 					else if (code === '4') continue;
+					else if (code === '39') pen = { ...pen, fg: null, fgRgb: null };
+					else if (code === '49') pen = { ...pen, bg: null, bgRgb: null };
 					else if (layer && codes[k + 1] === '5') {
 						const index = Number(codes[k + 2]);
 						if (!(index >= 16 && index <= 255))
@@ -157,6 +159,8 @@ export function replayOldTerminal(raw: string): OldTerminalCell[][] {
 					} else if (code === 0) pen = blank();
 					else if (code === 2) pen = { ...pen, faint: true };
 					else if (code === 22) pen = { ...pen, faint: false };
+					else if (code === 39) pen = { ...pen, fg: 'default' };
+					else if (code === 49) pen = { ...pen, bg: 'default' };
 					else if (code >= 30 && code <= 37)
 						pen = { ...pen, fg: `ansi ${code}` };
 					else if (code >= 40 && code <= 47)

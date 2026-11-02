@@ -38,7 +38,8 @@ export type Cell = {
 	/** One grapheme; `''` for the second half of a wide one. */
 	ch: string;
 	fg: Rgb;
-	bg: Rgb;
+	/** `null`: the terminal's own background. */
+	bg: Rgb | null;
 	attrs: number;
 	link: string | null;
 };
@@ -229,13 +230,13 @@ export function paint(
 	line: Line,
 	theme: Theme,
 	columns: number,
-	rowBg: Rgb,
+	rowBg: Rgb | null,
 ): Cell[] {
 	const fade = line.fade ?? 1;
-	const ink = (color: Color, under: Rgb) =>
+	const ink = (color: Color, under: Rgb | null) =>
 		fade >= 1
 			? resolve(theme, color)
-			: blend(under, resolve(theme, color), fade);
+			: blend(under ?? theme.bg, resolve(theme, color), fade);
 	const cells: Cell[] = [];
 	const blank = (): Cell => ({
 		ch: ' ',
@@ -284,7 +285,8 @@ export function paint(
 	return cells;
 }
 
-function sgrColor(layer: 38 | 48, rgb: Rgb, depth: ColorDepth): string {
+function sgrColor(layer: 38 | 48, rgb: Rgb | null, depth: ColorDepth): string {
+	if (rgb === null) return `\x1b[${layer + 1}m`;
 	return depth === 'truecolor'
 		? `\x1b[${layer};2;${rgb[0]};${rgb[1]};${rgb[2]}m`
 		: `\x1b[${layer};5;${nearest256(rgb)}m`;
@@ -294,6 +296,7 @@ function sgrColor(layer: 38 | 48, rgb: Rgb, depth: ColorDepth): string {
 export function serialize(cells: Cell[], depth: ColorDepth): string {
 	let out = '';
 	let fg: Rgb | null = null;
+	// `null` is the terminal's own background, which a reset leaves.
 	let bg: Rgb | null = null;
 	let attrs = -1;
 	let link: string | null = null;
@@ -313,7 +316,7 @@ export function serialize(cells: Cell[], depth: ColorDepth): string {
 			out += sgrColor(38, cell.fg, depth);
 			fg = cell.fg;
 		}
-		if (bg === null || !same(bg, cell.bg)) {
+		if (!same(bg, cell.bg)) {
 			out += sgrColor(48, cell.bg, depth);
 			bg = cell.bg;
 		}
@@ -323,6 +326,7 @@ export function serialize(cells: Cell[], depth: ColorDepth): string {
 	return out;
 }
 
-function same(a: Rgb, b: Rgb): boolean {
+function same(a: Rgb | null, b: Rgb | null): boolean {
+	if (a === null || b === null) return a === b;
 	return a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
 }
