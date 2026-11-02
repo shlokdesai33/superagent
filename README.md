@@ -30,6 +30,7 @@ superagent status         # whether it's running, its tasks and its health
 superagent status --json  # the raw snapshot
 superagent logs           # its log, readable; --follow keeps printing new lines
 superagent login particle # ask for your Particle API key, check it and save it
+superagent daemon         # run the background agent in this terminal (for debugging); Ctrl-C stops it
 ```
 
 The background agent starts with the environment of the terminal it was started from, including its `PATH`, and works from the data folder, wherever you started it. Commands that need it say "superagent isn't running. Run `superagent start`." when it isn't. If it can't start, `superagent` and `superagent start` print why, from `output.log` in the data folder, which keeps whatever the agent printed outside its log.
@@ -80,7 +81,7 @@ There are no unit tests. `e2e/` drives the real daemon the way the TUI does: `e2
 
 ```sh
 bun src/cli.ts                # the same commands as superagent, from the checkout
-bun src/cli.ts daemon         # run the agent in this terminal instead; Ctrl-C stops it (not in --help)
+bun src/cli.ts daemon         # run the background agent in this terminal (for debugging); Ctrl-C stops it
 ```
 
 The terminal UI connects to the agent for the same data folder and reconnects by itself when it goes away. It picks a light or dark theme from the terminal's background; press `?` for its keys.
