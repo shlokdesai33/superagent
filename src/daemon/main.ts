@@ -2,15 +2,10 @@ import type { Database } from 'bun:sqlite';
 import { rmSync } from 'node:fs';
 import type { Server } from 'bun';
 import packageJson from '../../package.json' with { type: 'json' };
-import { dataPaths } from '../home.ts';
+import { BACKGROUND_ENV, dataPaths } from '../home.ts';
 import { loadAgentId, openDatabase } from './db.ts';
 import { createFeed } from './feed.ts';
-import {
-	missingIdentity,
-	repositoryName,
-	repositoryRoot,
-	startCleanup,
-} from './git.ts';
+import { missingIdentity, startCleanup } from './git.ts';
 import {
 	type GitHubClient,
 	githubRetryMs,
@@ -37,7 +32,6 @@ import {
 	loadConfig,
 	migrateConfigKey,
 	releaseLock,
-	saveRepos,
 	takeLock,
 } from './setup.ts';
 import { buildSnapshot } from './snapshot.ts';
@@ -56,7 +50,9 @@ export async function runDaemon(options: {
 	const paths = dataPaths();
 	createDataFolder(paths);
 	takeLock(paths.pid);
-	const log = createLog(paths.log);
+	// In the background, stderr goes to output.log, which is kept for what the
+	// log can't hold: startup errors and crashes.
+	const log = createLog(paths.log, !Bun.env[BACKGROUND_ENV]);
 
 	let server: Server<undefined> | null = null;
 	let db: Database | null = null;
@@ -91,8 +87,6 @@ export async function runDaemon(options: {
 		releaseLock(paths.pid);
 	};
 
-	// Starting the sandbox moves the process to a folder of its own.
-	const startedIn = process.cwd();
 	try {
 		const loginPath = captureLoginPath();
 		if (loginPath === null) {
@@ -129,18 +123,6 @@ export async function runDaemon(options: {
 		const secrets: string[] = [];
 		addSecrets(secrets, [...key.found, movedKey]);
 		const machine = gatherMachineFacts(commandPath);
-		// First run inside a repository: use it.
-		if (config.repos.length === 0) {
-			const top = repositoryRoot(startedIn, commandPath, secrets);
-			if (top !== null) {
-				config.repos = [{ name: repositoryName(top), path: top }];
-				saveRepos(paths.config, config.repos);
-				log('info', 'added the current repository to config.json', {
-					repo: config.repos[0]?.name,
-					path: top,
-				});
-			}
-		}
 		const identity = missingIdentity(
 			commandPath,
 			secrets,

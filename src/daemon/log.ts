@@ -11,10 +11,11 @@ export type Log = (
 ) => void;
 
 /**
- * Writes JSON lines to `path`, and a readable line to stderr. When the file
- * passes 10 MB it becomes `<path>.1`, replacing the previous old file.
+ * Writes JSON lines to `path`, and a readable line to stderr unless `mirror`
+ * is off. When the file passes 10 MB it becomes `<path>.1`, replacing the
+ * previous old file.
  */
-export function createLog(path: string): Log {
+export function createLog(path: string, mirror = true): Log {
 	let size = fileSize(path);
 	return (level, message, fields = {}) => {
 		const at = new Date();
@@ -25,6 +26,7 @@ export function createLog(path: string): Log {
 		}
 		appendFileSync(path, line);
 		size += Buffer.byteLength(line);
+		if (!mirror) return;
 
 		const details = Object.entries(fields)
 			.map(([key, value]) => ` ${key}=${JSON.stringify(value)}`)

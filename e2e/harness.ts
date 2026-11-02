@@ -99,9 +99,12 @@ export async function startAgent(
 			{ mode: 0o600 },
 		);
 	}
+	// SUPERAGENT_BIN runs a compiled executable instead of the source.
+	const agent = Bun.env.SUPERAGENT_BIN
+		? [Bun.env.SUPERAGENT_BIN]
+		: ['bun', CLI];
 	const spawn = () =>
-		Bun.spawn(['bun', CLI, 'daemon', '--script-channel'], {
-			// Not inside a repository, so first-run detection adds none.
+		Bun.spawn([...agent, 'daemon', '--script-channel'], {
 			cwd: home,
 			env: {
 				...Bun.env,

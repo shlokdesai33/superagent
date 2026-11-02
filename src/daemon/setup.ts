@@ -242,15 +242,6 @@ export function loadConfig(path: string): Config {
 	};
 }
 
-/** Rewrites `repos` in `config.json`, keeping everything else in the file. */
-export function saveRepos(path: string, repos: Config['repos']): void {
-	const value: unknown = JSON.parse(readFileSync(path, 'utf8'));
-	const raw: Record<string, unknown> =
-		typeof value === 'object' && value !== null ? { ...value } : {};
-	raw.repos = repos;
-	writeFileSync(path, `${JSON.stringify(raw, null, '\t')}\n`, { mode: 0o600 });
-}
-
 /**
  * Which tools are on `path`, the PATH commands and the daemon's git get.
  * Fails without `bash`, which every command runs in, or a working `git`.

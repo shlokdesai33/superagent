@@ -7,6 +7,7 @@ export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 	const lines = [
 		`Agent running · pid ${agent.pid} · up ${duration(snapshot.now - agent.startedAt)} · version ${agent.version}`,
 		`Data folder: ${paths.home}`,
+		`Log: ${paths.log} · superagent logs prints it`,
 	];
 
 	if (snapshot.tasks.length === 0) {

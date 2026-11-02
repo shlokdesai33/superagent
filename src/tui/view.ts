@@ -160,7 +160,7 @@ export function statusPhrase(model: Model): { key: string; segs: Seg[] } {
 		return { key: 'connecting', segs: [{ t: '○ connecting', fg: 'faint' }] };
 	}
 	if (connection.state !== 'live' || live === null) {
-		const segs: Seg[] = [{ t: '○ offline', fg: 'faint' }];
+		const segs: Seg[] = [{ t: '○ not running', fg: 'faint' }];
 		if (live && connection.state === 'offline') {
 			segs.push(sep, { t: `data from ${clock(live.receivedAt)}`, fg: 'faint' });
 		}
@@ -188,7 +188,7 @@ export function statusPhrase(model: Model): { key: string; segs: Seg[] } {
 			],
 		};
 	}
-	return { key: 'calm', segs: [{ t: '● all calm', fg: 'ok' }] };
+	return { key: 'calm', segs: [{ t: '● running', fg: 'ok' }] };
 }
 
 function faded(segs: Seg[], ui: Ui, amount: number): Seg[] {
@@ -227,8 +227,7 @@ function headerLine(model: Model, ui: Ui, content: number, now: number): Line {
 	const live = model.connection.state === 'live' ? model.live : null;
 	const meta: Seg[][] = [];
 	if (live) {
-		const working = workingCount(live);
-		if (working > 0) meta.push(figure(String(working), 'working'));
+		meta.push(figure(String(workingCount(live)), 'working'));
 		const used = live.usage.inputTokens + live.usage.outputTokens;
 		if (used > 0) meta.push(figure(tokens(used), 'tokens today'));
 	}
@@ -303,10 +302,10 @@ function bodyLines(
 			return {
 				lines: [
 					{ segs: [] },
-					...prose([{ t: "Can't reach the agent", fg: 'fg', b: true }]),
+					...prose([{ t: "superagent isn't running", fg: 'fg', b: true }]),
 					...prose([
 						{ t: 'Start it with ', fg: 'faint' },
-						chip('superagent daemon'),
+						chip('superagent start'),
 						{ t: ' · this screen reconnects by itself', fg: 'faint' },
 					]),
 					...prose([
@@ -317,7 +316,7 @@ function bodyLines(
 			};
 		}
 		return {
-			lines: [{ segs: [{ t: 'Connecting to the agent…', fg: 'faint' }] }],
+			lines: [{ segs: [{ t: 'Connecting to superagent…', fg: 'faint' }] }],
 			animating: false,
 		};
 	}
@@ -472,7 +471,7 @@ function inputLine(model: Model, ui: Ui, content: number, now: number): Line {
 		};
 	}
 	const placeholder = offline
-		? 'the agent is offline'
+		? "superagent isn't running"
 		: ui.screen.name === 'task'
 			? 'press / to write to this task'
 			: 'press / to ask, or start with @ to message a task';

@@ -66,25 +66,6 @@ function firstLine(text: string): string {
 	return text.trim().split('\n')[0] ?? '';
 }
 
-/** The top of the git repository containing `dir`, or `null`. */
-/** `path` is the login PATH, the one the startup check found git on. */
-export function repositoryRoot(
-	dir: string,
-	path: string,
-	secrets: string[],
-): string | null {
-	const result = Bun.spawnSync(['git', 'rev-parse', '--show-toplevel'], {
-		cwd: dir,
-		env: gitEnv(path, secrets),
-		stdin: 'ignore',
-		stdout: 'pipe',
-		stderr: 'ignore',
-		timeout: GIT_TIMEOUT_MS,
-	});
-	const top = result.stdout.toString().trim();
-	return result.exitCode === 0 && top !== '' ? top : null;
-}
-
 /**
  * Which of `user.name` and `user.email` git can't resolve for a commit, in
  * any of `repos` (your global config when there are none). Worker commits
@@ -122,11 +103,6 @@ export function missingIdentity(
 				: places.some((dir) => read(dir) === '');
 		})
 		.map((field) => `user.${field}`);
-}
-
-/** A config-safe repository name from its folder name. */
-export function repositoryName(path: string): string {
-	return basename(path).replaceAll(/[^A-Za-z0-9._-]/g, '-') || 'repo';
 }
 
 export function worktreePath(
