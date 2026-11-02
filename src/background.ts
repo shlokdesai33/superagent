@@ -33,7 +33,7 @@ export async function runningAgent(): Promise<Snapshot | null> {
 /**
  * Starts the agent in the background unless it's running, and waits until it
  * answers. It runs in a session of its own, so it outlives this terminal, with
- * this terminal's environment and working folder.
+ * this terminal's environment, in the data folder.
  */
 export async function startAgent(paths: DataPaths): Promise<StartResult> {
 	const running = await runningAgent();
@@ -45,6 +45,7 @@ export async function startAgent(paths: DataPaths): Promise<StartResult> {
 	let child;
 	try {
 		child = Bun.spawn(daemonCommand(), {
+			cwd: paths.home,
 			env: { ...Bun.env, [BACKGROUND_ENV]: '1' },
 			stdin: 'ignore',
 			stdout: output,

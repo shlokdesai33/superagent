@@ -5,12 +5,7 @@ import packageJson from '../../package.json' with { type: 'json' };
 import { BACKGROUND_ENV, dataPaths } from '../home.ts';
 import { loadAgentId, openDatabase } from './db.ts';
 import { createFeed } from './feed.ts';
-import {
-	missingIdentity,
-	repositoryName,
-	repositoryRoot,
-	startCleanup,
-} from './git.ts';
+import { missingIdentity, startCleanup } from './git.ts';
 import { type GitHubClient, initialGitHub, startGitHub } from './github.ts';
 import { pollFollowed } from './github-threads.ts';
 import { createLog } from './log.ts';
@@ -31,7 +26,6 @@ import {
 	loadConfig,
 	migrateConfigKey,
 	releaseLock,
-	saveRepos,
 	takeLock,
 } from './setup.ts';
 import { buildSnapshot } from './snapshot.ts';
@@ -85,8 +79,6 @@ export async function runDaemon(options: {
 		releaseLock(paths.pid);
 	};
 
-	// Starting the sandbox moves the process to a folder of its own.
-	const startedIn = process.cwd();
 	try {
 		const loginPath = captureLoginPath();
 		if (loginPath === null) {
@@ -123,18 +115,6 @@ export async function runDaemon(options: {
 		const secrets: string[] = [];
 		addSecrets(secrets, [...key.found, movedKey]);
 		const machine = gatherMachineFacts(commandPath);
-		// First run inside a repository: use it.
-		if (config.repos.length === 0) {
-			const top = repositoryRoot(startedIn, commandPath, secrets);
-			if (top !== null) {
-				config.repos = [{ name: repositoryName(top), path: top }];
-				saveRepos(paths.config, config.repos);
-				log('info', 'added the current repository to config.json', {
-					repo: config.repos[0]?.name,
-					path: top,
-				});
-			}
-		}
 		const identity = missingIdentity(
 			commandPath,
 			secrets,

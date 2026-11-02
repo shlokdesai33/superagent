@@ -32,14 +32,16 @@ superagent logs           # its log, readable; --follow keeps printing new lines
 superagent login particle # ask for your Particle API key, check it and save it
 ```
 
-The background agent starts with the environment of the terminal it was started from, including its `PATH`, and from its folder, so a first start inside a repository adds that repository. Commands that need it say "superagent isn't running. Run `superagent start`." when it isn't. If it can't start, `superagent` and `superagent start` print why, from `output.log` in the data folder, which keeps whatever the agent printed outside its log.
+The background agent starts with the environment of the terminal it was started from, including its `PATH`, and works from the data folder, wherever you started it. Commands that need it say "superagent isn't running. Run `superagent start`." when it isn't. If it can't start, `superagent` and `superagent start` print why, from `output.log` in the data folder, which keeps whatever the agent printed outside its log.
 
 ### Uninstall
+
+Stop the background agent, delete the executable, then delete the data folder. The data folder holds your task history and the tasks' git worktrees, along with your settings and Particle key, so first push or copy any work you want to keep.
 
 ```sh
 superagent stop
 rm ~/.local/bin/superagent
-rm -rf ~/.superagent        # your tasks, settings and Particle key
+rm -rf ~/.superagent
 ```
 
 ## Development
@@ -78,7 +80,7 @@ There are no unit tests. `e2e/` drives the real daemon the way the TUI does: `e2
 
 ```sh
 bun src/cli.ts                # the same commands as superagent, from the checkout
-bun src/cli.ts daemon         # run the agent in this terminal instead; Ctrl-C stops it
+bun src/cli.ts daemon         # run the agent in this terminal instead; Ctrl-C stops it (not in --help)
 ```
 
 The terminal UI connects to the agent for the same data folder and reconnects by itself when it goes away. It picks a light or dark theme from the terminal's background; press `?` for its keys.
@@ -118,7 +120,7 @@ Console messages go to the Router, one persistent model session that decides wha
 
 Real work goes to tasks. The Router starts one with `start_task`, which gives it a four-character handle such as `t97c` and a Worker: a model session with shell and file tools that works in `tasks/<handle>/work` inside the data folder. A command runs with bash in that folder, in its own process group, with the daemon's environment minus the agent's own keys, and your login shell's `PATH`. If a command's output, a file the Worker reads or an edit's diff contains a Particle key the agent has read (from the environment, the key file or `config.json`, including one since replaced), it shows as `[redacted]` to the Worker, the TUI and the log. After 30 seconds it keeps running in the background and the Worker hears when it ends. At most `maxWorkingTasks` tasks (default 4) work at once, and at most 5 Worker model calls run at once, so one is always left for the Router.
 
-Tasks in a repository work in their own git worktree, `worktrees/<repo>/<handle>` in the data folder, on a branch `superagent/<handle>` from `origin/<default branch>` (or the repository's `HEAD` when there's no origin or the fetch fails). Repositories are listed in `config.json` as `{ "name", "path" }`; when the list is empty and you start the agent inside a repository (with `superagent`, `superagent start` or `superagent daemon`), that one is added. Edits show as steps with a diff and `+N −M` counts. If git can't resolve `user.name` or `user.email` for the configured repositories at startup, health shows a warning that Worker commits will fail, with the `git config --global` commands that fix it. Worktrees of tasks that ended over 7 days ago are removed at startup and daily (their branches stay), and command logs older than 30 days are deleted.
+Tasks in a repository work in their own git worktree, `worktrees/<repo>/<handle>` in the data folder, on a branch `superagent/<handle>` from `origin/<default branch>` (or the repository's `HEAD` when there's no origin or the fetch fails). Repositories are listed in `config.json` as `{ "name", "path" }`. Edits show as steps with a diff and `+N −M` counts. If git can't resolve `user.name` or `user.email` for the configured repositories at startup, health shows a warning that Worker commits will fail, with the `git config --global` commands that fix it. Worktrees of tasks that ended over 7 days ago are removed at startup and daily (their branches stay), and command logs older than 30 days are deleted.
 
 From the TUI or `curl`, the `send_note`, `answer_question`, `stop_task` and `resume_tasks` actions reach a task, and `GET /v1/tasks/<handle>` returns its steps, conversation and report. After a crash, commands that were running are killed and their Workers told; active tasks carry on.
 

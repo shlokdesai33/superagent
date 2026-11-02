@@ -100,7 +100,6 @@ export async function startAgent(
 		? [Bun.env.SUPERAGENT_BIN]
 		: ['bun', CLI];
 	const child = Bun.spawn([...agent, 'daemon', '--script-channel'], {
-		// Not inside a repository, so first-run detection adds none.
 		cwd: home,
 		env: {
 			...Bun.env,

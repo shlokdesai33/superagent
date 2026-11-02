@@ -23,6 +23,8 @@ import { Cancelled, readSecret } from './read-secret.ts';
 import { formatStatus } from './status.ts';
 import { runTui } from './tui/main.ts';
 
+// `daemon` runs the agent in the foreground, for `start`, the e2e checks and
+// development; it's left out of the help.
 const usage = `Usage: superagent [command] [options]
 
 superagent works in a background agent that keeps running when you close the
@@ -37,14 +39,12 @@ Commands:
   status          Print whether it's running, its tasks and its health
   logs            Print its log; --follow keeps printing new lines
   login particle  Ask for your Particle API key, check it and save it
-  daemon          Run the agent in this terminal instead, until Ctrl-C
 
 Options:
-  --json            With status: print the raw snapshot JSON
-  -f, --follow      With logs: keep printing new lines until Ctrl-C
-  --script-channel  With daemon: accept test events on POST /v1/events
-  -h, --help        Show this help
-  -v, --version     Show the version
+  --json         With status: print the raw snapshot JSON
+  -f, --follow   With logs: keep printing new lines until Ctrl-C
+  -h, --help     Show this help
+  -v, --version  Show the version
 
 The data folder is $SUPERAGENT_HOME, or ~/.superagent.`;
 
