@@ -533,12 +533,15 @@ function reviews(
 						calls: number;
 						idle: number;
 						since: number;
+						progressCalls: number;
+						progressAt: number | null;
 					},
 					[number]
 				>(
 					`SELECT id, handle, title, instructions, model_calls AS calls,
 						model_calls - progress_calls AS idle,
-						COALESCE(last_progress_at, created_at) AS since
+						COALESCE(last_progress_at, created_at) AS since,
+						progress_calls AS progressCalls, last_progress_at AS progressAt
 					FROM tasks WHERE state = 'active' AND model_calls - progress_calls >= ?`,
 				)
 				.all(LOOP_MIN_CALLS)) {
@@ -553,7 +556,8 @@ function reviews(
 					(finding.snoozeUntil !== null && now < finding.snoozeUntil) ||
 					daemon.particle === null ||
 					daemon.model.state !== 'ok' ||
-					reviewsToday(daemon, now) >= REVIEWS_PER_DAY
+					// Reviews still in flight count, so one tick can't start past the cap.
+					reviewsToday(daemon, now) + inReview.size >= REVIEWS_PER_DAY
 				) {
 					continue;
 				}
@@ -604,13 +608,19 @@ const VERDICT_WORDS: Record<
 
 /**
  * `progressing` is silent. The first other verdict in an episode is a note to
- * the Worker; the next pauses the task with a question. A finding resolved
- * meanwhile (the task made progress) ignores the verdict.
+ * the Worker; the next pauses the task with a question. A verdict about an
+ * episode that has ended is dropped: the task made progress, or stopped being
+ * active, while the review ran. Its finding only resolves on the next tick.
  */
 function applyVerdict(
 	daemon: Daemon,
 	findingId: number,
-	task: { id: number; handle: string },
+	task: {
+		id: number;
+		handle: string;
+		progressCalls: number;
+		progressAt: number | null;
+	},
 	verdict: Verdict | null,
 ): void {
 	const { db } = daemon;
@@ -620,6 +630,27 @@ function applyVerdict(
 		)
 		.get(findingId);
 	if (!finding || finding.state !== 'open') return;
+	const current = db
+		.query<
+			{ state: string; progressCalls: number; progressAt: number | null },
+			[number]
+		>(
+			`SELECT state, progress_calls AS progressCalls, last_progress_at AS progressAt
+			FROM tasks WHERE id = ?`,
+		)
+		.get(task.id);
+	if (
+		!current ||
+		current.state !== 'active' ||
+		current.progressCalls !== task.progressCalls ||
+		current.progressAt !== task.progressAt
+	) {
+		daemon.log('info', 'watchdog verdict dropped: the task moved on', {
+			task: task.handle,
+			verdict: verdict?.verdict ?? null,
+		});
+		return;
+	}
 	const now = Date.now();
 	const calls =
 		db

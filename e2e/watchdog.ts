@@ -36,6 +36,29 @@ const workers: Record<string, (request: FakeRequest) => FakeReply> = {
 		calls: [{ name: 'read_file', args: { path: 'notes.txt' } }],
 		delayMs: 100,
 	}),
+	// Loops until a review of it starts, then makes progress (an edit) and
+	// waits, while the review is still running.
+	recoverer: (request) =>
+		!reviews.some((review) => review.handle === request.handle)
+			? {
+					content: 'Looking again.',
+					calls: [{ name: 'read_file', args: { path: 'notes.txt' } }],
+					delayMs: 20,
+				}
+			: request.called.includes('write_file')
+				? {
+						content: 'Waiting.',
+						calls: [{ name: 'wait_for', args: { what: 'the operator' } }],
+					}
+				: {
+						content: 'Writing it down.',
+						calls: [
+							{
+								name: 'write_file',
+								args: { path: 'notes.txt', content: 'found it\n' },
+							},
+						],
+					},
 	thinker: () => ({
 		content: 'Thinking it over.',
 		calls: [{ name: 'read_file', args: { path: 'notes.txt' } }],
@@ -112,12 +135,19 @@ const verdicts: Record<
 	string,
 	{ verdict: string; reason: string; advice: string }
 > = {
+	recoverer: {
+		verdict: 'looping',
+		reason: 'It reads the same missing file again and again.',
+		advice: 'Stop reading notes.txt.',
+	},
 	looper: {
 		verdict: 'looping',
 		reason: 'It reads the same missing file again and again.',
 		advice: 'Stop reading notes.txt: create it, or ask the operator.',
 	},
 };
+// How long the fake reviewer takes, by title.
+const reviewDelays: Record<string, number> = { recoverer: 100 };
 // Every review the fake reviewer answered, with the Worker's calls by then.
 const reviews: Array<{
 	handle: string;
@@ -138,6 +168,7 @@ const particle = startFakeParticle((request) => {
 			input: request.fresh,
 		});
 		return {
+			delayMs: reviewDelays[title] ?? 0,
 			calls: [
 				{
 					name: 'verdict',
@@ -216,10 +247,11 @@ async function scenario(
 	body: (agent: Agent) => Promise<void>,
 	/** Findings that may act or report here, by key. */
 	allowed: RegExp | null = null,
+	scale: string = SCALE,
 ): Promise<void> {
 	process.stdout.write(`\n${name}\n`);
 	const agent = await startAgent(particle.url, {
-		env: { SUPERAGENT_WATCHDOG_SCALE: SCALE },
+		env: { SUPERAGENT_WATCHDOG_SCALE: scale },
 	});
 	try {
 		await body(agent);
@@ -655,6 +687,41 @@ try {
 			await agent.action({ type: 'stop_task', handle: paused.handle });
 		},
 		/^reviews:/,
+	);
+
+	await scenario(
+		'A verdict about an episode that ended is dropped',
+		async (agent) => {
+			await agent.action({
+				type: 'send_console',
+				text: 'please run recoverer',
+			});
+			const waiting = await taskLine(
+				agent,
+				'the recoverer waiting after its edit',
+				(task) =>
+					task.title === 'recoverer' && task.waitingOn === 'the operator',
+			);
+			await agent.until(
+				'the verdict to arrive and be dropped',
+				async () => readFileSync(join(agent.home, 'daemon.log'), 'utf8'),
+				(log) => log.includes('watchdog verdict dropped'),
+			);
+			await Bun.sleep(300);
+			check(
+				'a Worker that made progress during its review hears nothing about it',
+				!particle.requests.some(
+					(request) =>
+						request.handle === waiting.handle &&
+						request.fresh.includes('watchdog'),
+				),
+			);
+			await agent.action({ type: 'stop_task', handle: waiting.handle });
+		},
+		null,
+		// 300 ms ticks: the review (100 ms) ends well before the next tick, when
+		// the finding itself would resolve.
+		'0.005',
 	);
 
 	await scenario('A progressing verdict is silent', async (agent) => {
