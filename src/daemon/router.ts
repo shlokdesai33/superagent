@@ -14,10 +14,12 @@ import {
 	appendItems,
 	compact,
 	lastPromptTokens,
+	nextSeq,
 	promptMessages,
 	repairTranscript,
 	repairTranscripts,
 	routerSessionId,
+	sendable,
 	userItem,
 } from './session.ts';
 import {
@@ -47,23 +49,22 @@ const REPORT_CHARS = 500;
 const CUT_OFF_NUDGE =
 	'Your last response was cut off at the output limit. Finish deciding: call the tools you need, or end without tool calls to stay silent.';
 
-const SYSTEM_PROMPT = `You are the Router of a local AI agent that works for one person, the operator. People reach the agent through channels, each with threads (conversations). The console, the operator's terminal, has one thread, \`console\`. Other threads have IDs such as \`script:support/77\`.
+// Sent first on every call and never changed at runtime, with the tool
+// schemas: Particle caches the prompt's prefix.
+const SYSTEM_PROMPT = `You are the Router of a local AI agent working for one person, the operator. People reach it on threads: \`console\` is the operator's terminal; others look like \`script:support/77\` or \`github:acme/app#42\` (#42 to the operator).
 
-Each user message lists new events (#42 is event 42), oldest first, followed by the open tasks. Decide what each event needs, then act through your tools.
+Each user message lists new events (#42 is event 42), oldest first, then any open tasks and repositories. Handle each event with your tools.
 
-- You coordinate. You never do the work yourself, and you have no shell, files or network. Real work (code, research, writing, anything that takes more than a moment) goes to a task: start_task with clear instructions, or send_to_task to add to a task that's already on it.
-- When a request comes from a thread other than the console, pass that thread to start_task so the task follows it; its later messages go straight to the task. Reply on the thread the people are in.
-- A console event can name a default repository: the one the operator's terminal is in. Tasks you start for that event work there when you leave out repo; when events in one batch have different defaults, pass event. Pass repo only when the message clearly asks for another repository, or "none" when it clearly isn't about code in any.
-- People hear you only through reply. Your plain text is private notes that nobody reads.
-- Stay silent when nothing needs saying: end without calling reply.
-- Chat replies, including the console, are short (at most 100 words) and say what happens next: who is doing what, or what you need.
-- Answer quick questions directly with reply when no work is needed.
-- Workers' questions for console tasks are already shown to the operator; don't repeat them.
-- GitHub issues and PRs are threads such as \`github:acme/app#42\`; the operator calls it #42. To work on one, pass its thread to start_task (or send_to_task's threads); the task then gets its comments and changes directly. GitHub activity reaches you only through tasks; tell the operator in the console, and reply on GitHub when the people there should hear something (a summary of what was fixed, an answer to a question asked there). GitHub replies can be up to 300 words with markdown; use reply_to to answer a specific comment. read_thread shows a GitHub thread's last polled state and its messages with their event numbers.
-- Tasks report back as events (finished, failed, reported). Tell the people who asked when there's something they'd want to know, briefly.
-- Old context isn't in front of you. Look it up with read_trigger, read_thread, read_task and list_tasks instead of guessing.
-- Several events may arrive together, and more may arrive while you decide. Handle each one, and don't answer the same thing twice.
-- When you're done, end your turn without tool calls.`;
+- You coordinate and never do the work: you have no shell, files or network. Real work (code, research, writing, anything beyond a moment) goes to a task: start_task with clear instructions, or send_to_task for one already on it.
+- For a request on a thread other than the console, including a GitHub issue or PR, give that thread to the task (start_task or send_to_task's threads); its later messages and changes then go straight to it.
+- People hear you only through reply; your plain text is private. Reply on the thread the people are in.
+- Stay silent when nothing needs saying. Answer quick questions directly.
+- Replies are short and say what happens next: who is doing what, or what you need.
+- Workers' questions on console tasks are already shown to the operator; don't repeat them.
+- GitHub activity and task reports (finished, failed, reported) reach you as task events. Tell the operator in the console when they'd want to know; reply on GitHub when the people there should hear something, such as what was fixed or an answer to their question.
+- Old context isn't in front of you: look it up with read_trigger, read_thread, read_task and list_tasks instead of guessing.
+- More events may arrive while you decide. Handle each once.
+- End your turn with no tool calls. A response whose only calls are replies also ends it, so make any other calls first or alongside.`;
 
 /**
  * Before the loop starts: a batch left `running` by a crash becomes
@@ -138,13 +139,14 @@ export function startRouter(daemon: Daemon): RouterLoop {
 		const opened = openBatch(daemon);
 		const { id: batchId } = opened;
 		const actions: string[] = [];
-		let pending: Item[] = [userItem(render(daemon, opened.events, true))];
+		const currentFrom = nextSeq(daemon.db, sessionId);
+		let pending: Item[] = [render(daemon, opened.events, true)];
 		try {
 			for (let call = 1; call <= MAX_CALLS_PER_BATCH; call++) {
 				if (call > 1) {
 					const drained = takeEvents(daemon.db, batchId, BATCH_EVENTS);
 					if (drained.length > 0) {
-						pending.push(userItem(render(daemon, drained, false)));
+						pending.push(render(daemon, drained, false));
 						if (daemon.router.batch) {
 							daemon.router.batch.size += drained.length;
 						}
@@ -177,8 +179,8 @@ export function startRouter(daemon: Daemon): RouterLoop {
 					prompt_cache_key: cacheKey,
 					tools: ROUTER_TOOLS,
 					messages: [
-						...promptMessages(daemon.db, sessionId, SYSTEM_PROMPT),
-						...pending,
+						...promptMessages(daemon.db, sessionId, SYSTEM_PROMPT, currentFrom),
+						...pending.map((item) => sendable(item, true)),
 					],
 				};
 				const result = await callModel(daemon, {
@@ -214,11 +216,19 @@ export function startRouter(daemon: Daemon): RouterLoop {
 					pending = [userItem(CUT_OFF_NUDGE)];
 					continue;
 				}
+				let onlyReplies = true;
 				for (const toolCall of calls) {
-					const action = runTool(daemon, sessionId, batchId, toolCall);
+					const outcome = runTool(daemon, sessionId, batchId, toolCall);
+					const { action } = outcome;
 					if (action !== null && !actions.includes(action))
 						actions.push(action);
+					if (toolCall.function.name !== 'reply' || !outcome.ok) {
+						onlyReplies = false;
+					}
 				}
+				// Saves a call that would only end the turn. Events that arrived
+				// meanwhile start the next batch.
+				if (onlyReplies) break;
 			}
 		} catch (error) {
 			daemon.db.transaction(() => putBack(daemon.db, batchId))();
@@ -316,7 +326,7 @@ function runTool(
 	sessionId: number,
 	batchId: number,
 	call: ToolCall,
-): string | null {
+): { action: string | null; ok: boolean } {
 	const outcome = daemon.db.transaction(() => {
 		const ran = runRouterTool(daemon, batchId, call);
 		appendItems(daemon.db, sessionId, [
@@ -330,7 +340,10 @@ function runTool(
 		result: cut(outcome.result, 200),
 	});
 	for (const message of outcome.messages) publishMessage(daemon, message);
-	return outcome.action;
+	return {
+		action: outcome.action,
+		ok: !outcome.result.startsWith('error:'),
+	};
 }
 
 function publishMessage(daemon: Daemon, message: MessageRow): void {
@@ -402,12 +415,11 @@ function takeEvents(db: Database, batchId: number, limit: number): EventRow[] {
 	})();
 }
 
-/** The batch message (§5.4): the events, then the open tasks on the first one. */
-function render(
-	daemon: Daemon,
-	events: EventRow[],
-	withTasks: boolean,
-): string {
+/**
+ * The batch message (§5.4): the events, then on the first one the open tasks
+ * and repositories, when there are any.
+ */
+function render(daemon: Daemon, events: EventRow[], withState: boolean): Item {
 	const { db } = daemon;
 	const lines: string[] = [];
 	const interrupted = [
@@ -465,8 +477,12 @@ function render(
 		lines.push('');
 	}
 
-	if (withTasks) lines.push(...openTasks(daemon), repositories(daemon));
-	return lines.join('\n').trimEnd();
+	const content = lines.join('\n').trimEnd();
+	if (!withState) return userItem(content);
+	return userItem(
+		content,
+		[...openTasks(daemon), ...repositories(daemon)].join('\n'),
+	);
 }
 
 function eventHeader(event: EventRow): string {
@@ -520,7 +536,7 @@ function openTasks(daemon: Daemon): string[] {
 			`SELECT ${TASK_COLUMNS} WHERE t.state IN ('active', 'needs_you') ORDER BY t.id LIMIT ?`,
 		)
 		.all(OPEN_TASKS_SHOWN + 1);
-	if (tasks.length === 0) return ['Open tasks: none'];
+	if (tasks.length === 0) return [];
 	const total =
 		daemon.db
 			.query<{ count: number }, []>(
@@ -536,11 +552,11 @@ function openTasks(daemon: Daemon): string[] {
 				: task.status.replace('_', ' ');
 		const follows =
 			task.threads.length > 0
-				? `follows ${task.threads.map((thread) => thread.id).join(', ')}`
-				: task.origin.channel;
-		lines.push(
-			`  ${task.handle}  ${status.padEnd(9)}  ${task.title}  ${follows}`,
-		);
+				? `; follows ${task.threads.map((thread) => thread.id).join(', ')}`
+				: task.origin.channel === 'console'
+					? ''
+					: `; from ${task.origin.channel}`;
+		lines.push(`  ${task.handle} ${status}: ${task.title}${follows}`);
 	}
 	if (total > OPEN_TASKS_SHOWN) {
 		lines.push(`  … and ${total - OPEN_TASKS_SHOWN} more [list_tasks]`);
@@ -548,23 +564,21 @@ function openTasks(daemon: Daemon): string[] {
 	return lines;
 }
 
-/** Where code tasks can work; `start_task` takes one as `repo`. */
-function repositories(daemon: Daemon): string {
+/** Where code tasks can work, by the names `start_task` takes as `repo`. */
+function repositories(daemon: Daemon): string[] {
 	const { repos } = daemon.config;
-	if (repos.length === 0) return 'Repositories: none configured';
+	if (repos.length === 0) return [];
 	const onGitHub = daemon.github.repos;
 	const line = `Repositories: ${repos
 		.map((repo) => {
 			const github = onGitHub.find((entry) => entry.name === repo.name);
-			return `${repo.name} (${repo.path}${github ? `; GitHub ${github.fullName}` : ''})`;
+			return github ? `${repo.name} (GitHub ${github.fullName})` : repo.name;
 		})
-		.join(
-			', ',
-		)}${repos.length === 1 ? '; start_task uses it unless you pass repo: "none"' : '; start_task needs repo, unless its GitHub threads name one or its event has a default repository'}`;
+		.join(', ')}`;
 	const [only] = onGitHub;
 	return onGitHub.length === 1 && only
-		? `${line}\nOn GitHub, #42 means github:${only.fullName}#42.`
-		: line;
+		? [line, `#42 means github:${only.fullName}#42.`]
+		: [line];
 }
 
 /** Worker reports are cut at 500 characters, with a pointer to the rest. */

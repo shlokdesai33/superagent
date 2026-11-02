@@ -11,7 +11,7 @@
 		"build": "bun scripts/build.ts",
 		"check": "bun run typecheck && bun run lint && bun run check:format",
 		"check:format": "oxfmt --check .",
-		"e2e": "bun e2e/threads.ts && bun e2e/github.ts && bun e2e/watchdog.ts && bun e2e/install.ts && bun e2e/repos.ts",
+		"e2e": "bun e2e/router-prompt.ts && bun e2e/threads.ts && bun e2e/github.ts && bun e2e/watchdog.ts && bun e2e/install.ts && bun e2e/repos.ts",
 		"clean": "git clean -dfX --exclude='!.env' --exclude='!.env.*'",
 		"format": "oxfmt --write .",
 		"lint": "oxlint",
