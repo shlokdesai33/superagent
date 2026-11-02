@@ -99,6 +99,11 @@ export type Message = {
 	text: string;
 	truncated: boolean;
 	delivery: 'delivered' | 'pending' | 'failed';
+	/**
+	 * Set for a message that went to a task's Worker: when the Worker took it
+	 * into its next step, `null` until it has.
+	 */
+	worker: { readAt: number | null } | null;
 };
 
 export type RoutedEvent = {
