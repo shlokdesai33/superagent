@@ -18,6 +18,8 @@ export type Role =
 	| 'errWord';
 
 export type ThemeName = 'dark' | 'light';
+/** Whether the terminal shows 24-bit colour, or only the xterm 256 palette. */
+export type ColorDepth = 'truecolor' | '256';
 export type Theme = { name: ThemeName } & Record<Role, Rgb>;
 
 // The design's exact values (tui-design.md §5); everything that isn't picked is
@@ -59,36 +61,170 @@ const PALETTES: Record<ThemeName, Record<Role, string>> = {
 	},
 };
 
-export const THEMES: Record<ThemeName, Theme> = {
-	dark: build('dark'),
-	light: build('light'),
+// For terminals without 24-bit colour (tui-design.md §5): xterm palette
+// indexes, only 16–255, whose colours are fixed (0–15 follow the user's
+// profile). Picked near each truecolor value with every word role at least
+// 4.5:1 on `bg` and `surface`.
+const PALETTES_256: Record<ThemeName, Record<Role, number>> = {
+	dark: {
+		bg: 233,
+		surface: 235,
+		flash: 236,
+		fg: 254,
+		dim: 145,
+		faint: 246,
+		ghost: 240,
+		accent: 141,
+		ok: 72,
+		warn: 179,
+		err: 203,
+		okSoft: 234,
+		errSoft: 234,
+		okWord: 22,
+		errWord: 52,
+	},
+	light: {
+		bg: 231,
+		surface: 255,
+		flash: 254,
+		fg: 234,
+		dim: 239,
+		faint: 242,
+		ghost: 250,
+		accent: 56,
+		ok: 22,
+		warn: 94,
+		err: 124,
+		okSoft: 194,
+		errSoft: 224,
+		okWord: 151,
+		errWord: 217,
+	},
 };
 
-function build(name: ThemeName): Theme {
-	const p = PALETTES[name];
+const CUBE = [0, 95, 135, 175, 215, 255] as const;
+
+export const THEMES: Record<ColorDepth, Record<ThemeName, Theme>> = {
+	truecolor: {
+		dark: build('dark', 'truecolor'),
+		light: build('light', 'truecolor'),
+	},
+	'256': { dark: build('dark', '256'), light: build('light', '256') },
+};
+
+function build(name: ThemeName, depth: ColorDepth): Theme {
+	const c = (role: Role): Rgb =>
+		depth === 'truecolor'
+			? hexToRgb(PALETTES[name][role])
+			: xterm256(PALETTES_256[name][role]);
 	return {
 		name,
-		bg: hexToRgb(p.bg),
-		surface: hexToRgb(p.surface),
-		flash: hexToRgb(p.flash),
-		fg: hexToRgb(p.fg),
-		dim: hexToRgb(p.dim),
-		faint: hexToRgb(p.faint),
-		ghost: hexToRgb(p.ghost),
-		accent: hexToRgb(p.accent),
-		ok: hexToRgb(p.ok),
-		warn: hexToRgb(p.warn),
-		err: hexToRgb(p.err),
-		okSoft: hexToRgb(p.okSoft),
-		errSoft: hexToRgb(p.errSoft),
-		okWord: hexToRgb(p.okWord),
-		errWord: hexToRgb(p.errWord),
+		bg: c('bg'),
+		surface: c('surface'),
+		flash: c('flash'),
+		fg: c('fg'),
+		dim: c('dim'),
+		faint: c('faint'),
+		ghost: c('ghost'),
+		accent: c('accent'),
+		ok: c('ok'),
+		warn: c('warn'),
+		err: c('err'),
+		okSoft: c('okSoft'),
+		errSoft: c('errSoft'),
+		okWord: c('okWord'),
+		errWord: c('errWord'),
 	};
 }
 
 function hexToRgb(hex: string): Rgb {
 	const value = Number.parseInt(hex.slice(1), 16);
 	return [(value >> 16) & 255, (value >> 8) & 255, value & 255];
+}
+
+/** The colour xterm shows for palette index 16–255. */
+export function xterm256(index: number): Rgb {
+	if (index >= 232) {
+		const level = 8 + 10 * (index - 232);
+		return [level, level, level];
+	}
+	const n = index - 16;
+	return [
+		CUBE[Math.floor(n / 36)] ?? 0,
+		CUBE[Math.floor(n / 6) % 6] ?? 0,
+		CUBE[n % 6] ?? 0,
+	];
+}
+
+const nearestCache = new Map<number, number>();
+
+/**
+ * The palette index (16–255) closest to `rgb`: exact for a 256-colour
+ * theme's roles, nearest for the blends of fades and the sweep.
+ */
+export function nearest256(rgb: Rgb): number {
+	const packed = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
+	const cached = nearestCache.get(packed);
+	if (cached !== undefined) return cached;
+	let best = 16;
+	let bestDistance = Infinity;
+	for (let index = 16; index < 256; index += 1) {
+		const [r, g, b] = xterm256(index);
+		// "Redmean" weights: cheap, and close to how far apart colours look.
+		const mean = (rgb[0] + r) / 2;
+		const dr = rgb[0] - r;
+		const dg = rgb[1] - g;
+		const db = rgb[2] - b;
+		const distance =
+			(2 + mean / 256) * dr * dr +
+			4 * dg * dg +
+			(2 + (255 - mean) / 256) * db * db;
+		if (distance < bestDistance) {
+			best = index;
+			bestDistance = distance;
+		}
+	}
+	nearestCache.set(packed, best);
+	return best;
+}
+
+/** Terminal.app 2.15 (macOS 26) is the first with real 24-bit colour. */
+const FIRST_TRUECOLOR_APPLE_TERMINAL = 464;
+const TRUECOLOR_PROGRAMS = new Set([
+	'iTerm.app',
+	'WezTerm',
+	'ghostty',
+	'vscode',
+	'Hyper',
+	'Tabby',
+	'WarpTerminal',
+	'rio',
+	'zed',
+]);
+const TRUECOLOR_TERMS =
+	/^(?:xterm-kitty|xterm-ghostty|alacritty|foot|wezterm|contour)|-direct$/;
+
+/**
+ * Truecolor only on evidence: `COLORTERM`, or a terminal known to have it.
+ * Everything else gets the 256 palette, which every terminal shows right;
+ * a terminal without 24-bit colour misreads `38;2;r;g;b` as separate
+ * attributes and paints, say, a green background.
+ */
+export function colorDepth(
+	env: Record<string, string | undefined>,
+): ColorDepth {
+	// Its build number is the one thing known for sure, so it wins over a
+	// `COLORTERM` exported by a shell profile.
+	if (env.TERM_PROGRAM === 'Apple_Terminal') {
+		const version = Number.parseInt(env.TERM_PROGRAM_VERSION ?? '', 10);
+		return version >= FIRST_TRUECOLOR_APPLE_TERMINAL ? 'truecolor' : '256';
+	}
+	const declared = env.COLORTERM?.toLowerCase();
+	if (declared === 'truecolor' || declared === '24bit') return 'truecolor';
+	if (TRUECOLOR_PROGRAMS.has(env.TERM_PROGRAM ?? '')) return 'truecolor';
+	if (TRUECOLOR_TERMS.test(env.TERM ?? '')) return 'truecolor';
+	if (env.WT_SESSION || env.KITTY_WINDOW_ID) return 'truecolor';
+	return '256';
 }
 
 /** `t` of the way from `a` to `b`, clamped. */

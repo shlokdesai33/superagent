@@ -1,7 +1,13 @@
 import { writeSync } from 'node:fs';
 import { type Cell, serialize } from './cells.ts';
 import { type InputEvent, createParser } from './input.ts';
-import { type ThemeName, themeFromColorFgBg, themeFromOsc11 } from './theme.ts';
+import {
+	type ColorDepth,
+	type ThemeName,
+	colorDepth,
+	themeFromColorFgBg,
+	themeFromOsc11,
+} from './theme.ts';
 
 const DETECT_TIMEOUT_MS = 100;
 
@@ -16,6 +22,7 @@ const SYNC_START = '\x1b[?2026h';
 const SYNC_END = '\x1b[?2026l';
 
 export class Terminal {
+	readonly depth: ColorDepth = colorDepth(Bun.env);
 	private previous: string[] = [];
 	private listener: (event: InputEvent) => void = () => {};
 	private entered = false;
@@ -102,7 +109,7 @@ export class Terminal {
 	draw(rows: Cell[][]): void {
 		let out = '';
 		rows.forEach((cells, y) => {
-			const line = serialize(cells);
+			const line = serialize(cells, this.depth);
 			if (this.previous[y] === line) return;
 			this.previous[y] = line;
 			out += `\x1b[${y + 1};1H${line}`;
