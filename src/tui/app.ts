@@ -232,7 +232,8 @@ export class App {
 	 * Opens the key screen when the agent has no key, or Particle rejected the
 	 * one in the key file: once per problem, so skipping it sticks until the
 	 * problem clears and comes back. A rejected `PARTICLE_API_KEY` is left to
-	 * health, since the file wouldn't be used.
+	 * health, since the file wouldn't be used. It opens even mid-draft; the
+	 * draft is kept for when you leave it.
 	 */
 	private promptForKey(): void {
 		const { live, connection } = this.model;
@@ -248,7 +249,7 @@ export class App {
 			this.keyPrompted = null;
 			return;
 		}
-		if (need === this.keyPrompted || this.ui.typing !== null) return;
+		if (need === this.keyPrompted) return;
 		this.keyPrompted = need;
 		if (this.ui.screen.name !== 'key') this.openKeyScreen(need);
 	}

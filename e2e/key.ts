@@ -93,15 +93,34 @@ try {
 		});
 		const before = small.screen().join('\n');
 		await small.paste(badKey);
+		await Bun.sleep(200);
+		const pasted = small.screen();
 		await small.type('\r');
 		await small.waitFor('Particle rejected', small.mark()).catch(() => {});
 		await Bun.sleep(200);
-		const after = small.screen().join('\n');
+		const shown = small.screen();
+		const after = shown.join('\n');
 		check(
 			`at ${columns}×${rows} the input and the outcome line stay on screen`,
 			before.includes('› ') &&
 				before.includes('paste your key') &&
 				after.includes('Particle rejected this key'),
+		);
+		// Like typed text, the masked key and the error wrap, every character
+		// kept, continuing under the text after `› ` and `✗ `.
+		const masked = pasted.filter((row) => row.includes('•'));
+		const error = shown.findIndex((row) => row.includes('✗ Particle'));
+		const errorText = shown
+			.slice(error, error + 2)
+			.map((row) => row.trim())
+			.join(' ');
+		check(
+			`at ${columns}×${rows} the masked key and the error wrap, nothing cut`,
+			masked.join('').split('•').length - 1 === badKey.length &&
+				masked.slice(1).every((row) => /^ *  •/.test(row)) &&
+				errorText.includes('Particle rejected this key · paste another') &&
+				!after.includes('…'),
+			`${masked.length} key rows`,
 		);
 		await small.type('\x1b');
 		await small.quit();
@@ -190,8 +209,11 @@ try {
 		readFileSync(keyFile, 'utf8') === `${nextKey}\n`,
 	);
 
-	// 6. Particle rejects the key in use, then accepts it again: pasting the
-	//    same key resumes the model at once, not at the next 2-minute retry.
+	// 6. Particle rejects the key in use while you're writing a message, then
+	//    accepts it again: the key screen opens anyway, the draft is back
+	//    after it, and pasting the same key resumes the model at once, not
+	//    at the next 2-minute retry.
+	await tui.type('/half a thought');
 	particle.auth.rejectedKeys.add(nextKey);
 	from = agent.lines.length;
 	mark = tui.mark();
@@ -201,12 +223,21 @@ try {
 		from,
 		(model) => model.keyRejected,
 	);
-	await tui.waitFor('Particle rejected the saved key', mark);
+	const opened = await tui
+		.waitFor('Particle rejected the saved key', mark)
+		.then(() => true)
+		.catch(() => false);
+	check('the key screen opens while a message is being written', opened);
 	particle.auth.rejectedKeys.delete(nextKey);
 	mark = tui.mark();
 	await tui.paste(nextKey);
 	await tui.type('\r');
-	await tui.waitFor('press / to ask', mark);
+	await tui.waitFor('✓ Saved the key', mark);
+	check(
+		'the draft is still there after the key screen',
+		tui.screen().some((row) => row.includes('› half a thought')),
+	);
+	await tui.type('\x1b');
 	const resumed = await health(
 		'the model to resume on the same key saved again',
 		agent.lines.indexOf(paused) + 1,
