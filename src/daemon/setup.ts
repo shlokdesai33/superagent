@@ -27,13 +27,11 @@ const MACHINE_TOOLS = [
 	'node',
 	'python3',
 	'docker',
-	'bwrap',
-	'socat',
 ];
 
 export function createDataFolder(paths: DataPaths): void {
+	// Only you can read it: config.json and command logs can hold API keys.
 	mkdirSync(paths.home, { recursive: true, mode: 0o700 });
-	// The folder's mode is the real access boundary, so tighten an existing one.
 	chmodSync(paths.home, 0o700);
 	if (Buffer.byteLength(paths.socket) >= SOCKET_PATH_LIMIT) {
 		throw new StartupError(
@@ -116,6 +114,8 @@ export function loadConfig(path: string): Config {
 		});
 		return DEFAULT_CONFIG;
 	}
+	// It can hold the Particle key.
+	chmodSync(path, 0o600);
 
 	let value: unknown;
 	try {
@@ -192,22 +192,6 @@ export function saveRepos(path: string, repos: Config['repos']): void {
 		typeof value === 'object' && value !== null ? { ...value } : {};
 	raw.repos = repos;
 	writeFileSync(path, `${JSON.stringify(raw, null, '\t')}\n`, { mode: 0o600 });
-}
-
-/** Reads `token`, creating 32 random bytes (base64url) when it's missing or empty. */
-export function loadToken(path: string): string {
-	try {
-		const token = readFileSync(path, 'utf8').trim();
-		if (token !== '') return token;
-	} catch (error) {
-		if (errorCode(error) !== 'ENOENT') throw error;
-	}
-	const token = Buffer.from(
-		crypto.getRandomValues(new Uint8Array(32)),
-	).toString('base64url');
-	rmSync(path, { force: true });
-	writeFileSync(path, `${token}\n`, { flag: 'wx', mode: 0o600 });
-	return token;
 }
 
 /** Fails when `git` or `bash` is missing, since Workers can't run without them. */

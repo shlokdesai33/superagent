@@ -90,9 +90,7 @@ export async function startAgent(particleUrl: string): Promise<Agent> {
 	});
 
 	const request = async (path: string, init: RequestInit = {}) => {
-		const token = (await Bun.file(join(home, 'token')).text()).trim();
 		const headers = new Headers(init.headers);
-		headers.set('Authorization', `Bearer ${token}`);
 		headers.set(PROTOCOL_HEADER, PROTOCOL_VERSION);
 		return fetch(`http://superagent${path}`, {
 			...init,

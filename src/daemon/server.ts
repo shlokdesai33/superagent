@@ -1,4 +1,3 @@
-import { timingSafeEqual } from 'node:crypto';
 import type { Server } from 'bun';
 import {
 	type ErrorBody,
@@ -39,8 +38,13 @@ export function listen(
 		unix: socket,
 		maxRequestBodySize: MAX_REQUEST_BYTES,
 		async fetch(request) {
-			const rejected = checkHeaders(request, daemon().token);
-			if (rejected) return rejected;
+			if (request.headers.get(PROTOCOL_HEADER) !== PROTOCOL_VERSION) {
+				return error(
+					400,
+					'unsupported_protocol',
+					`This agent speaks ${PROTOCOL_HEADER}: ${PROTOCOL_VERSION}`,
+				);
+			}
 
 			const { pathname } = new URL(request.url);
 			switch (pathname) {
@@ -232,29 +236,6 @@ function stepOutput(
 	if (!command) return null;
 	const { lines } = readOutput(daemon, task.handle, stepId, from, OUTPUT_LINES);
 	return lines.length > 0 ? `${lines.join('\n')}\n` : '';
-}
-
-function checkHeaders(request: Request, token: string): Response | null {
-	const sent = request.headers
-		.get('authorization')
-		?.match(/^Bearer (.+)$/)?.[1];
-	if (sent === undefined || !sameSecret(sent, token)) {
-		return error(401, 'bad_token', 'Missing or wrong token');
-	}
-	if (request.headers.get(PROTOCOL_HEADER) !== PROTOCOL_VERSION) {
-		return error(
-			400,
-			'unsupported_protocol',
-			`This agent speaks ${PROTOCOL_HEADER}: ${PROTOCOL_VERSION}`,
-		);
-	}
-	return null;
-}
-
-function sameSecret(a: string, b: string): boolean {
-	const left = Buffer.from(a);
-	const right = Buffer.from(b);
-	return left.length === right.length && timingSafeEqual(left, right);
 }
 
 function methodNotAllowed(allowed: string): Response {

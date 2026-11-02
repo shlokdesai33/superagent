@@ -23,9 +23,9 @@ export type Daemon = {
 	db: Database;
 	feed: Feed;
 	log: Log;
-	/** The API token every request must send. */
-	token: string;
 	config: Config;
+	/** The agent's own keys, kept out of commands, the model, the feed and the log. */
+	secrets: string[];
 	agent: Snapshot['agent'];
 	machine: MachineFacts;
 	/** The last event time of each channel, for health. */

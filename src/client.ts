@@ -10,8 +10,8 @@ import {
 } from './protocol.ts';
 
 /**
- * - `not_running`: no token file, or nothing listening on the socket.
- * - `rejected`: the daemon refused the token or the protocol version.
+ * - `not_running`: nothing listening on the socket.
+ * - `rejected`: the daemon refused the protocol version.
  */
 export class DaemonUnreachable extends Error {
 	override name = 'DaemonUnreachable';
@@ -30,26 +30,13 @@ export class DaemonUnreachable extends Error {
 	}
 }
 
-/** A request to the daemon, rereading the token file each time. */
+/** A request to the daemon. */
 export async function daemonFetch(
 	path: string,
 	init: RequestInit = {},
 ): Promise<Response> {
 	const paths = dataPaths();
-	const notRunning = `The agent isn't running in ${paths.home}. Start it with: superagent daemon`;
-	let token: string;
-	try {
-		token = (await Bun.file(paths.token).text()).trim();
-	} catch (error) {
-		throw new DaemonUnreachable(
-			'not_running',
-			notRunning,
-			`no token at ${paths.token} (${errorName(error)})`,
-		);
-	}
-
 	const headers = new Headers(init.headers);
-	headers.set('Authorization', `Bearer ${token}`);
 	headers.set(PROTOCOL_HEADER, PROTOCOL_VERSION);
 	let response: Response;
 	try {
@@ -62,18 +49,11 @@ export async function daemonFetch(
 		if (init.signal?.aborted) throw error;
 		throw new DaemonUnreachable(
 			'not_running',
-			notRunning,
+			`The agent isn't running in ${paths.home}. Start it with: superagent daemon`,
 			`nothing listening on ${paths.socket} (${errorName(error)})`,
 		);
 	}
 
-	if (response.status === 401) {
-		throw new DaemonUnreachable(
-			'rejected',
-			`The agent rejected the token in ${paths.token}`,
-			`HTTP 401 ${errorCode(await response.text()) ?? 'bad_token'}`,
-		);
-	}
 	if (response.status === 400) {
 		const text = await response.text();
 		if (errorCode(text) === 'unsupported_protocol') {
