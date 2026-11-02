@@ -226,7 +226,7 @@ try {
 		first.code === 0 &&
 			first.stdout.includes(`${home}/.local/bin isn't on your PATH`) &&
 			first.stdout.includes("your shell's startup file") &&
-			first.stdout.includes(`${dest} login particle`),
+			first.stdout.includes(`paste your Particle API key:\n  ${dest}\n`),
 		lastLine(first.stderr),
 	);
 	const again = await install({ env: { ...env, SHELL: '/bin/zsh' } });
@@ -298,7 +298,9 @@ try {
 			elsewhere.stdout.includes(
 				`Installed superagent 1.2.3 in ${bin}/superagent`,
 			) &&
-			elsewhere.stdout.includes('  superagent login particle') &&
+			elsewhere.stdout.includes(
+				'paste your Particle API key:\n  superagent\n',
+			) &&
 			!elsewhere.stdout.includes("isn't on your PATH"),
 		lastLine(elsewhere.stderr),
 	);

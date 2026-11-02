@@ -148,7 +148,6 @@ esac
 command -v git >/dev/null 2>&1 ||
 	say "superagent also needs git, which isn't installed. Install it first."
 if [ -z "$previous" ]; then
-	say "Next:"
-	say "  $run login particle   # save your Particle API key"
-	say "  $run                  # open superagent"
+	say "Next, open superagent and paste your Particle API key:"
+	say "  $run"
 fi

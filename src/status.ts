@@ -67,7 +67,7 @@ export function formatStatus(snapshot: Snapshot): string {
 
 /** Where the key comes from, only when that's the fix. */
 function keyText(model: Snapshot['health']['model']): string | null {
-	if (model.key === 'missing') return 'missing; run superagent login particle';
+	if (model.key === 'missing') return 'missing; run superagent to paste one';
 	if (model.key === 'env' && model.state === 'error') {
 		return 'from PARTICLE_API_KEY';
 	}
