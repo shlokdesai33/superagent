@@ -165,6 +165,14 @@ try {
 			second.cachedTokens >= startCalls[0].promptTokens - 1,
 		`${second?.cachedTokens ?? 'no'} of ${second?.promptTokens ?? 'no'} cached`,
 	);
+	const routerSystem = first?.body.messages[0]?.content;
+	check(
+		'the Router has tasks push or open a PR only when one is asked for',
+		typeof routerSystem === 'string' &&
+			routerSystem.includes(
+				'Have a task push or open a PR only when the operator asked for one',
+			),
+	);
 	const last = calls.at(-1);
 	const prefixTokens = Math.floor(prefix.length / 4);
 	check(
