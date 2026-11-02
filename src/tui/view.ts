@@ -82,7 +82,7 @@ export function view(
 		};
 		return {
 			rows: Array.from({ length: rows }, (_, y) =>
-				paint(y === 0 ? message : { segs: [] }, theme, columns, theme.bg),
+				paint(y === 0 ? message : { segs: [] }, theme, columns, null),
 			),
 			animating: false,
 			scroll: 0,
@@ -171,9 +171,10 @@ export function view(
 	}
 
 	const painted = screen.map((line, y) => {
-		const base = line.bg === undefined ? theme.bg : resolve(theme, line.bg);
+		const base = line.bg === undefined ? null : resolve(theme, line.bg);
 		const flash = flashes.get(y);
-		const rowBg = flash === undefined ? base : blend(theme.flash, base, flash);
+		const rowBg =
+			flash === undefined ? base : blend(theme.flash, base ?? theme.bg, flash);
 		const cells = paint(line, theme, columns, rowBg);
 		const inBody = y >= top && y < top + bodyHeight;
 		const inRouter = y >= routerFrom && y < routerFrom + routerRows;

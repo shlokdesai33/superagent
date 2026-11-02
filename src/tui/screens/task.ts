@@ -139,8 +139,12 @@ export function taskBody(
 	);
 	if (conversation.length > 0) {
 		lines.push(label('CONVERSATION'));
+		const open =
+			task.status !== 'done' &&
+			task.status !== 'failed' &&
+			task.status !== 'stopped';
 		for (const message of conversation)
-			lines.push(...messageRows(message, measure));
+			lines.push(...messageRows(message, measure, open));
 	}
 
 	while (lines.at(-1)?.segs.length === 0) lines.pop();
@@ -236,7 +240,18 @@ function mergedConversation(
 	return [...byId.values()].toSorted((a, b) => a.id - b.id);
 }
 
-function messageRows(message: Message, measure: number): Line[] {
+/** Whether the task's Worker has read a message sent to it. */
+function readMark(message: Message, open: boolean): Seg[] {
+	if (message.worker === null) return [];
+	const { readAt } = message.worker;
+	return [
+		readAt === null
+			? { t: open ? 'not read yet' : 'not read', fg: 'faint' }
+			: { t: `read ${clock(readAt)}`, fg: 'faint' },
+	];
+}
+
+function messageRows(message: Message, measure: number, open: boolean): Line[] {
 	return hang(
 		[
 			{ t: `${clock(message.at)}  `, fg: 'faint' },
@@ -248,5 +263,6 @@ function messageRows(message: Message, measure: number): Line[] {
 		],
 		[{ t: paragraphs(message.text), fg: 'fg' }],
 		measure,
+		readMark(message, open),
 	);
 }

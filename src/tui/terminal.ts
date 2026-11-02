@@ -3,10 +3,13 @@ import { type Cell, serialize } from './cells.ts';
 import { type InputEvent, createParser } from './input.ts';
 import {
 	type ColorDepth,
-	type ThemeName,
+	type Rgb,
+	type Theme,
+	backgroundFromOsc11,
 	colorDepth,
+	themeFor,
 	themeFromColorFgBg,
-	themeFromOsc11,
+	themeOf,
 } from './theme.ts';
 
 const DETECT_TIMEOUT_MS = 100;
@@ -55,33 +58,35 @@ export class Terminal {
 	/**
 	 * Asks the terminal for its background (OSC 11), using the device
 	 * attributes reply that follows it to stop waiting early. Falls back to
-	 * `COLORFGBG`, then dark.
+	 * `COLORFGBG`, then dark; without a reply, the design's palette.
 	 */
-	detectTheme(): Promise<ThemeName> {
+	detectTheme(): Promise<Theme> {
 		return new Promise((resolve) => {
 			let done = false;
-			const finish = (name: ThemeName) => {
+			const finish = (background: Rgb | null) => {
 				if (done) return;
 				done = true;
 				clearTimeout(timer);
-				resolve(name);
+				resolve(this.themeFor(background));
 			};
-			const timer = setTimeout(
-				() => finish(themeFromColorFgBg(Bun.env.COLORFGBG)),
-				DETECT_TIMEOUT_MS,
-			);
+			const timer = setTimeout(() => finish(null), DETECT_TIMEOUT_MS);
 			this.listen((event) => {
 				if (event.kind === 'background') {
-					finish(
-						themeFromOsc11(event.reply) ??
-							themeFromColorFgBg(Bun.env.COLORFGBG),
-					);
+					finish(backgroundFromOsc11(event.reply));
 				} else if (event.kind === 'attributes') {
-					finish(themeFromColorFgBg(Bun.env.COLORFGBG));
+					finish(null);
 				}
 			});
 			this.write(QUERY_BACKGROUND + QUERY_ATTRIBUTES);
 		});
+	}
+
+	/** The theme for a reported background, or for `COLORFGBG` without one. */
+	themeFor(background: Rgb | null): Theme {
+		const name = background
+			? themeOf(background)
+			: themeFromColorFgBg(Bun.env.COLORFGBG);
+		return themeFor(name, this.depth, background);
 	}
 
 	/** Asks again; the reply arrives as a `background` event. */
