@@ -1,4 +1,11 @@
-import { type Rgb, type Role, type Theme, blend } from './theme.ts';
+import {
+	type ColorDepth,
+	type Rgb,
+	type Role,
+	type Theme,
+	blend,
+	nearest256,
+} from './theme.ts';
 
 export type Color = Role | Rgb;
 
@@ -277,8 +284,14 @@ export function paint(
 	return cells;
 }
 
+function sgrColor(layer: 38 | 48, rgb: Rgb, depth: ColorDepth): string {
+	return depth === 'truecolor'
+		? `\x1b[${layer};2;${rgb[0]};${rgb[1]};${rgb[2]}m`
+		: `\x1b[${layer};5;${nearest256(rgb)}m`;
+}
+
 /** One row as escape sequences, starting from a reset. */
-export function serialize(cells: Cell[]): string {
+export function serialize(cells: Cell[], depth: ColorDepth): string {
 	let out = '';
 	let fg: Rgb | null = null;
 	let bg: Rgb | null = null;
@@ -297,11 +310,11 @@ export function serialize(cells: Cell[]): string {
 			bg = null;
 		}
 		if (fg === null || !same(fg, cell.fg)) {
-			out += `\x1b[38;2;${cell.fg[0]};${cell.fg[1]};${cell.fg[2]}m`;
+			out += sgrColor(38, cell.fg, depth);
 			fg = cell.fg;
 		}
 		if (bg === null || !same(bg, cell.bg)) {
-			out += `\x1b[48;2;${cell.bg[0]};${cell.bg[1]};${cell.bg[2]}m`;
+			out += sgrColor(48, cell.bg, depth);
 			bg = cell.bg;
 		}
 		out += cell.ch;

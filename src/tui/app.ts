@@ -79,7 +79,7 @@ export class App {
 		};
 		const now = Date.now();
 		this.ui = {
-			theme: THEMES[theme],
+			theme: THEMES[terminal.depth][theme],
 			screen: { name: 'home' },
 			selected: null,
 			selectedIndex: 0,
@@ -366,7 +366,7 @@ export class App {
 		if (event.kind === 'background') {
 			const name = themeFromOsc11(event.reply);
 			if (name && name !== this.ui.theme.name) {
-				this.ui.theme = THEMES[name];
+				this.ui.theme = THEMES[this.terminal.depth][name];
 				this.terminal.invalidate();
 				this.render();
 			}

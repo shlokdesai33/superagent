@@ -12,6 +12,8 @@ export type Tui = {
 	mark(): number;
 	/** The screen's text since `from`, without escape sequences. */
 	seen(from?: number): string;
+	/** Everything written since `from`, escape sequences included. */
+	raw(from?: number): string;
 	waitFor(text: string, from?: number): Promise<void>;
 	/** Keys as the terminal sends them: `\t` is tab, `\r` enter. */
 	type(keys: string): Promise<void>;
@@ -28,18 +30,34 @@ function plain(raw: string): string {
 	);
 }
 
-/** Opens `superagent` in `cwd` for the agent in `home`. */
-export async function openTui(home: string, cwd: string): Promise<Tui> {
+/**
+ * Opens `superagent` in `cwd` for the agent in `home`. `env` is added to the
+ * environment; an `undefined` value removes the variable.
+ */
+export async function openTui(
+	home: string,
+	cwd: string,
+	env: Record<string, string | undefined> = {},
+): Promise<Tui> {
 	// Like the harness, SUPERAGENT_BIN runs a compiled executable instead.
 	const superagent = Bun.env.SUPERAGENT_BIN ?? `bun ${CLI}`;
 	const command = `stty cols ${COLUMNS} rows ${ROWS}; exec ${superagent}`;
+	const environment: Record<string, string | undefined> = {
+		...Bun.env,
+		SUPERAGENT_HOME: home,
+		SHELL: '/bin/sh',
+	};
+	for (const [name, value] of Object.entries(env)) {
+		if (value === undefined) delete environment[name];
+		else environment[name] = value;
+	}
 	const child = Bun.spawn(
 		process.platform === 'darwin'
 			? ['script', '-q', '/dev/null', 'sh', '-c', command]
 			: ['script', '-qfec', command, '/dev/null'],
 		{
 			cwd,
-			env: { ...Bun.env, SUPERAGENT_HOME: home, SHELL: '/bin/sh' },
+			env: environment,
 			stdin: 'pipe',
 			stdout: 'pipe',
 			stderr: 'ignore',
@@ -60,6 +78,7 @@ export async function openTui(home: string, cwd: string): Promise<Tui> {
 	const tui: Tui = {
 		mark: () => raw.length,
 		seen: (from = 0) => plain(raw.slice(from)),
+		raw: (from = 0) => raw.slice(from),
 		async waitFor(text, from = 0) {
 			const deadline = Date.now() + WAIT_MS;
 			while (!tui.seen(from).includes(text)) {
