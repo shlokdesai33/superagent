@@ -8,7 +8,12 @@
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { FeedLine, TaskDetail, TaskSummary } from '../src/protocol.ts';
+import type {
+	FeedLine,
+	Health,
+	TaskDetail,
+	TaskSummary,
+} from '../src/protocol.ts';
 import {
 	type FakeReply,
 	type FakeRequest,
@@ -132,6 +137,14 @@ function isTaskDetail(value: unknown): value is TaskDetail {
 		'conversation' in value &&
 		'workDir' in value
 	);
+}
+
+function sandbox(): Health['sandbox'] | null {
+	for (const line of agent.lines.toReversed()) {
+		if (line.type === 'health') return line.health.sandbox;
+		if (line.type === 'snapshot') return line.snapshot.health.sandbox;
+	}
+	return null;
 }
 
 const workerRequests = (handle: string) =>
@@ -277,12 +290,24 @@ try {
 	);
 	const [escaped] = workerRequests(escaper.handle)[1]?.results ?? [];
 	check(
-		'the command ends at its timeout though a helper holds its output',
-		Date.now() - escapeAt < 20_000 &&
-			(escaped ?? '').includes('timed out') &&
-			(escaped ?? '').includes('outside its process group'),
+		'the command ends at its timeout though its helper left the process group',
+		Date.now() - escapeAt < 20_000 && (escaped ?? '').includes('timed out'),
 		escaped?.split('\n')[0],
 	);
+	// bubblewrap ends everything in the sandbox with the command, the helper
+	// too; unsandboxed, the helper outlives it and holds its output.
+	if (sandbox() === 'on') {
+		check(
+			'in the sandbox, the helper ends with the command',
+			Bun.spawnSync(['pgrep', '-f', 'sleep 117']).exitCode !== 0,
+		);
+	} else {
+		check(
+			'unsandboxed, its output says the helper may still run',
+			(escaped ?? '').includes('outside its process group'),
+			escaped,
+		);
+	}
 } catch (error) {
 	failures += 1;
 	process.stdout.write(
