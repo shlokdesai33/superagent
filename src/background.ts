@@ -7,7 +7,7 @@ import {
 	truncateSync,
 } from 'node:fs';
 import { DaemonUnreachable, readSnapshot } from './client.ts';
-import { BACKGROUND_ENV, type DataPaths } from './home.ts';
+import { BACKGROUND_ENV, type DataPaths, isAgentProcess } from './home.ts';
 import type { Snapshot } from './protocol.ts';
 
 const READY_WAIT_MS = 20_000;
@@ -82,7 +82,14 @@ export async function stopAgent(paths: DataPaths): Promise<boolean> {
 	} catch {
 		return false;
 	}
-	if (!Number.isInteger(pid) || pid <= 0 || !alive(pid)) return false;
+	if (
+		!Number.isInteger(pid) ||
+		pid <= 0 ||
+		!alive(pid) ||
+		!isAgentProcess(pid)
+	) {
+		return false;
+	}
 	process.kill(pid, 'SIGTERM');
 	const deadline = Date.now() + STOP_WAIT_MS;
 	while (alive(pid) && Date.now() < deadline) {

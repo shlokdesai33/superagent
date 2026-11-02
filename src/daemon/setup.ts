@@ -7,7 +7,7 @@ import {
 } from 'node:fs';
 import { release } from 'node:os';
 import { isAbsolute } from 'node:path';
-import type { DataPaths } from '../home.ts';
+import { type DataPaths, isAgentProcess } from '../home.ts';
 import { readKeyFile, writeKeyFile } from '../keys.ts';
 import type { MachineFacts } from '../protocol.ts';
 import type { Log } from './log.ts';
@@ -52,7 +52,7 @@ export function takeLock(path: string): void {
 			if (errorCode(error) !== 'EEXIST') throw error;
 		}
 		const pid = readPid(path);
-		if (pid !== null && isAlive(pid)) {
+		if (pid !== null && isAlive(pid) && isAgentProcess(pid)) {
 			throw new StartupError(
 				`Another agent is already running with this data folder (pid ${pid})`,
 			);
