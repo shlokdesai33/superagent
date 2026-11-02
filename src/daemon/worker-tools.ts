@@ -246,6 +246,12 @@ export async function runWorkerTool(
 				return done(releaseThread(daemon, task, args));
 			case 'finish': {
 				const result = limitedString(args, 'result', RESULT_CHARS);
+				const open = openPr(daemon, task.id);
+				if (open !== null) {
+					throw new ToolError(
+						`your PR ${open} is still open: wait_for its review and merge, and finish once it's merged or closed. If it should be abandoned, close it with gh pr close, or ask the operator.`,
+					);
+				}
 				endTask(daemon, task.id, {
 					state: 'done',
 					result,
@@ -459,4 +465,16 @@ function releaseThread(daemon: Daemon, task: WorkerTask, args: Args): string {
 	taskChanged(daemon, task.id);
 	toRouter(daemon, 'thread_released', task.id, task.handle, thread, { thread });
 	return `released ${thread}; the Router handles it now`;
+}
+
+/** The task's PR on GitHub that is still open, if it follows one. */
+function openPr(daemon: Daemon, taskId: number): string | null {
+	return (
+		daemon.db
+			.query<{ id: string }, [number]>(
+				`SELECT th.id FROM threads th JOIN github_items gi ON gi.thread_id = th.id
+				WHERE th.owner_task_id = ? AND gi.is_pr = 1 AND gi.state = 'open'`,
+			)
+			.get(taskId)?.id ?? null
+	);
 }
