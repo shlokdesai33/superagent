@@ -322,8 +322,8 @@ try {
 		await settle();
 		let screen = tui.screen();
 		whole(
-			'256 colours, 80 columns: the NEEDS YOU question shows in full, wrapped under the title',
-			block(screen, (row) => row.startsWith(`${' '.repeat(8)}Which fix`), 8),
+			'256 colours, 80 columns: the NEEDS YOU question shows in full, wrapped under └',
+			block(screen, (row) => row.startsWith('  └ Which fix'), 4),
 			QUESTION,
 			screen,
 		);
@@ -335,7 +335,7 @@ try {
 		screen = tui.screen();
 		whole(
 			'256 colours, 80 columns: the task view shows the question in full',
-			block(screen, (row) => row.startsWith('    Which fix'), 4),
+			block(screen, (row) => row.startsWith('  └ Which fix'), 4),
 			QUESTION,
 			screen,
 		);

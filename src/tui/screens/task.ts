@@ -61,7 +61,7 @@ export function taskBody(
 		lines.push(label('QUESTION'));
 		lines.push(
 			...hang(
-				[{ t: '    ' }],
+				[{ t: '  └ ', fg: 'ghost' }],
 				[{ t: paragraphs(task.question.text), fg: 'fg', i: true }],
 				measure,
 			),

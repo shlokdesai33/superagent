@@ -304,9 +304,8 @@ function needsRows(
 		),
 	];
 	if (task.question) {
-		// Under the title, without a connector glyph.
 		const question = hang(
-			[{ t: ' '.repeat(8) }],
+			[{ t: '  └ ', fg: 'ghost' }],
 			[{ t: paragraphs(task.question.text), fg: 'fg', i: true }],
 			Math.min(MEASURE, ctx.content),
 		);
@@ -473,7 +472,11 @@ function heldRows(
 			fg: 'faint',
 		});
 	}
-	return hang([{ t: ' '.repeat(7) }], segs, Math.min(MEASURE, ctx.content));
+	return hang(
+		[{ t: ' '.repeat(7) }, { t: '└ ', fg: 'ghost' }],
+		segs,
+		Math.min(MEASURE, ctx.content),
+	);
 }
 
 function consoleRows(message: Message, ctx: Context): Line[] {
