@@ -1,11 +1,12 @@
-import type { Snapshot } from './protocol.ts';
+import type { DataPaths } from './home.ts';
+import type { KeySource, Snapshot } from './protocol.ts';
 
 /** The text `superagent status` prints. */
-export function formatStatus(snapshot: Snapshot, home: string): string {
+export function formatStatus(snapshot: Snapshot, paths: DataPaths): string {
 	const { agent, router, usage, health } = snapshot;
 	const lines = [
 		`Agent running · pid ${agent.pid} · up ${duration(snapshot.now - agent.startedAt)} · version ${agent.version}`,
-		`Data folder: ${home}`,
+		`Data folder: ${paths.home}`,
 	];
 
 	if (snapshot.tasks.length === 0) {
@@ -50,6 +51,7 @@ export function formatStatus(snapshot: Snapshot, home: string): string {
 			)
 			.join(', ')}`,
 		`Model: ${health.model.name} · ${health.model.state}${health.model.detail ? ` · ${health.model.detail}` : ''}`,
+		`Particle key: ${keyText(health.model.key, paths)}`,
 	);
 	for (const problem of health.problems) {
 		lines.push(`Problem: ${problem.text}`);
@@ -68,6 +70,12 @@ export function formatStatus(snapshot: Snapshot, home: string): string {
 			)}${missing.length > 0 ? ` · missing: ${missing.join(', ')}` : ''}`,
 	);
 	return lines.join('\n');
+}
+
+function keyText(source: KeySource, paths: DataPaths): string {
+	if (source === 'env') return 'from PARTICLE_API_KEY';
+	if (source === 'file') return `from ${paths.particleKey}`;
+	return 'missing; run superagent login particle';
 }
 
 function clock(at: number): string {

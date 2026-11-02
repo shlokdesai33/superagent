@@ -156,6 +156,8 @@ export type Health = {
 		state: 'ok' | 'paused' | 'error';
 		detail: string | null;
 		since: number | null;
+		/** Where the Particle key comes from; never the key itself. */
+		key: KeySource;
 	};
 	/** Failed tasks are tasks, not problems. */
 	problems: Problem[];
@@ -165,6 +167,9 @@ export type Health = {
 	/** `unavailable` comes with a `sandbox` problem, and commands are refused. Never `off`. */
 	sandbox: 'off' | 'on' | 'unavailable';
 };
+
+/** `env` is `PARTICLE_API_KEY`, `file` the `particle-key` file in the data folder. */
+export type KeySource = 'env' | 'file' | 'missing';
 
 export type MachineFacts = {
 	os: string;

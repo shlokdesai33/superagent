@@ -7,16 +7,22 @@ import { loadAgentId, openDatabase } from './db.ts';
 import { createFeed } from './feed.ts';
 import { repositoryName, repositoryRoot, startCleanup } from './git.ts';
 import { createLog } from './log.ts';
-import { NO_API_KEY, createModelClient } from './model.ts';
+import {
+	NO_API_KEY,
+	findParticleKey,
+	particleClient,
+	watchParticleKey,
+} from './model.ts';
 import { type RouterLoop, recoverRouter, startRouter } from './router.ts';
 import { recoverCommands, captureLoginPath } from './commands.ts';
-import { agentSecrets } from './secrets.ts';
+import { addSecrets } from './secrets.ts';
 import { startSandbox, stopSandbox } from './sandbox.ts';
 import { listen } from './server.ts';
 import {
 	createDataFolder,
 	gatherMachineFacts,
 	loadConfig,
+	migrateConfigKey,
 	releaseLock,
 	saveRepos,
 	takeLock,
@@ -45,9 +51,11 @@ export async function runDaemon(options: {
 	let router: RouterLoop | null = null;
 	let stopActivity: (() => void) | null = null;
 	let stopCleanup: (() => Promise<void>) | null = null;
+	let stopKeyWatch: (() => void) | null = null;
 	let sandboxStarted = false;
 	const teardown = async () => {
 		if (daemon) daemon.stopping = true;
+		stopKeyWatch?.();
 		await router?.stop();
 		// Workers may still store their last tool result, so the database stays
 		// open until they and their commands have ended.
@@ -98,8 +106,11 @@ export async function runDaemon(options: {
 			return daemon;
 		});
 		db = openDatabase(paths.db);
+		const movedKey = migrateConfigKey(paths, log);
 		const config = loadConfig(paths.config);
-		const secrets = agentSecrets(config);
+		const key = findParticleKey(paths.particleKey);
+		const secrets: string[] = [];
+		addSecrets(secrets, [...key.found, movedKey]);
 		// First run inside a repository: use it.
 		if (config.repos.length === 0) {
 			const top = repositoryRoot(startedIn, secrets);
@@ -126,7 +137,7 @@ export async function runDaemon(options: {
 			if (channels.has(row.channel)) channels.set(row.channel, row.at);
 		}
 
-		const particle = createModelClient(config);
+		const particle = key.key === null ? null : particleClient(key.key);
 		const context: Daemon = {
 			db,
 			feed: createFeed(() => buildSnapshot(context), log),
@@ -145,9 +156,15 @@ export async function runDaemon(options: {
 			actionResults: new Map(),
 			usageTimer: null,
 			particle,
+			particleKey: key.key,
+			keySource: key.source,
 			model:
 				particle === null
-					? { state: 'paused', detail: NO_API_KEY, since: startedAt }
+					? {
+							state: 'paused',
+							detail: key.problem ?? NO_API_KEY,
+							since: startedAt,
+						}
 					: { state: 'ok', detail: null, since: null },
 			router: { batch: null, wake: () => {} },
 			paths,
@@ -179,8 +196,10 @@ export async function runDaemon(options: {
 		home: paths.home,
 		socket: paths.socket,
 		os: daemon.machine.os,
+		particleKey: daemon.keySource,
 	});
-	if (daemon.particle === null) log('warn', NO_API_KEY);
+	if (daemon.particle === null) log('warn', daemon.model.detail ?? NO_API_KEY);
+	stopKeyWatch = watchParticleKey(daemon);
 	router = startRouter(daemon);
 	startWorkers(daemon);
 	stopActivity = startActivityTimer(daemon);

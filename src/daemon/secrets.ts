@@ -1,17 +1,19 @@
 import { API_KEY_ENV } from '../particle/client.ts';
-import type { Config } from './setup.ts';
 
 /** Environment variables that hold the agent's own keys. */
 const SECRET_ENV = [API_KEY_ENV];
 
 /**
- * The agent's own keys. They never reach Worker commands, the model, the
- * feed, the TUI or the log.
+ * Adds keys to the agent's own, which never reach Worker commands, the model,
+ * the feed, the TUI or the log.
  */
-export function agentSecrets(config: Config): string[] {
-	return [Bun.env[API_KEY_ENV], config.particleApiKey].filter(
-		(key): key is string => Boolean(key),
-	);
+export function addSecrets(
+	secrets: string[],
+	keys: Array<string | null>,
+): void {
+	for (const key of keys) {
+		if (key && !secrets.includes(key)) secrets.push(key);
+	}
 }
 
 /** The daemon's environment without the agent's keys, by name or by value. */
