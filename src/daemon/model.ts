@@ -6,6 +6,7 @@ import {
 	checkApiKey,
 	createParticleClient,
 } from '../particle/client.ts';
+import { statSync } from 'node:fs';
 import { estimateCostUsd } from '../particle/cost.ts';
 import type { ChatRequest } from '../particle/types.ts';
 import type { KeySource } from '../protocol.ts';
@@ -14,6 +15,7 @@ import { watchdogMs } from './scale.ts';
 import { addSecrets } from './secrets.ts';
 import {
 	type Daemon,
+	KEY_REJECTED,
 	type Params,
 	health,
 	setModelHealth,
@@ -26,8 +28,10 @@ const MAX_CALLS_IN_FLIGHT = 6;
 const KEY_POLL_MS = 2_000;
 const PROBE_MS = watchdogMs(2 * 60_000);
 
-export const NO_API_KEY = `No Particle API key: run superagent login particle, or set ${API_KEY_ENV}`;
-export const REJECTED_KEY = 'Particle rejected the API key';
+export const NO_API_KEY = 'No Particle API key: paste one in superagent';
+/** What fixes a key Particle rejected. */
+const REJECTED_KEY_FIX =
+	'press p on health to paste a new key, or run superagent login particle';
 /** How often every loop tries Particle again after an account failure; shorter in tests. */
 export const ACCOUNT_RETRY_MS =
 	Number(Bun.env.SUPERAGENT_PARTICLE_RETRY_MS) || 2 * 60_000;
@@ -56,6 +60,8 @@ export type FoundKey = {
 	found: string[];
 	/** Why the key file couldn't be read, when it couldn't. */
 	problem: string | null;
+	/** Changes whenever the key file is written, even with the same key. */
+	fileStamp: string | null;
 };
 
 /** `PARTICLE_API_KEY` wins over the key file. */
@@ -68,11 +74,18 @@ export function findParticleKey(keyFile: string): FoundKey {
 	} catch (error) {
 		problem = `Couldn't read ${keyFile}: ${error instanceof Error ? error.message : String(error)}`;
 	}
+	let fileStamp: string | null = null;
+	if (file !== null) {
+		const stat = statSync(keyFile, { throwIfNoEntry: false });
+		// Key files are replaced by a rename, so the inode changes with each write.
+		if (stat) fileStamp = `${stat.ino}:${stat.mtimeMs}`;
+	}
 	return {
 		key: env ?? file,
 		source: env !== null ? 'env' : file !== null ? 'file' : 'missing',
 		found: [env, file].filter((key) => key !== null),
 		problem,
+		fileStamp,
 	};
 }
 
@@ -83,19 +96,30 @@ export function particleClient(apiKey: string): ParticleClient {
 
 /**
  * Reads the key again. A changed key replaces the client for the next call;
- * a key appearing resumes the model and wakes the Router and Workers, and one
- * disappearing pauses it.
+ * a key appearing, or replacing one the model paused on, resumes the model
+ * and wakes the Router and Workers, and one disappearing pauses it. The key
+ * file written again with the same key (the TUI saves only a key Particle
+ * just accepted) also resumes a paused model.
  */
 export function refreshParticleKey(daemon: Daemon): void {
-	const { key, source, found, problem } = findParticleKey(
+	const { key, source, found, problem, fileStamp } = findParticleKey(
 		daemon.paths.particleKey,
 	);
 	addSecrets(daemon.secrets, found);
+	const rewritten = source === 'file' && fileStamp !== daemon.keyFileStamp;
+	daemon.keyFileStamp = fileStamp;
 	if (key === daemon.particleKey) {
 		if (key === null) setModelHealth(daemon, 'paused', problem ?? NO_API_KEY);
+		else if (rewritten && daemon.model.state === 'paused') {
+			daemon.log('info', 'Particle key saved again', { source });
+			setModelHealth(daemon, 'ok', null);
+			daemon.router.wake();
+			for (const live of daemon.workers.values()) live.wake();
+		}
 		return;
 	}
 	const had = daemon.particleKey !== null;
+	const resumes = key !== null && (!had || daemon.model.state === 'paused');
 	daemon.particleKey = key;
 	daemon.keySource = source;
 	daemon.particle = key === null ? null : particleClient(key);
@@ -110,16 +134,40 @@ export function refreshParticleKey(daemon: Daemon): void {
 	);
 	const before = daemon.model;
 	if (key === null) setModelHealth(daemon, 'paused', problem ?? NO_API_KEY);
-	else if (!had) setModelHealth(daemon, 'ok', null);
+	else if (resumes) setModelHealth(daemon, 'ok', null);
 	// `setModelHealth` publishes only a changed state; the key source changed.
 	if (daemon.model === before) {
 		daemon.feed.publish({ type: 'health', health: health(daemon) });
 	}
 	// A replaced key also ends the Router's pause after an account failure.
 	if (key !== null) daemon.router.wake();
-	if (key !== null && !had) {
+	if (resumes) {
 		for (const live of daemon.workers.values()) live.wake();
 	}
+}
+
+/**
+ * Asks Particle about the key the agent starts with, so a revoked key shows
+ * before the first model call. Only a rejection changes anything.
+ */
+export async function checkStartingKey(daemon: Daemon): Promise<void> {
+	const { particleKey } = daemon;
+	if (particleKey === null) return;
+	const baseUrl = Bun.env.PARTICLE_BASE_URL;
+	const check = await checkApiKey(
+		baseUrl ? { apiKey: particleKey, baseUrl } : { apiKey: particleKey },
+	);
+	// A call may have settled it, or the key changed, while the check ran.
+	if (
+		check.result !== 'rejected' ||
+		daemon.stopping ||
+		daemon.particleKey !== particleKey ||
+		daemon.model.state !== 'ok'
+	) {
+		return;
+	}
+	daemon.log('warn', KEY_REJECTED, { source: daemon.keySource });
+	setModelHealth(daemon, 'paused', KEY_REJECTED, REJECTED_KEY_FIX);
 }
 
 /**
@@ -162,12 +210,7 @@ async function probeParticle(daemon: Daemon): Promise<void> {
 		daemon.log('info', 'Particle answers again');
 		setModelHealth(daemon, 'ok', null);
 	} else if (check.result === 'rejected') {
-		setModelHealth(
-			daemon,
-			'paused',
-			REJECTED_KEY,
-			'run superagent login particle with a working key',
-		);
+		setModelHealth(daemon, 'paused', KEY_REJECTED, REJECTED_KEY_FIX);
 	}
 }
 
@@ -379,7 +422,7 @@ function errorText(error: unknown): string {
 /** What the TUI shows as the model's health. */
 function describe(error: unknown, text: string): string {
 	if (error instanceof ParticleError) {
-		if (error.status === 401) return REJECTED_KEY;
+		if (error.status === 401) return KEY_REJECTED;
 		if (error.status === 402) return 'Particle account is out of credit';
 		if (error.status === 403) {
 			return "Particle's API key isn't allowed to use chat completions";
@@ -395,7 +438,7 @@ function accountFix(error: unknown): string {
 		return 'add credit on the Billing page at https://platform.particle.ai';
 	}
 	if (status === 403) {
-		return 'create a key that can use chat completions at https://platform.particle.ai, then run superagent login particle';
+		return 'create a key that can use chat completions at https://platform.particle.ai, then press p on health to paste it, or run superagent login particle';
 	}
-	return 'run superagent login particle with a working key';
+	return REJECTED_KEY_FIX;
 }

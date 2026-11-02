@@ -26,10 +26,17 @@ export type Tui = {
 	type(keys: string): Promise<void>;
 	/** Resizes the pseudo-terminal, which sends the UI a SIGWINCH. */
 	resize(columns: number, rows: number): Promise<void>;
+	/** Text as a terminal pastes it, between bracketed-paste markers. */
+	paste(text: string): Promise<void>;
 	quit(): Promise<void>;
 };
 
-export type TuiSize = { columns?: number; rows?: number };
+export type TuiSize = {
+	columns?: number;
+	rows?: number;
+	/** What to wait for before returning; the home screen's input line by default. */
+	until?: string;
+};
 
 function plain(raw: string): string {
 	return (
@@ -119,6 +126,9 @@ export async function openTui(
 			await send(keys);
 			await Bun.sleep(150);
 		},
+		async paste(text) {
+			await tui.type(`\x1b[200~${text}\x1b[201~`);
+		},
 		async resize(newColumns, newRows) {
 			const tty = readFileSync(ttyFile, 'utf8').trim();
 			const flag = process.platform === 'darwin' ? '-f' : '-F';
@@ -152,6 +162,6 @@ export async function openTui(
 			rmSync(dirname(ttyFile), { recursive: true, force: true });
 		},
 	};
-	await tui.waitFor('press / to ask');
+	await tui.waitFor(size.until ?? 'press / to ask');
 	return tui;
 }
