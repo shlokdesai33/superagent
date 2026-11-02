@@ -17,7 +17,7 @@ const BAR = 32;
 const KEY: Record<Health['model']['key'], string | null> = {
 	env: 'from PARTICLE_API_KEY',
 	file: null,
-	missing: 'missing · run superagent login particle',
+	missing: 'missing · press p to add one',
 };
 
 export function healthBody(live: Live, content: number, now: number): Line[] {
@@ -239,21 +239,9 @@ export function healthBody(live: Live, content: number, now: number): Line[] {
 	});
 	lines.push(blank());
 
-	const missing = Object.entries(health.machine.tools)
-		.filter(([, present]) => !present)
-		.map(([tool]) => tool);
 	lines.push(label('THIS MACHINE'));
 	const machine: Seg[] = [
 		{ t: `${health.machine.os} ${health.machine.arch}`, fg: 'fg' },
-		...(missing.length > 0
-			? [
-					sep,
-					{
-						t: `${missing.join(', ')} not installed`,
-						fg: 'faint',
-					} satisfies Seg,
-				]
-			: []),
 	];
 	for (const segs of wrap(machine, measure)) lines.push({ segs });
 	return lines;

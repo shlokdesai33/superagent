@@ -34,6 +34,7 @@ import {
 } from './parts.ts';
 import { healthBody } from './screens/health.ts';
 import { homeBody } from './screens/home.ts';
+import { keyLines } from './screens/key.ts';
 import { keysBody } from './screens/keys.ts';
 import { taskBody } from './screens/task.ts';
 import { repoChoices, repoName } from './repo.ts';
@@ -91,6 +92,15 @@ export function view(
 	}
 
 	const content = columns - MARGIN;
+	if (ui.screen.name === 'key') {
+		const screen = keyLines(model, ui.screen, content, rows, now);
+		return {
+			rows: screen.lines.map((line) => paint(line, theme, columns, null)),
+			animating: screen.animating,
+			scroll: 0,
+			overflow: { above: false, below: false },
+		};
+	}
 	const { connection } = model;
 	const live = connection.state === 'rejected' ? null : model.live;
 	const stale = live !== null && connection.state !== 'live';
@@ -361,6 +371,9 @@ function bodyLines(
 			return { lines: healthBody(live, content, now), animating: false };
 		case 'keys':
 			return { lines: keysBody(content), animating: false };
+		case 'key':
+			// A screen of its own, drawn by `view`.
+			return { lines: [], animating: false };
 	}
 }
 
@@ -661,11 +674,16 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 		const failed = [...live.tasks.values()].some(
 			(task) => task.status === 'failed' && !task.dismissed,
 		);
-		return hint([
-			...(failed ? [['r', 'resume failed'] satisfies [string, string]] : []),
-			['esc', 'back'],
-			['?', 'keys'],
-		]);
+		return fitHint(
+			[
+				...(failed ? [['r', 'resume failed'] satisfies [string, string]] : []),
+				['p', live.health.model.key === 'missing' ? 'add key' : 'replace key'],
+				['esc', 'back'],
+				['?', 'keys'],
+			],
+			content,
+			['?'],
+		);
 	}
 	if (screen.name === 'keys') return hint([['esc', 'back']]);
 
