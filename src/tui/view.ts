@@ -44,6 +44,7 @@ import {
 	type Ui,
 	drafting,
 	toRouter,
+	typed,
 } from './state.ts';
 import { type Rgb, type Theme, blend } from './theme.ts';
 
@@ -664,7 +665,7 @@ function inputRows(
 		{ t: to, fg: 'faint' },
 	];
 	const { typing } = ui;
-	if (typing.text !== '') {
+	if (typed(ui)) {
 		const text = typing.text.replaceAll(/\s/g, ' ');
 		// The cursor is wrapped with the text, so it lands where it's drawn; it
 		// blinks to a no-break space, which wraps the same.
@@ -838,7 +839,7 @@ function hintLine(model: Model, ui: Ui, content: number): Seg[] {
 		) {
 			pairs.push(['tab', 'change repo']);
 		}
-		pairs.push(['esc', ui.typing.text === '' ? 'cancel' : 'clear']);
+		pairs.push(['esc', typed(ui) ? 'clear' : 'cancel']);
 		return fitHint(pairs, content, ['tab']);
 	}
 	const live = model.live;

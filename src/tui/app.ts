@@ -51,6 +51,7 @@ import {
 	emptyTyping,
 	mergedSteps,
 	toRouter,
+	typed,
 } from './state.ts';
 import type { Terminal } from './terminal.ts';
 import { type Theme, backgroundFromOsc11 } from './theme.ts';
@@ -582,19 +583,23 @@ export class App {
 
 	private onNamedKey(name: KeyName): void {
 		const { typing } = this.ui;
-		const typed = typing.text !== '';
+		// Spaces alone are nothing typed, here as in the box and the hint.
+		const written = typed(this.ui);
 		switch (name) {
 			case 'enter':
-				if (typing.text.trim() !== '') this.send();
+				if (written) this.send();
 				else {
 					clear(typing);
 					this.open();
 				}
 				break;
 			case 'escape':
-				if (typed) clear(typing);
+				if (written) clear(typing);
 				else if (typing.mode === 'answer') this.ui.typing = emptyTyping();
-				else this.back();
+				else {
+					clear(typing);
+					this.back();
+				}
 				break;
 			case 'tab':
 				this.nextRepo();
@@ -618,11 +623,11 @@ export class App {
 				typing.cursor = typing.text.length;
 				break;
 			case 'up':
-				if (typed) vertical(typing, this.ui.draftRows, -1);
+				if (written) vertical(typing, this.ui.draftRows, -1);
 				else this.move(-1);
 				break;
 			case 'down':
-				if (typed) vertical(typing, this.ui.draftRows, 1);
+				if (written) vertical(typing, this.ui.draftRows, 1);
 				else this.move(1);
 				break;
 			case 'pageup':

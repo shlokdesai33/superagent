@@ -41,9 +41,14 @@ export function emptyTyping(): Typing {
 	return { mode: 'free', handle: null, questionId: null, text: '', cursor: 0 };
 }
 
+/** Something is typed: spaces alone count as nothing, as enter sends nothing. */
+export function typed(ui: Ui): boolean {
+	return ui.typing.text.trim() !== '';
+}
+
 /** Something is typed, or an answer is started. */
 export function drafting(ui: Ui): boolean {
-	return ui.typing.text !== '' || ui.typing.mode === 'answer';
+	return typed(ui) || ui.typing.mode === 'answer';
 }
 
 export type Toast = {

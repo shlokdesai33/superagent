@@ -292,6 +292,28 @@ try {
 		idleBox.join(' / '),
 	);
 
+	// Spaces alone are nothing typed: the box stays idle, and enter opens.
+	await tui.type('  ');
+	await Bun.sleep(300);
+	screen = replay(tui.raw());
+	check(
+		'a stray space looks like nothing typed: subtle box, placeholder, the empty-draft hint',
+		border(screen) === ghost &&
+			showing(screen, '› ▏ask, or @handle') &&
+			showing(screen, 'enter open') &&
+			!showing(screen, 'enter send'),
+		box(screen)
+			.map((line) => text(line).trimEnd())
+			.join(' / '),
+	);
+	await tui.type('\r');
+	await until(tui, 'the task view', (now) =>
+		showing(now, `superagent  ›  ${alpha}`),
+	);
+	check('and enter on it opens the selected task, as with nothing typed', true);
+	await tui.type(ESC);
+	await until(tui, 'home again', (now) => showing(now, 'NEEDS YOU'));
+
 	// In a draft that wraps, ↑ goes to the row above, ↓ past the last row to its end.
 	const words = Array.from({ length: 50 }, (_, index) => `w${index + 10}`);
 	await tui.type(words.join(' '));
