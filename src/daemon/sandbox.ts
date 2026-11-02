@@ -86,7 +86,11 @@ export async function startSandbox(
 		);
 	}
 	const probe = await runProbe(loginPath);
-	if (probe === null) return { state: 'on' };
+	if (probe === null) {
+		// The bridges run from here on, before any Worker command.
+		recordBridges(paths.home);
+		return { state: 'on' };
+	}
 	await SandboxManager.reset();
 	const diagnosis =
 		process.platform === 'darwin'
