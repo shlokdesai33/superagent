@@ -39,6 +39,20 @@ export const TASK_COLUMNS = `t.id, t.handle, t.title, t.state, t.waiting_on AS w
 	LEFT JOIN events e ON e.id = t.origin_event_id
 	LEFT JOIN threads th ON th.id = e.thread_id`;
 
+/**
+ * The task moved forward: an edit, a new command outcome, a question, a wait,
+ * its end, or new input. The Watchdog counts calls since the last one.
+ */
+export function markProgress(
+	db: Database,
+	taskId: number,
+	at: number = Date.now(),
+): void {
+	db.query<unknown, [number, number]>(
+		'UPDATE tasks SET last_progress_at = ?, progress_calls = model_calls WHERE id = ?',
+	).run(at, taskId);
+}
+
 export function taskRow(db: Database, id: number): TaskRow | null {
 	return db
 		.query<TaskRow, [number]>(`SELECT ${TASK_COLUMNS} WHERE t.id = ?`)
@@ -119,7 +133,8 @@ export function taskSummary(daemon: Daemon, row: TaskRow): TaskSummary {
 	const activity = Array.from({ length: ACTIVITY_MINUTES }, () => 0);
 	for (const { at } of db
 		.query<{ at: number }, [number, number]>(
-			'SELECT started_at AS at FROM model_calls WHERE task_id = ? AND started_at >= ?',
+			// Watchdog reviews aren't the task's own activity.
+			"SELECT started_at AS at FROM model_calls WHERE task_id = ? AND started_at >= ? AND purpose != 'watchdog'",
 		)
 		.all(row.id, windowStart)) {
 		const index = Math.floor((at - windowStart) / MINUTE_MS);
@@ -313,7 +328,7 @@ export function startActivityTimer(daemon: Daemon): () => void {
 			() => {
 				for (const { id } of daemon.db
 					.query<{ id: number }, [number]>(
-						'SELECT DISTINCT task_id AS id FROM model_calls WHERE task_id IS NOT NULL AND started_at >= ?',
+						"SELECT DISTINCT task_id AS id FROM model_calls WHERE task_id IS NOT NULL AND started_at >= ? AND purpose != 'watchdog'",
 					)
 					.all(Date.now() - (ACTIVITY_MINUTES + 1) * MINUTE_MS)) {
 					taskChanged(daemon, id);

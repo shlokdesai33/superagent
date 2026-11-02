@@ -3,7 +3,7 @@
 import type { ChatRequest, Message } from '../src/particle/types.ts';
 
 export type FakeRequest = {
-	session: 'router' | 'worker' | 'compaction';
+	session: 'router' | 'worker' | 'compaction' | 'watchdog';
 	/** The task handle, for Worker and Worker compaction calls. */
 	handle: string | null;
 	body: ChatRequest;
@@ -167,7 +167,14 @@ function describe(
 	);
 	const trailing = messages.slice(last + 1);
 	return {
-		session: body.tools ? (handle ? 'worker' : 'router') : 'compaction',
+		session:
+			key === 'watchdog'
+				? 'watchdog'
+				: body.tools
+					? handle
+						? 'worker'
+						: 'router'
+					: 'compaction',
 		handle,
 		body,
 		fresh: trailing

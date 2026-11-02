@@ -39,7 +39,7 @@ const ACCOUNT_RETRY_MS = 2 * 60_000;
 // the request itself is blamed and the task fails.
 const MAX_TRANSIENT_FAILURES = 3;
 const NOTE_CHARS = 200;
-const SLOT = 'a free worker slot';
+export const SLOT = 'a free worker slot';
 const UNREACHABLE = 'Particle (unreachable)';
 const NUDGE = 'Call finish, ask or wait_for to say what happens next.';
 
@@ -547,9 +547,6 @@ function noteStep(daemon: Daemon, taskId: number, text: string): void {
 				now,
 			}).lastInsertRowid,
 	);
-	db.query<unknown, [number, number]>(
-		'UPDATE tasks SET last_progress_at = ? WHERE id = ?',
-	).run(now, taskId);
 	publishStep(daemon, id);
 }
 

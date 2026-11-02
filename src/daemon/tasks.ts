@@ -161,7 +161,8 @@ export function endTask(
 		db.query<unknown, Params>(
 			`UPDATE tasks SET state = $state, ended_at = $at, updated_at = $at, waiting_on = NULL,
 				result = $result, failure = $failure, report = COALESCE($report, report),
-				dismissed = $dismissed, last_progress_at = $progress
+				dismissed = $dismissed, last_progress_at = COALESCE($progress, last_progress_at),
+				progress_calls = CASE WHEN $progress IS NULL THEN progress_calls ELSE model_calls END
 			WHERE id = $id`,
 		).run({
 			state: outcome.state,
@@ -260,7 +261,7 @@ export function askQuestion(
 		);
 		db.query<unknown, [number, number]>(
 			`UPDATE tasks SET state = 'needs_you', waiting_on = NULL, last_progress_at = ?1,
-				updated_at = ?1 WHERE id = ?2`,
+				progress_calls = model_calls, updated_at = ?1 WHERE id = ?2`,
 		).run(at, taskId);
 		return questionId;
 	})();
@@ -273,6 +274,50 @@ export function askQuestion(
 		});
 	}
 	return id;
+}
+
+/** What a Watchdog question offers; any other answer counts as continuing. */
+export const PAUSE_OPTIONS = ['Continue', 'Stop'];
+
+/**
+ * The Watchdog pauses a task: it needs you, with a question only you can
+ * answer, and its Worker and commands stop. Its threads, worktree and
+ * transcript stay. `false` when the task wasn't active.
+ */
+export function pauseTask(
+	daemon: Daemon,
+	taskId: number,
+	question: { text: string; context: string | null },
+): boolean {
+	const { db } = daemon;
+	const at = Date.now();
+	const paused = db.transaction(() => {
+		const row = taskRow(db, taskId);
+		if (!row || row.state !== 'active') return null;
+		db.query<unknown, Params>(
+			`INSERT INTO questions (task_id, text, context, options, state, asked_at, asked_by)
+			VALUES ($taskId, $text, $context, $options, 'open', $at, 'watchdog')`,
+		).run({
+			taskId,
+			text: question.text,
+			context: question.context,
+			options: JSON.stringify(PAUSE_OPTIONS),
+			at,
+		});
+		db.query<unknown, [number, number]>(
+			"UPDATE tasks SET state = 'needs_you', waiting_on = NULL, updated_at = ? WHERE id = ?",
+		).run(at, taskId);
+		return row.handle;
+	})();
+	if (paused === null) return false;
+	daemon.workers.get(taskId)?.controller.abort();
+	void stopTaskCommands(daemon, taskId);
+	publishTask(daemon, taskId);
+	daemon.log('info', 'task paused by the watchdog', {
+		task: paused,
+		question: question.text,
+	});
+	return true;
 }
 
 /** Sets failed tasks back to active, telling each Worker why it stopped. */

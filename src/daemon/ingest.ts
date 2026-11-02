@@ -9,7 +9,7 @@ import {
 	routerChanged,
 	toMessage,
 } from './state.ts';
-import { publishTask } from './task-feed.ts';
+import { markProgress, publishTask } from './task-feed.ts';
 
 const PREVIEW_CHARS = 80;
 
@@ -149,6 +149,16 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 				}).lastInsertRowid,
 		);
 
+		// New input moves a task forward; its own command results and the
+		// Watchdog's notes don't.
+		if (
+			decision.route === 'task' &&
+			event.kind !== 'command_done' &&
+			event.author.name !== 'watchdog'
+		) {
+			markProgress(db, decision.taskId, at);
+		}
+
 		let message: MessageRow | null = null;
 		if (
 			event.channel !== 'internal' &&
@@ -175,11 +185,14 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 				.get(Number(messageId));
 		}
 
-		// A person's message to a task with an open question answers it.
+		// A person's message to a task with an open question answers it. Only
+		// the operator answers the Watchdog's questions: a comment on a thread
+		// can't let a paused task go on.
 		let answered = false;
 		if (
 			decision.route === 'task' &&
 			event.channel !== 'internal' &&
+			event.author.name !== 'watchdog' &&
 			ANSWER_KINDS.has(event.kind)
 		) {
 			answered =
@@ -189,6 +202,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 							answered_at = $at, answer_event_id = $eventId
 						WHERE id = (
 							SELECT id FROM questions WHERE task_id = $taskId AND state = 'open'
+								AND (asked_by = 'worker' OR $operator = 1)
 							ORDER BY id DESC LIMIT 1
 						)`,
 					)
@@ -198,6 +212,7 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 						at,
 						eventId,
 						taskId: decision.taskId,
+						operator: event.channel === 'console' ? 1 : 0,
 					}).changes > 0;
 			if (answered) {
 				db.query<unknown, [number, number]>(

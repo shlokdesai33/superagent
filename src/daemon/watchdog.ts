@@ -1,7 +1,12 @@
 import type { Problem } from '../protocol.ts';
-import { stopCommand } from './commands.ts';
+import { statSync } from 'node:fs';
+import { commandLog, stopCommand } from './commands.ts';
+import { ingest } from './ingest.ts';
+import { pauseTask } from './tasks.ts';
 import { watchdogMs } from './scale.ts';
-import { type Daemon, type Params, health } from './state.ts';
+import { type Daemon, type Params, cut, dayStart, health } from './state.ts';
+import { type Verdict, repeatedCalls, reviewTask } from './watchdog-review.ts';
+import { SLOT } from './worker.ts';
 
 const TICK_MS = watchdogMs(60_000);
 // Recovery's own effects settle before anything is judged.
@@ -16,6 +21,30 @@ const BATCH_STUCK_MS = watchdogMs(20 * 60_000);
 const POLLER_LATE_WAITS = 3;
 const REPLY_KICK_MS = watchdogMs(15 * 60_000);
 const REPLY_LATE_MS = watchdogMs(60 * 60_000);
+// Model calls without a single progress mark before a task is paused.
+const BACKSTOP_CALLS = 150;
+// A review: at this many calls since progress, or the same call this many
+// times within at least `LOOP_MIN_CALLS` calls since progress.
+const SPINNING_CALLS = 60;
+const LOOP_REPEATS = 4;
+const LOOP_MIN_CALLS = 8;
+const REVIEWS_PER_DAY = 20;
+const REVIEW_EVERY_MS = watchdogMs(30 * 60_000);
+const QUIET_AFTER_PROGRESSING = 40;
+const QUIET_AFTER_NOTE = 20;
+const QUESTION_CHARS = 300;
+const SILENT_MS = watchdogMs(15 * 60_000);
+const LONG_COMMAND_MS = watchdogMs(2 * 60 * 60_000);
+const IDLE_MS = watchdogMs(30 * 60_000);
+const WAITING_ON_NOTHING_MS = watchdogMs(60 * 60_000);
+const CHANNEL_OFF_MS = watchdogMs(30 * 60_000);
+const SLOT_WAIT_MS = watchdogMs(30 * 60_000);
+const CHURN_WINDOW_MS = watchdogMs(60 * 60_000);
+const CHURN_CALLS = 120;
+// Unscaled: restarts take real time, even in tests.
+const CRASH_WINDOW_MS = 60 * 60_000;
+const CRASHES = 3;
+const STARTS_KEPT = 10;
 
 /** A stored finding: one check's condition that holds, acted on once. */
 export type Finding = {
@@ -73,10 +102,16 @@ const FINDING_COLUMNS = `id, key, task_id AS taskId, opened_at AS openedAt, stag
  * Runs the checks every minute until stopped. Each check runs alone, so a
  * broken one doesn't stop the others; what they find is in `watchdog_findings`.
  */
-export function startWatchdog(
-	daemon: Daemon,
-	checks: Check[] = CHECKS,
-): Watchdog {
+export function startWatchdog(daemon: Daemon): Watchdog {
+	const stopping = new AbortController();
+	const inReview = new Map<number, Promise<void>>();
+	const starts = recordStart(daemon, Date.now());
+	const checks = [
+		...CHECKS,
+		commands(),
+		reviews(stopping.signal, inReview),
+		crashes(starts),
+	];
 	const failing = new Map<string, number>();
 	let timer: Timer | null = null;
 	// When the previous tick ran; before the first, as if one ran a tick
@@ -151,6 +186,9 @@ export function startWatchdog(
 		stop: async () => {
 			if (timer) clearTimeout(timer);
 			timer = null;
+			stopping.abort();
+			await Promise.all(inReview.values());
+			markCleanStop(daemon);
 		},
 	};
 }
@@ -338,8 +376,22 @@ const router: Check = {
 	name: 'router',
 	timed: true,
 	run: (round) => {
-		const { daemon, tickMs } = round;
+		const { daemon, now, tickMs } = round;
 		const { batch, backoffUntil } = daemon.router;
+		const calls =
+			daemon.db
+				.query<{ count: number }, [number]>(
+					"SELECT COUNT(*) AS count FROM model_calls WHERE purpose = 'router' AND started_at >= ?",
+				)
+				.get(now - CHURN_WINDOW_MS)?.count ?? 0;
+		if (calls >= CHURN_CALLS) {
+			round.report(
+				round.hold('router:churn'),
+				'agent',
+				`The Router made ${calls} calls in the last hour`,
+				'see daemon.log for the events it was deciding',
+			);
+		}
 		if (batch !== null && round.since(batch.since) > BATCH_STUCK_MS) {
 			round.report(
 				round.hold('router:batch'),
@@ -439,33 +491,503 @@ const github: Check = {
 	},
 };
 
-/** Commands still running past their own timeout, whose timer should have ended them. */
-const commands: Check = {
-	name: 'commands',
+/**
+ * Running commands: one past its own timeout is killed (its timer should have
+ * ended it), one silent for 15 minutes gets its Worker a note, and one running
+ * for 2 hours is reported.
+ */
+function commands(): Check {
+	// When each running command's log last grew, by step.
+	const heard = new Map<number, { size: number; at: number }>();
+	return {
+		name: 'commands',
+		timed: true,
+		run: (round) => {
+			const { daemon, now } = round;
+			for (const step of heard.keys()) {
+				if (!daemon.commands.has(step)) heard.delete(step);
+			}
+			for (const command of daemon.commands.values()) {
+				const step = daemon.db
+					.query<{ handle: string; text: string }, [number]>(
+						'SELECT t.handle, s.text FROM steps s JOIN tasks t ON t.id = s.task_id WHERE s.id = ?',
+					)
+					.get(command.stepId);
+				if (!step) continue;
+				// Its timer counts awake time too, so a sleep doesn't make it late.
+				const ran = round.since(command.startedAt);
+				if (ran - command.timeoutMs >= PAST_DEADLINE_MS) {
+					const finding = round.hold(
+						`commands:${command.stepId}:past-timeout`,
+						command.taskId,
+					);
+					if (finding.stage === null) {
+						command.stopReason ??= 'timed out';
+						void stopCommand(daemon, command.stepId);
+						round.stage(finding, 'killed');
+					}
+					continue;
+				}
+				if (ran >= LONG_COMMAND_MS) {
+					round.report(
+						round.hold(`commands:${command.stepId}:long`, command.taskId),
+						'task',
+						`${step.handle}'s ${step.text} has run ${minutes(ran)} and holds a worker slot`,
+						`send @${step.handle} a note, or stop the task`,
+					);
+				}
+				let size = 0;
+				try {
+					size = statSync(commandLog(daemon, step.handle, command.stepId)).size;
+				} catch {
+					// Not written yet.
+				}
+				const last = heard.get(command.stepId);
+				if (!last || last.size !== size) {
+					heard.set(command.stepId, { size, at: now });
+					continue;
+				}
+				const thinking =
+					(daemon.workers.get(command.taskId)?.callSince ?? null) !== null;
+				if (thinking || round.since(last.at) < SILENT_MS) continue;
+				const finding = round.hold(
+					`commands:${command.stepId}:silent`,
+					command.taskId,
+				);
+				if (finding.stage !== null) continue;
+				ingest(daemon, {
+					channel: 'console',
+					externalId: null,
+					thread: null,
+					kind: 'note',
+					author: { name: 'watchdog', id: null, isBot: false, isSelf: false },
+					text: `step ${command.stepId} (${step.text}) has printed nothing for ${minutes(round.since(last.at))}. If it's stuck, stop_command ${command.stepId}.`,
+					mentionsAgent: false,
+					taskId: command.taskId,
+				});
+				round.stage(finding, 'noted');
+			}
+		},
+	};
+}
+
+/**
+ * Tasks that will never move on by themselves: idle without saying why,
+ * waiting on something nothing can deliver, waiting on GitHub while it's off
+ * or down, or waiting for a worker slot. Reported, never woken.
+ */
+const waits: Check = {
+	name: 'waits',
 	timed: true,
 	run: (round) => {
 		const { daemon } = round;
-		for (const command of daemon.commands.values()) {
-			// Its timer counts awake time too, so a sleep doesn't make it late.
-			if (
-				round.since(command.startedAt) - command.timeoutMs <
-				PAST_DEADLINE_MS
-			) {
+		const { db } = daemon;
+		for (const task of db
+			.query<{ id: number; handle: string; waitingOn: string | null }, []>(
+				"SELECT id, handle, waiting_on AS waitingOn FROM tasks WHERE state = 'active'",
+			)
+			.all()) {
+			const live = daemon.workers.get(task.id);
+			if (!live) continue;
+			const fix = `send @${task.handle} a note, or stop it`;
+			if (live.blockedOn === SLOT) {
+				const finding = round.hold(`waits:${task.handle}:slot`, task.id);
+				if (round.age(finding) >= SLOT_WAIT_MS) {
+					round.report(
+						finding,
+						'task',
+						`${task.handle} has waited ${minutes(round.age(finding))} for a worker slot`,
+						slotHolders(daemon, round),
+					);
+				}
 				continue;
 			}
-			const finding = round.hold(
-				`commands:${command.stepId}:past-timeout`,
-				command.taskId,
+			if (!live.asleep || live.blockedOn !== null) continue;
+			const running = [...daemon.commands.values()].some(
+				(command) => command.taskId === task.id,
 			);
-			if (finding.stage !== null) continue;
-			command.stopReason ??= 'timed out';
-			void stopCommand(daemon, command.stepId);
-			round.stage(finding, 'killed');
+			if (running) continue;
+			const inbox =
+				db
+					.query<{ count: number }, [number]>(
+						"SELECT COUNT(*) AS count FROM events WHERE route = 'task' AND task_id = ? AND consumed_at IS NULL",
+					)
+					.get(task.id)?.count ?? 0;
+			if (inbox > 0) continue;
+			if (task.waitingOn === null) {
+				const last = db
+					.query<{ at: number; calls: number }, [number]>(
+						`SELECT i.at, json_array_length(json_extract(i.item, '$.tool_calls')) AS calls
+						FROM session_items i JOIN sessions s ON s.id = i.session_id
+						WHERE s.task_id = ? AND json_extract(i.item, '$.role') = 'assistant'
+						ORDER BY i.seq DESC LIMIT 1`,
+					)
+					.get(task.id);
+				// Its last response called no tools, even after the nudge.
+				if (!last || (last.calls ?? 0) > 0 || round.since(last.at) < IDLE_MS) {
+					continue;
+				}
+				round.report(
+					round.hold(`waits:${task.handle}:idle`, task.id),
+					'task',
+					`${task.handle} stopped without finishing or asking`,
+					fix,
+				);
+				continue;
+			}
+			const followed = db
+				.query<{ channel: string }, [number]>(
+					'SELECT channel FROM threads WHERE owner_task_id = ?',
+				)
+				.all(task.id);
+			if (followed.length === 0) {
+				const finding = round.hold(`waits:${task.handle}:nothing`, task.id);
+				if (round.age(finding) >= WAITING_ON_NOTHING_MS) {
+					round.report(
+						finding,
+						'task',
+						`${task.handle} waits on "${task.waitingOn}" but nothing will tell it`,
+						fix,
+					);
+				}
+				continue;
+			}
+			const channel = daemon.github;
+			if (
+				followed.some((thread) => thread.channel === 'github') &&
+				(channel.state === 'off' || channel.state === 'down')
+			) {
+				const finding = round.hold(`waits:${task.handle}:channel`, task.id);
+				if (round.age(finding) >= CHANNEL_OFF_MS) {
+					round.report(
+						finding,
+						'task',
+						`${task.handle} waits on ${task.waitingOn}, but GitHub is ${channel.state}`,
+						channel.detail,
+					);
+				}
+			}
 		}
 	},
 };
 
-const CHECKS: Check[] = [workers, router, github, commands];
+/** What holds the worker slots: tasks with a model call or command running. */
+function slotHolders(daemon: Daemon, round: Round): string {
+	const holders: string[] = [];
+	for (const command of daemon.commands.values()) {
+		const step = daemon.db
+			.query<{ handle: string; text: string }, [number]>(
+				'SELECT t.handle, s.text FROM steps s JOIN tasks t ON t.id = s.task_id WHERE s.id = ?',
+			)
+			.get(command.stepId);
+		if (step) {
+			holders.push(
+				`${step.handle}: ${cut(step.text, 60)}, ${minutes(round.since(command.startedAt))}`,
+			);
+		}
+	}
+	return holders.length > 0
+		? `held by ${holders.join(' · ')}`
+		: 'every slot is busy with a model call';
+}
+
+type Start = { at: number; clean: boolean };
+
+/** Records this start in `meta.starts`, keeping the last 10. */
+function recordStart(daemon: Daemon, at: number): Start[] {
+	const starts = readStarts(daemon);
+	starts.push({ at, clean: false });
+	const kept = starts.slice(-STARTS_KEPT);
+	writeStarts(daemon, kept);
+	return kept;
+}
+
+/** An orderly stop: the next start doesn't follow a crash. */
+function markCleanStop(daemon: Daemon): void {
+	const starts = readStarts(daemon);
+	const last = starts.at(-1);
+	if (!last) return;
+	last.clean = true;
+	writeStarts(daemon, starts);
+}
+
+function readStarts(daemon: Daemon): Start[] {
+	const value = daemon.db
+		.query<{ value: string }, []>("SELECT value FROM meta WHERE key = 'starts'")
+		.get()?.value;
+	if (value === undefined) return [];
+	const parsed: unknown = JSON.parse(value);
+	return Array.isArray(parsed)
+		? parsed.flatMap((entry: unknown) =>
+				typeof entry === 'object' &&
+				entry !== null &&
+				'at' in entry &&
+				typeof entry.at === 'number' &&
+				'clean' in entry &&
+				typeof entry.clean === 'boolean'
+					? [{ at: entry.at, clean: entry.clean }]
+					: [],
+			)
+		: [];
+}
+
+function writeStarts(daemon: Daemon, starts: Start[]): void {
+	daemon.db
+		.query<unknown, [string]>(
+			"INSERT INTO meta (key, value) VALUES ('starts', ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+		)
+		.run(JSON.stringify(starts));
+}
+
+/** Three starts after a crash within an hour. Restarting is the service manager's job. */
+function crashes(starts: Start[]): Check {
+	return {
+		name: 'crashes',
+		timed: false,
+		run: (round) => {
+			const recent = starts.filter(
+				(start, index) =>
+					index > 0 &&
+					starts[index - 1]?.clean === false &&
+					round.now - start.at < CRASH_WINDOW_MS,
+			).length;
+			if (recent < CRASHES) return;
+			round.report(
+				round.hold('crashes:loop'),
+				'agent',
+				`The agent crashed ${recent} times in the last hour`,
+				'see daemon.log',
+			);
+		},
+	};
+}
+
+/**
+ * Tasks spending model calls without progress. The backstop needs no model:
+ * 150 calls without a single mark is a runaway, and you can let it go on.
+ */
+const runaway: Check = {
+	name: 'runaway',
+	timed: false,
+	run: (round) => {
+		const { daemon } = round;
+		for (const task of daemon.db
+			.query<{ id: number; handle: string; idle: number }, [number]>(
+				`SELECT id, handle, model_calls - progress_calls AS idle FROM tasks
+				WHERE state = 'active' AND model_calls - progress_calls >= ?`,
+			)
+			.all(BACKSTOP_CALLS)) {
+			const finding = round.hold(`runaway:${task.handle}:backstop`, task.id);
+			if (finding.stage !== null) continue;
+			const paused = pauseTask(daemon, task.id, {
+				text: `Watchdog: ${task.handle} has made ${task.idle} model calls without progress (no edits, new command results, questions or new input). It's paused. Continue or stop?`,
+				context: `${task.idle} model calls since its last progress mark. Continue lets it go on and starts the count again; Stop stops the task.`,
+			});
+			if (paused) round.stage(finding, 'paused');
+		}
+	},
+};
+
+/**
+ * Workers spending calls without progress, or repeating a call, get a model
+ * review: is it getting anywhere? At most one per task at a time, one per
+ * task per 30 minutes and 20 a day, and none while the model is unwell.
+ */
+function reviews(
+	signal: AbortSignal,
+	inReview: Map<number, Promise<void>>,
+): Check {
+	return {
+		name: 'reviews',
+		timed: false,
+		run: (round) => {
+			const { daemon, now } = round;
+			const { db } = daemon;
+			for (const task of db
+				.query<
+					{
+						id: number;
+						handle: string;
+						title: string;
+						instructions: string;
+						calls: number;
+						idle: number;
+						since: number;
+						progressCalls: number;
+						progressAt: number | null;
+					},
+					[number]
+				>(
+					`SELECT id, handle, title, instructions, model_calls AS calls,
+						model_calls - progress_calls AS idle,
+						COALESCE(last_progress_at, created_at) AS since,
+						progress_calls AS progressCalls, last_progress_at AS progressAt
+					FROM tasks WHERE state = 'active' AND model_calls - progress_calls >= ?`,
+				)
+				.all(LOOP_MIN_CALLS)) {
+				const loop = repeatedCalls(db, task.id, task.since).find(
+					(entry) => entry.count >= LOOP_REPEATS,
+				);
+				if (task.idle < SPINNING_CALLS && !loop) continue;
+				const finding = round.hold(`reviews:${task.handle}`, task.id);
+				if (
+					inReview.has(task.id) ||
+					(finding.snoozeCalls !== null && task.calls < finding.snoozeCalls) ||
+					(finding.snoozeUntil !== null && now < finding.snoozeUntil) ||
+					daemon.particle === null ||
+					daemon.model.state !== 'ok' ||
+					// Reviews still in flight count, so one tick can't start past the cap.
+					reviewsToday(daemon, now) + inReview.size >= REVIEWS_PER_DAY
+				) {
+					continue;
+				}
+				const trigger = loop
+					? `the same ${loop.call.split(' ')[0] ?? 'tool'} call ${loop.count} times`
+					: `${task.idle} calls since its last progress`;
+				daemon.log('info', 'watchdog reviews a task', {
+					task: task.handle,
+					trigger,
+				});
+				const review = (async () => {
+					const verdict = await reviewTask(daemon, task, trigger, signal);
+					inReview.delete(task.id);
+					if (signal.aborted) return;
+					try {
+						applyVerdict(daemon, finding.id, task, verdict);
+					} catch (error) {
+						daemon.log('warn', 'watchdog verdict failed', {
+							task: task.handle,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				})();
+				inReview.set(task.id, review);
+			}
+		},
+	};
+}
+
+function reviewsToday(daemon: Daemon, now: number): number {
+	return (
+		daemon.db
+			.query<{ count: number }, [number]>(
+				"SELECT COUNT(*) AS count FROM model_calls WHERE purpose = 'watchdog' AND started_at >= ?",
+			)
+			.get(dayStart(now))?.count ?? 0
+	);
+}
+
+const VERDICT_WORDS: Record<
+	Exclude<Verdict['verdict'], 'progressing'>,
+	string
+> = {
+	stuck: 'stuck',
+	looping: 'looping',
+	off_goal: 'off the task',
+};
+
+/**
+ * `progressing` is silent. The first other verdict in an episode is a note to
+ * the Worker; the next pauses the task with a question. A verdict about an
+ * episode that has ended is dropped: the task made progress, or stopped being
+ * active, while the review ran. Its finding only resolves on the next tick.
+ */
+function applyVerdict(
+	daemon: Daemon,
+	findingId: number,
+	task: {
+		id: number;
+		handle: string;
+		progressCalls: number;
+		progressAt: number | null;
+	},
+	verdict: Verdict | null,
+): void {
+	const { db } = daemon;
+	const finding = db
+		.query<{ state: string; stage: string | null }, [number]>(
+			'SELECT state, stage FROM watchdog_findings WHERE id = ?',
+		)
+		.get(findingId);
+	if (!finding || finding.state !== 'open') return;
+	const current = db
+		.query<
+			{ state: string; progressCalls: number; progressAt: number | null },
+			[number]
+		>(
+			`SELECT state, progress_calls AS progressCalls, last_progress_at AS progressAt
+			FROM tasks WHERE id = ?`,
+		)
+		.get(task.id);
+	if (
+		!current ||
+		current.state !== 'active' ||
+		current.progressCalls !== task.progressCalls ||
+		current.progressAt !== task.progressAt
+	) {
+		daemon.log('info', 'watchdog verdict dropped: the task moved on', {
+			task: task.handle,
+			verdict: verdict?.verdict ?? null,
+		});
+		return;
+	}
+	const now = Date.now();
+	const calls =
+		db
+			.query<{ calls: number }, [number]>(
+				'SELECT model_calls AS calls FROM tasks WHERE id = ?',
+			)
+			.get(task.id)?.calls ?? 0;
+	const settle = (stage: string | null, quietCalls: number | null) => {
+		db.query<unknown, Params>(
+			`UPDATE watchdog_findings SET stage = COALESCE($stage, stage),
+				snooze_calls = $snoozeCalls, snooze_until = $snoozeUntil WHERE id = $id`,
+		).run({
+			stage,
+			snoozeCalls: quietCalls === null ? null : calls + quietCalls,
+			snoozeUntil: now + REVIEW_EVERY_MS,
+			id: findingId,
+		});
+	};
+	if (verdict === null) {
+		settle(null, null);
+		return;
+	}
+	daemon.log('info', 'watchdog verdict', {
+		task: task.handle,
+		verdict: verdict.verdict,
+		reason: verdict.reason,
+	});
+	if (verdict.verdict === 'progressing') {
+		settle(null, QUIET_AFTER_PROGRESSING);
+		return;
+	}
+	const word = VERDICT_WORDS[verdict.verdict];
+	if (finding.stage !== 'noted') {
+		ingest(daemon, {
+			channel: 'console',
+			externalId: null,
+			thread: null,
+			kind: 'note',
+			author: { name: 'watchdog', id: null, isBot: false, isSelf: false },
+			text: `The watchdog thinks you're ${word}: ${verdict.reason}\n\n${verdict.advice}`,
+			mentionsAgent: false,
+			taskId: task.id,
+		});
+		settle('noted', QUIET_AFTER_NOTE);
+		return;
+	}
+	const paused = pauseTask(daemon, task.id, {
+		text: cut(
+			`Watchdog: ${task.handle} seems ${word}: ${verdict.reason} It's paused. Continue or stop?`,
+			QUESTION_CHARS,
+		),
+		context: `**Why:** ${verdict.reason}\n\n**Advice it was given:** ${verdict.advice}`,
+	});
+	if (paused) settle('paused', null);
+}
+
+const CHECKS: Check[] = [workers, router, github, waits, runaway];
 
 function minutes(ms: number): string {
 	const total = Math.max(1, Math.round(ms / 60_000));

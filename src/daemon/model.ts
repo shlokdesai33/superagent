@@ -162,9 +162,10 @@ async function probeParticle(daemon: Daemon): Promise<void> {
 }
 
 export type ModelCall = {
-	sessionId: number;
+	/** `null` for a Watchdog review, which has no session. */
+	sessionId: number | null;
 	taskId: number | null;
-	purpose: 'router' | 'worker' | 'compaction';
+	purpose: 'router' | 'worker' | 'compaction' | 'watchdog';
 	request: ChatRequest;
 	signal: AbortSignal;
 };
