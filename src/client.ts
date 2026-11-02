@@ -10,19 +10,23 @@ import {
 } from './protocol.ts';
 
 export const NOT_RUNNING = "superagent isn't running. Run `superagent start`.";
+export const NOT_ANSWERING =
+	"superagent is running but isn't answering. Run `superagent restart`.";
 
 /**
  * - `not_running`: nothing listening on the socket.
  * - `rejected`: the daemon refused the protocol version.
+ * - `not_answering`: it took the connection but sent nothing in time, as when
+ *   it's frozen.
  */
 export class DaemonUnreachable extends Error {
 	override name = 'DaemonUnreachable';
-	readonly kind: 'not_running' | 'rejected';
+	readonly kind: 'not_running' | 'rejected' | 'not_answering';
 	/** The underlying failure, for people: `nothing listening on …/agent.sock (ENOENT)`. */
 	readonly detail: string;
 
 	constructor(
-		kind: 'not_running' | 'rejected',
+		kind: 'not_running' | 'rejected' | 'not_answering',
 		message: string,
 		detail: string,
 	) {
@@ -74,8 +78,8 @@ export async function daemonFetch(
 }
 
 /** Opens the feed, reads its first line and closes it. */
-export async function readSnapshot(): Promise<Snapshot> {
-	for await (const line of openFeed()) {
+export async function readSnapshot(signal?: AbortSignal): Promise<Snapshot> {
+	for await (const line of openFeed(signal)) {
 		if (line.type !== 'snapshot') {
 			throw new Error('The feed did not start with a snapshot');
 		}
