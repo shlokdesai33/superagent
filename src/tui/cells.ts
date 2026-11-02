@@ -156,25 +156,31 @@ export function fitStart(text: string, columns: number): string {
 }
 
 /**
- * Word-wraps to `columns`, breaking `\n` too. Past `maxLines` the last line
- * ends in `…`.
+ * Word-wraps to `columns` (`first` for the first line), breaking `\n` too.
+ * Words wider than a line break between graphemes. Indentation at the start
+ * and after a `\n` is kept; spaces at a wrap are dropped. Past `maxLines` the
+ * last line ends in `…`.
  */
 export function wrap(
 	segs: Seg[],
 	columns: number,
 	maxLines = Infinity,
+	first = columns,
 ): Seg[][] {
 	if (columns <= 0) return [];
 	const lines: Glyph[][] = [];
 	let line: Glyph[] = [];
 	let used = 0;
 	let pending: Glyph[] = [];
+	let indent = true;
+	const room = () => Math.max(1, lines.length === 0 ? first : columns);
 	const list = toGlyphs(segs, false);
 	const flush = () => {
 		lines.push(line);
 		line = [];
 		used = 0;
 		pending = [];
+		indent = false;
 	};
 	let i = 0;
 	while (i < list.length) {
@@ -182,11 +188,12 @@ export function wrap(
 		if (glyph === undefined) break;
 		if (glyph.g === '\n') {
 			flush();
+			indent = true;
 			i += 1;
 			continue;
 		}
 		if (glyph.g === ' ') {
-			if (line.length > 0) pending.push(glyph);
+			if (line.length > 0 || indent) pending.push(glyph);
 			i += 1;
 			continue;
 		}
@@ -201,27 +208,66 @@ export function wrap(
 		const word = list.slice(i, end);
 		i = end;
 		const gap = pending.reduce((n, g) => n + g.w, 0);
-		if (used + gap + wordWidth <= columns) {
+		if (used + gap + wordWidth <= room()) {
 			line.push(...pending, ...word);
 			used += gap + wordWidth;
 			pending = [];
+			indent = false;
 			continue;
 		}
 		if (line.length > 0) flush();
+		indent = false;
 		for (const part of word) {
-			if (used + part.w > columns) flush();
+			if (used + part.w > room() && line.length > 0) flush();
 			line.push(part);
 			used += part.w;
 		}
 		pending = [];
+	}
+	// Trailing spaces stay when they fit: a chip's padding, or a space just typed.
+	for (const glyph of pending) {
+		if (used + glyph.w > room()) break;
+		line.push(glyph);
+		used += glyph.w;
 	}
 	if (line.length > 0 || lines.length === 0) lines.push(line);
 	const out = lines.map(toSegs);
 	if (out.length <= maxLines) return out;
 	const kept = out.slice(0, maxLines);
 	const lastIndex = maxLines - 1;
-	kept[lastIndex] = truncate(kept[lastIndex] ?? [], columns, true);
+	kept[lastIndex] = truncate(
+		kept[lastIndex] ?? [],
+		lastIndex === 0 ? first : columns,
+		true,
+	);
 	return kept;
+}
+
+/**
+ * `body` wrapped after `prefix`, with continuation lines indented to line up
+ * under the body's first column. `right` stays on the first line, which
+ * leaves room for it.
+ */
+export function hang(
+	prefix: Seg[],
+	body: Seg[],
+	columns: number,
+	right?: Seg[],
+): Line[] {
+	const indent = width(prefix);
+	const rest = Math.max(1, columns - indent);
+	const hasRight = right !== undefined && right.length > 0;
+	const first = hasRight ? Math.max(1, rest - width(right) - 2) : rest;
+	const lines: Line[] = wrap(body, rest, Infinity, first).map((segs) => ({
+		segs,
+	}));
+	const [head, ...tail] = lines;
+	if (head) {
+		head.segs.unshift(...prefix);
+		if (hasRight) head.right = right;
+	}
+	for (const line of tail) line.segs.unshift({ t: ' '.repeat(indent) });
+	return lines;
 }
 
 /** Lays a line out to exactly `columns` cells, margin included. */

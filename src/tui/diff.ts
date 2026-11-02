@@ -1,4 +1,4 @@
-import { type Line, type Seg, fitStart, truncate } from './cells.ts';
+import { type Line, type Seg, fitStart, hang } from './cells.ts';
 
 const MAX_LINES = 80;
 const MAX_TOKENS = 200;
@@ -15,12 +15,13 @@ export function diffLines(text: string, columns: number): Line[] {
 	const changed = wordChanges(shown);
 	shown.forEach((row, index) => {
 		if (row.kind === 'hunk') {
-			lines.push({
-				segs: [
-					{ t: '    ' },
-					{ t: ` ${row.text} `, fg: 'faint', bg: 'surface' },
-				],
-			});
+			lines.push(
+				...hang(
+					[{ t: '    ' }],
+					[{ t: ` ${row.text} `, fg: 'faint', bg: 'surface' }],
+					columns,
+				),
+			);
 			return;
 		}
 		const sign: Seg =
@@ -38,24 +39,25 @@ export function diffLines(text: string, columns: number): Line[] {
 						: { t, fg },
 				)
 			: [{ t: row.code, fg }];
-		lines.push({
-			segs: truncate(
-				[
-					{ t: '    ' },
-					{ t: fitStart(String(row.number), 4), fg: 'ghost' },
-					{ t: ' ' },
-					sign,
-					{ t: ' ' },
-					...code,
-				],
-				columns,
-			),
-			...(row.kind === 'add'
+		const tint: Partial<Line> =
+			row.kind === 'add'
 				? { bg: 'okSoft' }
 				: row.kind === 'remove'
 					? { bg: 'errSoft' }
-					: {}),
-		});
+					: {};
+		for (const line of hang(
+			[
+				{ t: '    ' },
+				{ t: fitStart(String(row.number), 4), fg: 'ghost' },
+				{ t: ' ' },
+				sign,
+				{ t: ' ' },
+			],
+			code,
+			columns,
+		)) {
+			lines.push({ ...line, ...tint });
+		}
 	});
 	if (rows.length > MAX_LINES) {
 		lines.push({
