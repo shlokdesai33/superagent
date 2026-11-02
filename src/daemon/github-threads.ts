@@ -16,6 +16,8 @@ export const MARKER = '<!-- superagent ';
 const MAX_FOLLOWED = 20;
 const INTRO_COMMENTS = 10;
 const INTRO_CHARS = 2_000;
+const PER_PAGE = 100;
+const REVIEW_PAGES = 10;
 
 export function parseGitHubThread(
 	id: string,
@@ -163,6 +165,8 @@ export async function githubIntros(
 		const path = `/repos/${parsed.repo}/issues/${parsed.number}`;
 		let issue: unknown;
 		let comments: unknown[];
+		let reviewComments: unknown[] = [];
+		let reviews: unknown[] = [];
 		let etag: string | null;
 		try {
 			// oxlint-disable-next-line eslint/no-await-in-loop
@@ -171,6 +175,14 @@ export async function githubIntros(
 			({ etag } = response);
 			// oxlint-disable-next-line eslint/no-await-in-loop
 			comments = (await api.pages(`${path}/comments?per_page=100`)).items;
+			if (field(issue, 'pull_request') !== null) {
+				const pull = `/repos/${parsed.repo}/pulls/${parsed.number}`;
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				reviewComments = (await api.pages(`${pull}/comments?per_page=100`))
+					.items;
+				// oxlint-disable-next-line eslint/no-await-in-loop
+				reviews = (await api.pages(`${pull}/reviews?per_page=100`)).items;
+			}
 		} catch (error) {
 			if (error instanceof GitHubError && error.status === 404) {
 				db.query<unknown, [string, number]>(
@@ -189,13 +201,12 @@ export async function githubIntros(
 		const at = Date.now();
 		const title = text(issue, 'title');
 		const isPr = field(issue, 'pull_request') !== null;
-		const newest = comments.reduce<string>(
-			(latest, comment) => {
-				const updated = text(comment, 'updated_at');
+		const created = text(issue, 'created_at');
+		const newestOf = (items: unknown[]) =>
+			items.reduce<string>((latest, item) => {
+				const updated = text(item, 'updated_at');
 				return updated > latest ? updated : latest;
-			},
-			text(issue, 'created_at'),
-		);
+			}, created);
 		db.transaction(() => {
 			db.query<unknown, Params>(
 				`INSERT INTO github_items (thread_id, repo, number, is_pr, title, state, polled_at, updated_at)
@@ -210,10 +221,30 @@ export async function githubIntros(
 				at,
 				updated: text(issue, 'updated_at'),
 			});
-			saveCursor(db, `${id}:item`, null, etag);
-			saveCursor(db, `${id}:comments`, newest, null);
+			// A PR's state comes from /pulls, whose ETag differs.
+			saveCursor(db, `${id}:item`, null, isPr ? null : etag);
+			saveCursor(db, `${id}:comments`, newestOf(comments), null);
+			if (isPr) {
+				saveCursor(db, `${id}:review-comments`, newestOf(reviewComments), null);
+				// Reviews have no `since`: polling reads from the last page on.
+				saveCursor(
+					db,
+					`${id}:reviews`,
+					created,
+					null,
+					Math.floor(reviews.length / PER_PAGE) + 1,
+				);
+			}
 			// Already in the Worker's message: recorded so polling skips them.
-			for (const comment of comments) {
+			const seen: Array<[string, unknown]> = [
+				...comments.map((item): [string, unknown] => ['issue-comment', item]),
+				...reviewComments.map((item): [string, unknown] => [
+					'review-comment',
+					item,
+				]),
+				...reviews.map((item): [string, unknown] => ['review', item]),
+			];
+			for (const [prefix, item] of seen) {
 				db.query<unknown, Params>(
 					`INSERT OR IGNORE INTO events (received_at, channel, external_id, thread_id, kind, author,
 						text, route, filter_reason, consumed_at)
@@ -221,14 +252,16 @@ export async function githubIntros(
 						'shown when the task took the thread', $at)`,
 				).run({
 					at,
-					externalId: `issue-comment:${idOf(field(comment, 'id')) ?? '?'}`,
+					externalId: `${prefix}:${idOf(field(item, 'id')) ?? '?'}`,
 					thread: id,
-					author: login(comment),
-					text: redact(daemon.secrets, text(comment, 'body')),
+					author: login(item),
+					text: redact(daemon.secrets, text(item, 'body')),
 				});
 			}
 		})();
-		parts.push(introText(daemon, id, parsed, issue, comments));
+		parts.push(
+			introText(daemon, id, parsed, issue, comments, reviewComments, reviews),
+		);
 	}
 	return parts.length > 0 ? parts.join('\n\n') : null;
 }
@@ -239,6 +272,8 @@ function introText(
 	parsed: { repo: string; number: number },
 	issue: unknown,
 	comments: unknown[],
+	reviewComments: unknown[],
+	reviews: unknown[],
 ): string {
 	const labels = field(issue, 'labels');
 	const labelNames = Array.isArray(labels)
@@ -273,6 +308,50 @@ function introText(
 					.split('\n')
 					.map((line) => `  ${line}`)
 					.join('\n'),
+			);
+		}
+	}
+	const shownReviewComments = reviewComments.slice(-INTRO_COMMENTS);
+	if (shownReviewComments.length > 0) {
+		lines.push(
+			'',
+			reviewComments.length > shownReviewComments.length
+				? `The last ${shownReviewComments.length} of ${reviewComments.length} review comments:`
+				: `Review comments (${shownReviewComments.length}):`,
+		);
+		for (const comment of shownReviewComments) {
+			const line = field(comment, 'line') ?? field(comment, 'original_line');
+			lines.push(
+				`${login(comment)}${isBot(comment) ? ' (bot)' : ''} · ${text(comment, 'path')}${typeof line === 'number' ? `:${line}` : ''}:`,
+				clip(daemon, text(comment, 'body'))
+					.split('\n')
+					.map((part) => `  ${part}`)
+					.join('\n'),
+			);
+		}
+	}
+	const shownReviews = reviews
+		.filter(
+			(review) =>
+				text(review, 'body') !== '' ||
+				(text(review, 'state') !== 'COMMENTED' &&
+					REVIEW_WORDS[text(review, 'state')] !== undefined),
+		)
+		.slice(-INTRO_COMMENTS);
+	if (shownReviews.length > 0) {
+		lines.push('', `Reviews (the last ${shownReviews.length}):`);
+		for (const review of shownReviews) {
+			const body = clip(daemon, text(review, 'body'));
+			lines.push(
+				`${login(review)}${isBot(review) ? ' (bot)' : ''} · ${REVIEW_WORDS[text(review, 'state')] ?? text(review, 'state').toLowerCase()}${body ? ':' : ''}`,
+				...(body
+					? [
+							body
+								.split('\n')
+								.map((part) => `  ${part}`)
+								.join('\n'),
+						]
+					: []),
 			);
 		}
 	}
@@ -546,6 +625,11 @@ const REVIEW_WORDS: Record<string, string> = {
  * an approval or a change request without one, an activity. A comment-only
  * review without a body is skipped, since its line comments arrive on
  * their own.
+ *
+ * GitHub lists reviews oldest first, with no `since`, so new ones land on
+ * the last page. Polling starts from the stored page: an unchanged page is
+ * a `304`, a full page moves the cursor to the next one, and only the
+ * pages from there on are read.
  */
 async function pollReviews(
 	daemon: Daemon,
@@ -555,13 +639,33 @@ async function pollReviews(
 	const key = `${row.id}:reviews`;
 	const cursor = loadCursor(daemon.db, key);
 	const since = cursor?.since ?? new Date().toISOString();
-	const { items, etag, notModified } = await api.pages(
-		`/repos/${row.repo}/pulls/${row.number}/reviews?per_page=100`,
-		cursor?.etag ?? null,
-	);
-	if (notModified) return;
+	let page = cursor?.page ?? 1;
+	let etag = cursor?.etag ?? null;
+	const items: unknown[] = [];
+	for (let read = 0; read < REVIEW_PAGES; read++) {
+		// oxlint-disable-next-line eslint/no-await-in-loop
+		const response = await api.request(
+			'GET',
+			`/repos/${row.repo}/pulls/${row.number}/reviews?per_page=${PER_PAGE}&page=${page}`,
+			{ etag },
+		);
+		if (response.status === 304) break;
+		const batch = Array.isArray(response.body) ? response.body : [];
+		items.push(...batch);
+		if (batch.length < PER_PAGE) {
+			({ etag } = response);
+			break;
+		}
+		// Full: the next review goes on the next page.
+		page += 1;
+		etag = null;
+	}
+	saveCursor(daemon.db, key, since, etag, page);
+	if (items.length === 0) return;
 	const summary = summaryOf(daemon.db, row.id);
-	const latest: Record<string, string> = {};
+	const known = field(summary, 'reviews');
+	const latest: Record<string, string> =
+		typeof known === 'object' && known !== null ? { ...known } : {};
 	for (const review of items) {
 		const state = text(review, 'state');
 		const word = REVIEW_WORDS[state];
@@ -602,7 +706,6 @@ async function pollReviews(
 			'UPDATE github_items SET summary = ? WHERE thread_id = ?',
 		)
 		.run(JSON.stringify(summary), row.id);
-	saveCursor(daemon.db, key, since, etag);
 }
 
 /**
@@ -816,13 +919,16 @@ export function githubThreadState(
 	return parts.join(' · ');
 }
 
-function loadCursor(
-	db: Database,
-	key: string,
-): { since: string | null; etag: string | null } | null {
+type Cursor = {
+	since: string | null;
+	etag: string | null;
+	page: number | null;
+};
+
+function loadCursor(db: Database, key: string): Cursor | null {
 	return db
-		.query<{ since: string | null; etag: string | null }, [string]>(
-			'SELECT since, etag FROM github_cursors WHERE key = ?',
+		.query<Cursor, [string]>(
+			'SELECT since, etag, page FROM github_cursors WHERE key = ?',
 		)
 		.get(key);
 }
@@ -832,12 +938,14 @@ function saveCursor(
 	key: string,
 	since: string | null,
 	etag: string | null,
+	page: number | null = null,
 ): void {
 	db.query<unknown, Params>(
-		`INSERT INTO github_cursors (key, since, etag, updated_at) VALUES ($key, $since, $etag, $at)
+		`INSERT INTO github_cursors (key, since, etag, page, updated_at)
+		VALUES ($key, $since, $etag, $page, $at)
 		ON CONFLICT (key) DO UPDATE SET since = excluded.since, etag = excluded.etag,
-			updated_at = excluded.updated_at`,
-	).run({ key, since, etag, at: Date.now() });
+			page = excluded.page, updated_at = excluded.updated_at`,
+	).run({ key, since, etag, page, at: Date.now() });
 }
 
 function itemState(issue: unknown): string {

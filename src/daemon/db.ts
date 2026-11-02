@@ -190,6 +190,7 @@ CREATE TABLE github_items (
 ALTER TABLE messages ADD COLUMN external_id TEXT;
 ALTER TABLE messages ADD COLUMN reply_to INTEGER REFERENCES events(id);
 `,
+	'ALTER TABLE github_cursors ADD COLUMN page INTEGER;',
 ];
 
 // Letters and digits without look-alikes (no i, l, o, 0 or 1).

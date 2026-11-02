@@ -206,6 +206,24 @@ export function startFakeGitHub(options: {
 					: {},
 		};
 	};
+	/** A page of `items`, oldest first and unfiltered, like GitHub's reviews. */
+	const paged = (
+		url: URL,
+		items: unknown[],
+	): { status: number; body: unknown; headers: Record<string, string> } => {
+		const perPage = Number(url.searchParams.get('per_page') ?? 30);
+		const page = Number(url.searchParams.get('page') ?? 1);
+		const next = new URL(url);
+		next.searchParams.set('page', String(page + 1));
+		return {
+			status: 200,
+			body: items.slice((page - 1) * perPage, page * perPage),
+			headers:
+				page * perPage < items.length
+					? { Link: `<${base}${next.pathname}${next.search}>; rel="next"` }
+					: {},
+		};
+	};
 	const prJson = (issue: Issue, pr: Pr) => ({
 		number: issue.number,
 		title: issue.title,
@@ -399,7 +417,7 @@ export function startFakeGitHub(options: {
 			if (!issue?.pr) return { status: 404, body: { message: 'Not Found' } };
 			if (!pull[3]) return { status: 200, body: prJson(issue, issue.pr) };
 			if (pull[3] === '/comments') return listing(url, issue.pr.reviewComments);
-			return { status: 200, body: issue.pr.reviews };
+			return paged(url, issue.pr.reviews);
 		}
 		const repo = path.match(/^\/repos\/([^/]+\/[^/]+)$/)?.[1];
 		const found = repo === undefined ? undefined : options.repos[repo];

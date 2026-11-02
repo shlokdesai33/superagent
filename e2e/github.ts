@@ -79,7 +79,7 @@ const github = startFakeGitHub({
 // The fake models: a Router that starts the task each console message asks
 // for, and Workers that finish, wait on an issue until it's closed, or print
 // what a leak would show and finish.
-const kinds = new Map<string, 'off' | 'leak' | 'issue'>();
+const kinds = new Map<string, 'off' | 'leak' | 'issue' | 'watch'>();
 let issueHandle: string | null = null;
 const particle = startFakeParticle((request) => {
 	if (request.session === 'compaction') return { content: 'Summary.' };
@@ -132,6 +132,20 @@ const particle = startFakeParticle((request) => {
 							thread: `github:acme/app#${replyTo[1] || '7'}`,
 							text: replyTo[3],
 							reply_to: Number(replyTo[2]),
+						},
+					},
+				],
+			};
+		}
+		if (request.fresh.includes('PR12 take over')) {
+			return {
+				calls: [
+					{
+						name: 'start_task',
+						args: {
+							title: 'Review PR 12',
+							instructions: 'WATCH-TASK: follow acme/app#12.',
+							threads: ['github:acme/app#12'],
 						},
 					},
 				],
@@ -225,7 +239,9 @@ const particle = startFakeParticle((request) => {
 				? 'leak'
 				: request.fresh.includes('ISSUE-TASK')
 					? 'issue'
-					: 'off',
+					: request.fresh.includes('WATCH-TASK')
+						? 'watch'
+						: 'off',
 		);
 	}
 	if (kinds.get(handle) === 'issue') {
@@ -243,6 +259,12 @@ const particle = startFakeParticle((request) => {
 				calls: [{ name: 'wait_for', args: { what: 'the issue and its PR' } }],
 			};
 		}
+	}
+	if (kinds.get(handle) === 'watch') {
+		return {
+			content: 'Watching the PR.',
+			calls: [{ name: 'wait_for', args: { what: 'the PR' } }],
+		};
 	}
 	if (kinds.get(handle) === 'leak' && !request.called.includes('run')) {
 		return {
@@ -881,6 +903,29 @@ try {
 	await workerSaw('alice approved #8');
 	check('an approval without a body is an activity for the task', true);
 
+	// More than a page of reviews: one submitted after the first hundred,
+	// which lands on the second page, still arrives.
+	const reviewPolls = () =>
+		github.requests.filter((request) =>
+			request.path.startsWith('/repos/acme/app/pulls/8/reviews'),
+		).length;
+	for (let n = 0; n < 100; n += 1) {
+		github.review('acme/app', 8, { by: 'carol', state: 'COMMENTED' });
+	}
+	const polledBefore = reviewPolls();
+	await agent.until(
+		'two polls of the reviews',
+		async () => reviewPolls(),
+		(count) => count >= polledBefore + 2,
+	);
+	github.review('acme/app', 8, {
+		by: 'dave',
+		state: 'CHANGES_REQUESTED',
+		body: 'RV103 on the second page',
+	});
+	await workerSaw('RV103 on the second page');
+	check('a review past the first page of 100 still reaches the task', true);
+
 	await agent.action({
 		type: 'send_console',
 		text: `REPLYTO8 ${rc1.event.id} RR1 Renamed it.`,
@@ -926,6 +971,74 @@ try {
 		(prRead ?? '').includes('GitHub PR · open · "Fix the Safari export"') &&
 			(prRead ?? '').includes('reviews: alice approved'),
 		prRead?.split('\n')[2] ?? '',
+	);
+
+	// An existing PR handed over from the console: its review comments and
+	// reviews so far are in the Worker's first message, and new ones follow.
+	github.openPr('acme/app', 12, {
+		title: 'Carol’s feature',
+		body: 'Adds a feature.',
+		by: 'carol',
+		head: 'carol/feature',
+	});
+	github.reviewComment('acme/app', 12, {
+		by: 'alice',
+		body: 'EXISTING-RC1 typo here',
+		path: 'src/feature.ts',
+		line: 3,
+	});
+	github.review('acme/app', 12, {
+		by: 'alice',
+		state: 'CHANGES_REQUESTED',
+		body: 'EXISTING-RV1 needs tests',
+	});
+	await agent.action({ type: 'send_console', text: 'PR12 take over' });
+	const watcher = (
+		await agent.waitFor(
+			'the PR 12 task',
+			(line): line is TaskLine =>
+				line.type === 'task' && line.task.title === 'Review PR 12',
+		)
+	).task.handle;
+	const watcherSaw = (text: string) =>
+		agent.until(
+			`the PR 12 Worker to see ${text}`,
+			async () =>
+				particle.requests.filter(
+					(request) =>
+						request.session === 'worker' &&
+						request.handle === watcher &&
+						request.fresh.includes(text),
+				),
+			(found) => found.length > 0,
+		);
+	const watcherFirst = (await watcherSaw('GitHub PR acme/app#12'))[0];
+	check(
+		"a handed-over PR's first message has its review comments and reviews",
+		(watcherFirst?.fresh ?? '').includes('EXISTING-RC1') &&
+			(watcherFirst?.fresh ?? '').includes('EXISTING-RV1'),
+	);
+	github.reviewComment('acme/app', 12, {
+		by: 'alice',
+		body: 'NEW-RC2 and here',
+		path: 'src/feature.ts',
+		line: 9,
+	});
+	github.review('acme/app', 12, {
+		by: 'alice',
+		state: 'COMMENTED',
+		body: 'NEW-RV2 one more thing',
+	});
+	await watcherSaw('NEW-RC2 and here');
+	await watcherSaw('NEW-RV2 one more thing');
+	check(
+		'later review comments and reviews follow, without repeating the old ones',
+		!agent.lines.some(
+			(line) =>
+				line.type === 'routed' &&
+				(line.event.preview.includes('EXISTING-RC1') ||
+					line.event.preview.includes('EXISTING-RV1')),
+		),
 	);
 
 	// Closing the issue doesn't end the task while its PR is open; the merge does.
