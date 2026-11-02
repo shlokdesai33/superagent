@@ -71,6 +71,11 @@ function commandEnv(daemon: Daemon, handle: string): Env {
 		PAGER: 'cat',
 		GIT_PAGER: 'cat',
 		GIT_TERMINAL_PROMPT: '0',
+		// gh never prompts, and doesn't write its update check, which the
+		// sandbox wouldn't allow; its stored login is only read.
+		GH_PROMPT_DISABLED: '1',
+		GH_NO_UPDATE_NOTIFIER: '1',
+		GH_SPINNER_DISABLED: '1',
 	};
 }
 

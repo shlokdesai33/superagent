@@ -12,6 +12,7 @@ import {
 	startCleanup,
 } from './git.ts';
 import { type GitHubClient, initialGitHub, startGitHub } from './github.ts';
+import { pollFollowed } from './github-threads.ts';
 import { createLog } from './log.ts';
 import {
 	NO_API_KEY,
@@ -171,6 +172,7 @@ export async function runDaemon(options: {
 			machine,
 			channels,
 			github: initialGitHub(config),
+			githubApi: null,
 			scriptChannel: options.scriptChannel,
 			actionResults: new Map(),
 			usageTimer: null,
@@ -224,7 +226,9 @@ export async function runDaemon(options: {
 	startWorkers(daemon);
 	stopActivity = startActivityTimer(daemon);
 	stopCleanup = startCleanup(daemon);
-	github = startGitHub(daemon);
+	const running = daemon;
+	github = startGitHub(running, (api) => pollFollowed(running, api));
+	running.githubApi = github;
 
 	const signal = await new Promise<NodeJS.Signals>((resolve) => {
 		process.once('SIGINT', resolve);

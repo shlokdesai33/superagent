@@ -1,5 +1,6 @@
 // A fake GitHub REST API for end-to-end runs: one account, a few
-// repositories, ETags, rate-limit headers, and 401 for any other token.
+// repositories with issues and comments, `since` and pagination, ETags,
+// rate-limit headers, and 401 for any other token.
 import { createHash } from 'node:crypto';
 
 export type FakeGitHubRequest = {
@@ -11,16 +12,64 @@ export type FakeGitHubRequest = {
 	status: number;
 };
 
+type User = { login: string; id: number; type: 'User' | 'Bot' };
+
+type Comment = {
+	id: number;
+	body: string;
+	user: User;
+	created_at: string;
+	updated_at: string;
+	html_url: string;
+};
+
+type Issue = {
+	repo: string;
+	number: number;
+	title: string;
+	body: string;
+	state: 'open' | 'closed';
+	labels: Array<{ name: string }>;
+	user: User;
+	closed_by: User | null;
+	created_at: string;
+	updated_at: string;
+	closed_at: string | null;
+	comments: Comment[];
+};
+
 export type FakeGitHub = {
 	/** For `SUPERAGENT_GITHUB_API_URL`. */
 	url: string;
 	requests: FakeGitHubRequest[];
 	/** Accept only this token from now on. */
 	setToken(token: string): void;
+	openIssue(
+		repo: string,
+		number: number,
+		issue: {
+			title: string;
+			body: string;
+			by: string;
+			labels?: string[];
+		},
+	): void;
+	/** Adds a comment; `postedAgoMs` backdates its creation, as if posted while the agent slept. */
+	comment(
+		repo: string,
+		number: number,
+		comment: { by: string; body: string; bot?: boolean; postedAgoMs?: number },
+	): number;
+	closeIssue(repo: string, number: number, by: string): void;
 	stop(): void;
 };
 
 const LIMIT = 5_000;
+
+/** GitHub's timestamps: ISO 8601 to the second. */
+function stamp(at: number): string {
+	return new Date(at).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
 
 export function startFakeGitHub(options: {
 	login: string;
@@ -32,11 +81,26 @@ export function startFakeGitHub(options: {
 	let token = options.token;
 	let remaining = LIMIT;
 	const reset = Math.floor(Date.now() / 1000) + 3600;
+	const issues = new Map<string, Issue>();
+	let nextId = 5_000;
+	const user = (login: string, bot = false): User => ({
+		login,
+		id: login === options.login ? 1001 : 2000 + login.length,
+		type: bot ? 'Bot' : 'User',
+	});
+	const html = (issue: Issue) =>
+		`https://github.com/${issue.repo}/issues/${issue.number}`;
+	const issueJson = (issue: Issue) => {
+		const { repo: _, comments, ...fields } = issue;
+		return { ...fields, comments: comments.length, html_url: html(issue) };
+	};
+	let base = '';
 
 	const respond = (
 		request: Request,
-		path: string,
+		url: URL,
 	): { status: number; body: unknown; headers?: Record<string, string> } => {
+		const path = url.pathname;
 		if (request.headers.get('authorization') !== `Bearer ${token}`) {
 			return {
 				status: 401,
@@ -60,6 +124,31 @@ export function startFakeGitHub(options: {
 				headers: { 'x-oauth-scopes': 'gist, read:org, repo, workflow' },
 			};
 		}
+		const item = path.match(
+			/^\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)(\/comments)?$/,
+		);
+		if (item) {
+			const issue = issues.get(`${item[1]}#${item[2]}`);
+			if (!issue) return { status: 404, body: { message: 'Not Found' } };
+			if (!item[3]) return { status: 200, body: issueJson(issue) };
+			const since = url.searchParams.get('since');
+			const perPage = Number(url.searchParams.get('per_page') ?? 30);
+			const page = Number(url.searchParams.get('page') ?? 1);
+			const matching = issue.comments.filter(
+				(comment) => since === null || comment.updated_at >= since,
+			);
+			const shown = matching.slice((page - 1) * perPage, page * perPage);
+			const next = new URL(url);
+			next.searchParams.set('page', String(page + 1));
+			return {
+				status: 200,
+				body: shown,
+				headers:
+					page * perPage < matching.length
+						? { Link: `<${base}${next.pathname}${next.search}>; rel="next"` }
+						: {},
+			};
+		}
 		const repo = path.match(/^\/repos\/([^/]+\/[^/]+)$/)?.[1];
 		const found = repo === undefined ? undefined : options.repos[repo];
 		if (repo !== undefined && found !== undefined) {
@@ -81,7 +170,7 @@ export function startFakeGitHub(options: {
 			const { pathname, search } = new URL(request.url);
 			const path = `${pathname}${search}`;
 			const body = await request.text();
-			const answer = respond(request, pathname);
+			const answer = respond(request, new URL(request.url));
 			const text = JSON.stringify(answer.body);
 			const etag = `"${createHash('sha1').update(text).digest('hex')}"`;
 			const notModified =
@@ -111,11 +200,54 @@ export function startFakeGitHub(options: {
 			});
 		},
 	});
+	base = `http://127.0.0.1:${server.port}`;
 	return {
-		url: `http://127.0.0.1:${server.port}`,
+		url: base,
 		requests,
 		setToken(next) {
 			token = next;
+		},
+		openIssue(repo, number, issue) {
+			const now = stamp(Date.now());
+			issues.set(`${repo}#${number}`, {
+				repo,
+				number,
+				title: issue.title,
+				body: issue.body,
+				state: 'open',
+				labels: (issue.labels ?? []).map((name) => ({ name })),
+				user: user(issue.by),
+				closed_by: null,
+				created_at: now,
+				updated_at: now,
+				closed_at: null,
+				comments: [],
+			});
+		},
+		comment(repo, number, comment) {
+			const issue = issues.get(`${repo}#${number}`);
+			if (!issue) throw new Error(`no issue ${repo}#${number}`);
+			const now = Date.now();
+			const id = ++nextId;
+			issue.comments.push({
+				id,
+				body: comment.body,
+				user: user(comment.by, comment.bot),
+				created_at: stamp(now - (comment.postedAgoMs ?? 0)),
+				updated_at: stamp(now),
+				html_url: `${html(issue)}#issuecomment-${id}`,
+			});
+			issue.updated_at = stamp(now);
+			return id;
+		},
+		closeIssue(repo, number, by) {
+			const issue = issues.get(`${repo}#${number}`);
+			if (!issue) throw new Error(`no issue ${repo}#${number}`);
+			const now = stamp(Date.now());
+			issue.state = 'closed';
+			issue.closed_by = user(by);
+			issue.closed_at = now;
+			issue.updated_at = now;
 		},
 		stop: () => {
 			void server.stop(true);

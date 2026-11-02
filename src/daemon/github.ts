@@ -38,12 +38,14 @@ export type GitHubLive = {
 	state: Health['channels'][number]['state'];
 	detail: string | null;
 	problems: Problem[];
+	/** Configured repositories on GitHub, by config name, once the token is checked. */
+	repos: Array<{ name: string; fullName: string }>;
 };
 
 export function initialGitHub(config: Config): GitHubLive {
 	return config.github
-		? { state: 'connecting', detail: CHECKING, problems: [] }
-		: { state: 'off', detail: DISABLED, problems: [] };
+		? { state: 'connecting', detail: CHECKING, problems: [], repos: [] }
+		: { state: 'off', detail: DISABLED, problems: [], repos: [] };
 }
 
 /** Why a `github:` thread can't be used right now, or `null` when GitHub is on. */
@@ -68,31 +70,48 @@ export class GitHubError extends Error {
 export type GitHubResponse = {
 	status: number;
 	headers: Headers;
+	/** `null` for a `304`: unchanged since the `etag` sent. */
 	body: unknown;
+	etag: string | null;
 	/** The next page from the `Link` header, as a path. */
 	next: string | null;
 };
 
-type Rate = { limit: number; remaining: number; reset: number };
-
-export type GitHubClient = {
-	/** One request at a time; non-GET requests at least 1 s apart. Throws `GitHubError`. */
+export type GitHubApi = {
+	/**
+	 * One request at a time; non-GET requests at least 1 s apart. With `etag`,
+	 * an unchanged answer is a `304`, which costs no rate limit. Throws
+	 * `GitHubError`.
+	 */
 	request: (
 		method: string,
 		path: string,
-		options?: { body?: unknown; conditional?: boolean },
+		options?: { body?: unknown; etag?: string | null },
 	) => Promise<GitHubResponse>;
-	/** Every page of a listing, following `Link: rel="next"`, at most 10. */
-	pages: (path: string) => Promise<unknown[]>;
-	stop: () => Promise<void>;
+	/**
+	 * Every page of a listing, following `Link: rel="next"`, at most 10. The
+	 * `etag` applies to the first page; `notModified` means nothing changed.
+	 */
+	pages: (
+		path: string,
+		etag?: string | null,
+	) => Promise<{ items: unknown[]; etag: string | null; notModified: boolean }>;
 };
+
+type Rate = { limit: number; remaining: number; reset: number };
+
+export type GitHubClient = GitHubApi & { stop: () => Promise<void> };
 
 /**
  * Runs the GitHub channel until `stop`: reads the token from `gh auth token`,
  * checks it, and keeps health current. GitHub being unavailable in any way is
  * a health state, never an error.
  */
-export function startGitHub(daemon: Daemon): GitHubClient {
+export function startGitHub(
+	daemon: Daemon,
+	/** Runs after each successful check, while GitHub is up. */
+	poll: (api: GitHubApi) => Promise<void>,
+): GitHubClient {
 	const stop = new AbortController();
 	// Every token read, kept as secrets for the daemon's life.
 	const tokens: string[] = [];
@@ -110,7 +129,6 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 	let rateWait = RATE_WAIT_MS;
 	let lastWriteAt = 0;
 	let queue: Promise<unknown> = Promise.resolve();
-	const etags = new Map<string, { etag: string; body: unknown }>();
 	const since = new Map<string, number>();
 
 	const set = (
@@ -127,7 +145,12 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 			if (!problems.some((problem) => problem.id === id)) since.delete(id);
 		}
 		const current = daemon.github;
-		const next: GitHubLive = { state, detail, problems: stamped };
+		const next: GitHubLive = {
+			state,
+			detail,
+			problems: stamped,
+			repos: current.repos,
+		};
 		if (JSON.stringify(current) === JSON.stringify(next)) return;
 		if (current.state !== state) {
 			daemon.log('info', 'github channel', { state, detail });
@@ -149,6 +172,12 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 			`@${login ?? '?'} via gh`,
 			`${repos} ${repos === 1 ? 'repo' : 'repos'}`,
 		];
+		const followed = followedCount(daemon);
+		if (followed > 0) {
+			parts.push(
+				`${followed} ${followed === 1 ? 'thread' : 'threads'} followed`,
+			);
+		}
 		if (rate) {
 			parts.push(
 				`${rate.remaining.toLocaleString('en-US')} of ${rate.limit.toLocaleString('en-US')} API calls left`,
@@ -182,7 +211,7 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 	const send = async (
 		method: string,
 		path: string,
-		options: { body?: unknown; conditional?: boolean },
+		options: { body?: unknown; etag?: string | null },
 	): Promise<GitHubResponse> => {
 		const free = path === '/rate_limit';
 		const pausedUntil = Math.max(
@@ -200,14 +229,13 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 		for (let attempt = 0; ; attempt++) {
 			if (token === null) throw new GitHubError(401, REJECTED);
 			const used = token;
-			const cached = options.conditional ? etags.get(path) : undefined;
 			const headers: Record<string, string> = {
 				Authorization: `Bearer ${used}`,
 				Accept: 'application/vnd.github+json',
 				'X-GitHub-Api-Version': '2022-11-28',
 				'User-Agent': `superagent/${daemon.agent.version}`,
 			};
-			if (cached) headers['If-None-Match'] = cached.etag;
+			if (options.etag) headers['If-None-Match'] = options.etag;
 			if (options.body !== undefined)
 				headers['Content-Type'] = 'application/json';
 			let response: Response;
@@ -289,12 +317,13 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 				);
 			}
 			rateWait = RATE_WAIT_MS;
-			if (status === 304 && cached) {
+			if (status === 304) {
 				return {
 					status,
 					headers: response.headers,
-					body: cached.body,
-					next: nextPage(response.headers),
+					body: null,
+					etag: options.etag ?? null,
+					next: null,
 				};
 			}
 			const body: unknown = text === '' ? null : parseJson(text);
@@ -308,12 +337,11 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 					),
 				);
 			}
-			const etag = response.headers.get('etag');
-			if (options.conditional && etag) etags.set(path, { etag, body });
 			return {
 				status,
 				headers: response.headers,
 				body,
+				etag: response.headers.get('etag'),
 				next: nextPage(response.headers),
 			};
 		}
@@ -331,7 +359,7 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 	const request = (
 		method: string,
 		path: string,
-		options: { body?: unknown; conditional?: boolean } = {},
+		options: { body?: unknown; etag?: string | null } = {},
 	): Promise<GitHubResponse> => {
 		const run = () => send(method, path, options);
 		const result = queue.then(run, run);
@@ -339,18 +367,20 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 		return result;
 	};
 
-	const pages = async (path: string): Promise<unknown[]> => {
-		const items: unknown[] = [];
-		let next: string | null = path;
-		for (let page = 0; next !== null && page < MAX_PAGES; page++) {
-			// oxlint-disable-next-line eslint/no-await-in-loop
-			const response: GitHubResponse = await request('GET', next, {
-				conditional: true,
-			});
-			if (Array.isArray(response.body)) items.push(...response.body);
-			next = response.next;
+	const pages: GitHubApi['pages'] = async (path, etag = null) => {
+		const first = await request('GET', path, { etag });
+		if (first.status === 304) {
+			return { items: [], etag: first.etag, notModified: true };
 		}
-		return items;
+		const items: unknown[] = Array.isArray(first.body) ? [...first.body] : [];
+		let { next } = first;
+		for (let page = 1; next !== null && page < MAX_PAGES; page++) {
+			// oxlint-disable-next-line eslint/no-await-in-loop
+			const response: GitHubResponse = await request('GET', next);
+			if (Array.isArray(response.body)) items.push(...response.body);
+			({ next } = response);
+		}
+		return { items, etag: first.etag, notModified: false };
 	};
 
 	/** Your login, the `repo` scope, and write access to each configured repository. */
@@ -375,6 +405,7 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 			});
 		}
 		repos = 0;
+		const visible: GitHubLive['repos'] = [];
 		for (const repo of daemon.config.repos) {
 			// oxlint-disable-next-line eslint/no-await-in-loop
 			const name = await githubName(daemon, repo);
@@ -383,6 +414,7 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 			try {
 				// oxlint-disable-next-line eslint/no-await-in-loop
 				const found = await request('GET', `/repos/${name}`);
+				visible.push({ name: repo.name, fullName: name });
 				if (!canPush(found.body)) {
 					problems.push({
 						id: `github-push:${name}`,
@@ -403,6 +435,7 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 			}
 		}
 		repoProblems = problems;
+		daemon.github = { ...daemon.github, repos: visible };
 		checked = true;
 		daemon.log('info', 'github connected', { login, repos });
 	};
@@ -434,6 +467,8 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 			else await verify();
 			failures = 0;
 			rejected = false;
+			up();
+			await poll({ request, pages });
 			up();
 		} catch (error) {
 			if (!(error instanceof GitHubError)) throw error;
@@ -469,6 +504,21 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 		}
 	};
 
+	// Timers don't run while the machine sleeps, so a late beat means it slept:
+	// catch up at once instead of finishing the wait.
+	let cutWait: (() => void) | null = null;
+	let beat = Date.now();
+	const watch = setInterval(() => {
+		const gap = Date.now() - beat;
+		beat = Date.now();
+		if (gap <= 3 * TICK_MS) return;
+		daemon.log('info', 'woke up', { after: duration(gap) });
+		if (daemon.github.state === 'up') {
+			set('connecting', 'catching up after sleep', repoProblems);
+		}
+		cutWait?.();
+	}, TICK_MS);
+
 	const loop = (async () => {
 		let slow = 1;
 		while (!stop.signal.aborted) {
@@ -488,13 +538,20 @@ export function startGitHub(daemon: Daemon): GitHubClient {
 				rate !== null && rate.remaining < SLOW_BELOW
 					? Math.min(slow * 2, Math.ceil(MAX_TICK_MS / TICK_MS))
 					: 1;
+			const cut = new AbortController();
+			cutWait = () => cut.abort();
 			try {
 				// oxlint-disable-next-line eslint/no-await-in-loop
-				await sleep(Math.min(TICK_MS * slow, MAX_TICK_MS), stop.signal);
+				await sleep(
+					Math.min(TICK_MS * slow, MAX_TICK_MS),
+					AbortSignal.any([stop.signal, cut.signal]),
+				);
 			} catch {
-				break;
+				if (stop.signal.aborted) break;
 			}
+			cutWait = null;
 		}
+		clearInterval(watch);
 	})();
 
 	return {
@@ -625,6 +682,26 @@ function parseJson(text: string): unknown {
 	} catch {
 		return null;
 	}
+}
+
+/** Followed threads: GitHub threads a task owns, once their item is fetched. */
+function followedCount(daemon: Daemon): number {
+	return (
+		daemon.db
+			.query<{ count: number }, []>(
+				`SELECT COUNT(*) AS count FROM threads th JOIN github_items gi ON gi.thread_id = th.id
+				WHERE th.channel = 'github' AND th.owner_task_id IS NOT NULL`,
+			)
+			.get()?.count ?? 0
+	);
+}
+
+function duration(ms: number): string {
+	const minutes = Math.round(ms / 60_000);
+	if (minutes < 1) return `${Math.round(ms / 1000)} s`;
+	return minutes < 60
+		? `${minutes} min`
+		: `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
 
 function clock(at: number): string {

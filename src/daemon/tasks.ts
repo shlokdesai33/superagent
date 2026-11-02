@@ -302,11 +302,14 @@ export function resumeTasks(
 	return failed.map((task) => task.handle);
 }
 
-/** Threads the task owns outside the console, whose people may be waiting on it. */
+/**
+ * Threads the task owns where people may be waiting on it: not the console,
+ * and not GitHub, whose work always starts in the console.
+ */
 export function ownedChatThreads(daemon: Daemon, taskId: number): string[] {
 	return daemon.db
 		.query<{ id: string }, [number]>(
-			"SELECT id FROM threads WHERE owner_task_id = ? AND channel != 'console'",
+			"SELECT id FROM threads WHERE owner_task_id = ? AND channel NOT IN ('console', 'github')",
 		)
 		.all(taskId)
 		.map((thread) => thread.id);

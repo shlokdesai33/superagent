@@ -1,6 +1,8 @@
-// End to end: GitHub through gh, and optional (GitHub build step 1). GitHub
-// off without gh, off with gh logged out, on without a restart, a token gh
-// replaced, a token GitHub rejects, and the token kept out of everything.
+// End to end: GitHub through gh, and optional (GitHub build steps 1 and 2).
+// GitHub off without gh, off with gh logged out, on without a restart, a
+// token gh replaced, a token GitHub rejects; an issue handed to a task from
+// the console, its comments and closing delivered to the task, sleep and
+// catching up; and the token kept out of everything.
 // Run with `bun run e2e`; it exits non-zero if a check fails.
 import { execFileSync } from 'node:child_process';
 import {
@@ -20,6 +22,7 @@ import { startAgent } from './harness.ts';
 
 type Channel = Health['channels'][number];
 type TaskLine = Extract<FeedLine, { type: 'task' }>;
+type RoutedLine = Extract<FeedLine, { type: 'routed' }>;
 
 const fresh = (name: string) =>
 	`gho_${name}${crypto.randomUUID().replaceAll('-', '')}`;
@@ -48,6 +51,19 @@ execFileSync('git', ['init', '-q', repoDir]);
 execFileSync('git', [
 	'-C',
 	repoDir,
+	'-c',
+	'user.name=e2e',
+	'-c',
+	'user.email=e2e@example.com',
+	'commit',
+	'-q',
+	'--allow-empty',
+	'-m',
+	'start',
+]);
+execFileSync('git', [
+	'-C',
+	repoDir,
 	'remote',
 	'add',
 	'origin',
@@ -61,8 +77,10 @@ const github = startFakeGitHub({
 });
 
 // The fake models: a Router that starts the task each console message asks
-// for, and Workers that finish, or print what a leak would show and finish.
-const kinds = new Map<string, 'off' | 'leak'>();
+// for, and Workers that finish, wait on an issue until it's closed, or print
+// what a leak would show and finish.
+const kinds = new Map<string, 'off' | 'leak' | 'issue'>();
+let issueHandle: string | null = null;
 const particle = startFakeParticle((request) => {
 	if (request.session === 'compaction') return { content: 'Summary.' };
 	if (request.session === 'router') {
@@ -90,6 +108,45 @@ const particle = startFakeParticle((request) => {
 				],
 			};
 		}
+		const started = request.results
+			.map((result) => result.match(/^started (\w{4})/)?.[1])
+			.find(Boolean);
+		if (
+			started &&
+			issueHandle === null &&
+			request.results.some((r) => r.includes('in app on'))
+		) {
+			issueHandle = started;
+		}
+		if (request.fresh.includes('ISSUE fix')) {
+			return {
+				calls: [
+					{
+						name: 'start_task',
+						args: {
+							title: 'Fix issue 7',
+							instructions: 'ISSUE-TASK: fix acme/app#7.',
+							threads: ['github:acme/app#7'],
+						},
+					},
+				],
+			};
+		}
+		if (request.fresh.includes('ALSO10') && issueHandle !== null) {
+			return {
+				calls: [
+					{ name: 'read_thread', args: { id: 'github:acme/app#7' } },
+					{
+						name: 'send_to_task',
+						args: {
+							handle: issueHandle,
+							text: 'Also handle #10.',
+							threads: ['github:acme/app#10'],
+						},
+					},
+				],
+			};
+		}
 		if (request.fresh.includes('LEAK')) {
 			return {
 				calls: [
@@ -110,7 +167,23 @@ const particle = startFakeParticle((request) => {
 
 	const handle = request.handle ?? '';
 	if (!kinds.has(handle)) {
-		kinds.set(handle, request.fresh.includes('LEAK-TASK') ? 'leak' : 'off');
+		kinds.set(
+			handle,
+			request.fresh.includes('LEAK-TASK')
+				? 'leak'
+				: request.fresh.includes('ISSUE-TASK')
+					? 'issue'
+					: 'off',
+		);
+	}
+	if (
+		kinds.get(handle) === 'issue' &&
+		!request.fresh.includes('was closed by')
+	) {
+		return {
+			content: 'Waiting on the issue.',
+			calls: [{ name: 'wait_for', args: { what: 'the issue' } }],
+		};
 	}
 	if (kinds.get(handle) === 'leak' && !request.called.includes('run')) {
 		return {
@@ -326,6 +399,202 @@ try {
 	);
 	check('a working token from gh brings it back', true, describe(back));
 
+	// 2. An issue handed to a task from the console.
+	github.openIssue('acme/app', 7, {
+		title: 'Export crashes in Safari',
+		body: 'ISSUE-7-BODY: exporting a report crashes Safari 18.',
+		by: 'alice',
+		labels: ['bug'],
+	});
+	github.comment('acme/app', 7, {
+		by: 'bob',
+		body: 'EARLY-COMMENT: same here',
+	});
+	github.openIssue('acme/app', 9, {
+		title: 'Unrelated',
+		body: 'Nobody asked the agent about this.',
+		by: 'carol',
+	});
+	github.openIssue('acme/app', 10, {
+		title: 'Export is slow',
+		body: 'ISSUE-10-BODY: exports take a minute.',
+		by: 'alice',
+	});
+	await agent.action({ type: 'send_console', text: 'ISSUE fix issue #7' });
+	const issueTask = (
+		await agent.waitFor(
+			'the issue task',
+			(line): line is TaskLine =>
+				line.type === 'task' &&
+				line.task.title === 'Fix issue 7' &&
+				line.task.threads.some((thread) => thread.id === 'github:acme/app#7'),
+		)
+	).task;
+	const { handle } = issueTask;
+	check(
+		'a console request starts a task that follows the GitHub issue',
+		issueTask.threads.some(
+			(thread) =>
+				thread.id === 'github:acme/app#7' &&
+				thread.title === 'app#7' &&
+				thread.url === 'https://github.com/acme/app/issues/7',
+		),
+		JSON.stringify(issueTask.threads),
+	);
+	const workerSaw = (text: string) =>
+		agent.until(
+			`the Worker to see ${text}`,
+			async () =>
+				particle.requests.filter(
+					(request) =>
+						request.session === 'worker' &&
+						request.handle === handle &&
+						request.fresh.includes(text),
+				),
+			(found) => found.length > 0,
+		);
+	const first = (await workerSaw('ISSUE-7-BODY'))[0];
+	check(
+		"the Worker's first message has the issue and its comments",
+		first !== undefined &&
+			first.fresh.includes('EARLY-COMMENT') &&
+			first.fresh.includes('labels: bug'),
+	);
+	const detail = await agent.get(`/v1/tasks/${handle}`);
+	check(
+		"the task works in the issue's repository",
+		JSON.stringify(detail).includes('"branch":"superagent/'),
+	);
+	await agent.until(
+		'polling of #7',
+		async () => github.requests,
+		(requests) =>
+			requests.some((request) =>
+				request.path.startsWith('/repos/acme/app/issues/7/comments?since='),
+			),
+	);
+
+	const routed = (marker: string) =>
+		agent.waitFor(
+			`${marker} routed`,
+			(line): line is RoutedLine =>
+				line.type === 'routed' && line.event.preview.includes(marker),
+		);
+	github.comment('acme/app', 7, { by: 'alice', body: 'LATER-COMMENT (C1)' });
+	const c1 = await routed('C1');
+	check(
+		"a comment on the followed issue goes straight to the task's Worker",
+		c1.event.destination.kind === 'task' &&
+			c1.event.destination.handle === handle,
+		JSON.stringify(c1.event.destination),
+	);
+	await workerSaw('LATER-COMMENT');
+	github.comment('acme/app', 7, {
+		by: 'shlok',
+		body: 'Posted by the agent (C2)\n\n<!-- superagent m1 -->',
+	});
+	const c2 = await routed('C2');
+	check(
+		"the agent's own comment, by its marker, is filtered",
+		c2.event.destination.kind === 'filtered' &&
+			c2.event.destination.reason === 'own message',
+		JSON.stringify(c2.event.destination),
+	);
+	github.comment('acme/app', 7, {
+		by: 'bugbot',
+		body: 'BOT-REVIEW (C3)',
+		bot: true,
+	});
+	await workerSaw('bugbot (bot)');
+	check("a bot's comment reaches the task, marked as a bot", true);
+
+	// Another issue handed to the running task.
+	await agent.action({ type: 'send_console', text: 'ALSO10 take #10 too' });
+	await workerSaw('ISSUE-10-BODY');
+	check('send_to_task hands the task another issue', true);
+	const threadRead = particle.requests
+		.filter((request) => request.session === 'router')
+		.flatMap((request) => request.results)
+		.find((result) => result.startsWith('thread github:acme/app#7'));
+	check(
+		"read_thread shows the issue's last polled state",
+		(threadRead ?? '').includes(
+			'GitHub issue · open · "Export crashes in Safari" · as of',
+		),
+		threadRead?.split('\n')[2] ?? 'no read_thread',
+	);
+
+	// 7. Asleep: comments posted meanwhile arrive once each, in order, labeled late.
+	const beforeSleep = agent.lines.length;
+	agent.signal('SIGSTOP');
+	for (const n of [1, 2, 3]) {
+		github.comment('acme/app', 7, {
+			by: 'alice',
+			body: `LATE-${n} while you slept`,
+			postedAgoMs: 10 * 60_000,
+		});
+	}
+	await Bun.sleep(1_500);
+	agent.signal('SIGCONT');
+	await routed('LATE-3');
+	const late = agent.lines
+		.filter(
+			(line): line is RoutedLine =>
+				line.type === 'routed' && line.event.preview.startsWith('LATE-'),
+		)
+		.map((line) => line.event.preview.slice(0, 6));
+	check(
+		'comments posted while asleep arrive once each, in order',
+		late.join(',') === 'LATE-1,LATE-2,LATE-3',
+		late.join(','),
+	);
+	const lateMessage = await workerSaw('LATE-3');
+	check(
+		'they are labeled as late',
+		lateMessage.some((request) =>
+			request.fresh.includes('(the agent was asleep or offline)'),
+		),
+	);
+	check(
+		'waking up shows GitHub catching up',
+		agent.lines
+			.slice(beforeSleep)
+			.some(
+				(line) =>
+					line.type === 'health' &&
+					githubChannel(line.health)?.detail === 'catching up after sleep',
+			),
+	);
+
+	// Closing the issue reaches the task, which finishes; polling then stops.
+	github.closeIssue('acme/app', 7, 'alice');
+	await taskDone('Fix issue 7');
+	const timeline = await agent.get(
+		`/v1/threads/${encodeURIComponent('github:acme/app#7')}`,
+	);
+	check(
+		"closing reaches the task and is in the thread's timeline",
+		JSON.stringify(timeline).includes('#7 was closed by alice'),
+	);
+	const polls = () =>
+		github.requests.filter((request) =>
+			request.path.startsWith('/repos/acme/app/issues/7'),
+		).length;
+	await Bun.sleep(500);
+	const settled = polls();
+	await Bun.sleep(1_000);
+	check(
+		'after the task ends, its issues are no longer polled',
+		polls() === settled,
+		`${polls() - settled} more requests`,
+	);
+	check(
+		'an issue no task follows is never requested',
+		!github.requests.some((request) =>
+			request.path.startsWith('/repos/acme/app/issues/9'),
+		),
+	);
+
 	// Leaks: what Worker commands see and print.
 	if (latestHealth()?.sandbox === 'on') {
 		await agent.action({ type: 'send_console', text: 'LEAK check please' });
@@ -339,6 +608,14 @@ try {
 		check(
 			"a GH_TOKEN holding the token doesn't reach commands",
 			results.some((result) => result.includes('gh_token_len=0')),
+		);
+		check(
+			'commands run gh so it never prompts or writes its update check',
+			results.some(
+				(result) =>
+					result.includes('GH_PROMPT_DISABLED=1') &&
+					result.includes('GH_NO_UPDATE_NOTIFIER=1'),
+			),
 		);
 		check(
 			'a token printed in two pieces is redacted whole',

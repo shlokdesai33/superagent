@@ -7,9 +7,13 @@ import {
 	type Params,
 	cut,
 } from './state.ts';
-import { taskByHandle } from './task-feed.ts';
+import { publishTask, taskByHandle } from './task-feed.ts';
 import { taskBranch } from './git.ts';
-import { githubOff } from './github.ts';
+import {
+	githubThreadState,
+	prepareGitHubThread,
+	repoOfThreads,
+} from './github-threads.ts';
 import { createTask, endTask, reopenTask } from './tasks.ts';
 import {
 	type Args,
@@ -63,10 +67,10 @@ export const ROUTER_TOOLS: FunctionTool[] = [
 				type: 'array',
 				items: { type: 'string' },
 				description:
-					'IDs of the threads the task takes over; the console stays with you',
+					'IDs of the threads the task takes over, such as github:acme/app#42 for a GitHub issue; the console stays with you',
 			},
 			repo: string(
-				'A repository from the batch message, for code work; "none" for a scratch folder. Omitted: the only repository, if exactly one is configured',
+				'A repository from the batch message, for code work; "none" for a scratch folder. Omitted: the only repository, or the one its GitHub threads are on',
 			),
 			event: integer(
 				'The event the task comes from, 42 for #42; default: the latest in this batch',
@@ -77,7 +81,16 @@ export const ROUTER_TOOLS: FunctionTool[] = [
 	tool(
 		'send_to_task',
 		"Send a note to a task's Worker. Reopens the task if it had ended.",
-		{ handle: string('The task handle'), text: string('The note') },
+		{
+			handle: string('The task handle'),
+			text: string('The note'),
+			threads: {
+				type: 'array',
+				items: { type: 'string' },
+				description:
+					'More threads for the task to take over, such as github:acme/app#43',
+			},
+		},
 		['handle', 'text'],
 	),
 	tool(
@@ -176,30 +189,11 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 	const title = limitedString(args, 'title', TITLE_CHARS);
 	const instructions = requiredString(args, 'instructions').trim();
 	const repo = optionalString(args, 'repo');
-	const notes: string[] = [];
-
-	const threads: string[] = [];
-	for (const id of optionalStrings(args, 'threads')) {
-		const off = id.startsWith('github:') ? githubOff(daemon) : null;
-		if (off !== null) throw new ToolError(off);
-		const thread = db
-			.query<{ ownable: number; owner: string | null }, [string]>(
-				`SELECT th.ownable, t.handle AS owner FROM threads th
-				LEFT JOIN tasks t ON t.id = th.owner_task_id WHERE th.id = ?`,
-			)
-			.get(id);
-		if (!thread) throw new ToolError(`no thread ${JSON.stringify(id)}`);
-		if (thread.ownable === 0) {
-			notes.push(`${id} stays with you`);
-			continue;
-		}
-		if (thread.owner !== null) {
-			throw new ToolError(
-				`thread ${id} is owned by task ${thread.owner}; use send_to_task ${thread.owner} instead`,
-			);
-		}
-		threads.push(id);
-	}
+	const { threads, notes } = takeableThreads(
+		daemon,
+		optionalStrings(args, 'threads'),
+		null,
+	);
 
 	const event = optionalInteger(args, 'event');
 	let originEventId: number | null;
@@ -234,9 +228,12 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 		}
 		chosen = repo;
 	} else if (repos.length > 1) {
-		throw new ToolError(
-			`several repositories are configured; pass repo: one of ${[...repos, 'none'].join(', ')}`,
-		);
+		chosen = repoOfThreads(daemon, threads);
+		if (chosen === null) {
+			throw new ToolError(
+				`several repositories are configured; pass repo: one of ${[...repos, 'none'].join(', ')}`,
+			);
+		}
 	} else {
 		chosen = repos[0] ?? null;
 	}
@@ -257,10 +254,16 @@ function startTask(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 }
 
 function sendToTask(daemon: Daemon, args: Args): ToolOutcome {
+	const { db } = daemon;
 	const handle = requiredString(args, 'handle');
 	const text = requiredString(args, 'text').trim();
-	const task = taskByHandle(daemon.db, handle);
+	const task = taskByHandle(db, handle);
 	if (!task) throw new ToolError(`no task ${JSON.stringify(handle)}`);
+	const { threads, notes } = takeableThreads(
+		daemon,
+		optionalStrings(args, 'threads'),
+		task.id,
+	);
 	const ended = task.state !== 'active' && task.state !== 'needs_you';
 	ingest(daemon, {
 		channel: 'internal',
@@ -273,13 +276,70 @@ function sendToTask(daemon: Daemon, args: Args): ToolOutcome {
 		taskId: task.id,
 	});
 	if (ended) reopenTask(daemon, task.id);
+	if (threads.length > 0) {
+		const at = Date.now();
+		for (const id of threads) {
+			db.query<unknown, [number, string]>(
+				'UPDATE threads SET owner_task_id = ? WHERE id = ?',
+			).run(task.id, id);
+			db.query<unknown, [number, string, number]>(
+				'INSERT OR IGNORE INTO task_threads (task_id, thread_id, since) VALUES (?, ?, ?)',
+			).run(task.id, id, at);
+		}
+		publishTask(daemon, task.id);
+		notes.push(`it now follows ${threads.join(', ')}`);
+	}
+	const sent = ended
+		? `sent; ${task.handle} had ${task.state === 'done' ? 'finished' : task.state} and is reopened`
+		: `sent; ${task.handle} reads it after its current step`;
 	return {
-		result: ended
-			? `sent; ${task.handle} had ${task.state === 'done' ? 'finished' : task.state} and is reopened`
-			: `sent; ${task.handle} reads it after its current step`,
+		result: notes.length > 0 ? `${sent} (${notes.join('; ')})` : sent,
 		messages: [],
 		action: `sent a note to ${task.handle}`,
 	};
+}
+
+/**
+ * The threads a task can take over: ownable, and not another task's. A
+ * `github:` thread is created when it's new. The console stays with the
+ * Router, noted instead.
+ */
+function takeableThreads(
+	daemon: Daemon,
+	ids: string[],
+	taskId: number | null,
+): { threads: string[]; notes: string[] } {
+	const threads: string[] = [];
+	const notes: string[] = [];
+	for (const requested of ids) {
+		let id = requested;
+		if (requested.startsWith('github:')) {
+			const prepared = prepareGitHubThread(daemon, requested);
+			if (!prepared.ok) throw new ToolError(prepared.error);
+			({ id } = prepared);
+		}
+		const thread = daemon.db
+			.query<
+				{ ownable: number; ownerId: number | null; owner: string | null },
+				[string]
+			>(
+				`SELECT th.ownable, th.owner_task_id AS ownerId, t.handle AS owner FROM threads th
+				LEFT JOIN tasks t ON t.id = th.owner_task_id WHERE th.id = ?`,
+			)
+			.get(id);
+		if (!thread) throw new ToolError(`no thread ${JSON.stringify(id)}`);
+		if (thread.ownable === 0) {
+			notes.push(`${id} stays with you`);
+			continue;
+		}
+		if (thread.ownerId !== null && thread.ownerId !== taskId) {
+			throw new ToolError(
+				`thread ${id} is owned by task ${thread.owner ?? '?'}; use send_to_task ${thread.owner ?? ''} instead`,
+			);
+		}
+		if (!threads.includes(id)) threads.push(id);
+	}
+	return { threads, notes };
 }
 
 function stopTask(daemon: Daemon, args: Args): ToolOutcome {
@@ -316,6 +376,11 @@ function reply(daemon: Daemon, batchId: number, args: Args): ToolOutcome {
 		)
 		.get(threadId);
 	if (!thread) throw new ToolError(`no thread ${JSON.stringify(threadId)}`);
+	if (thread.channel === 'github') {
+		throw new ToolError(
+			"not sent: replies on GitHub threads aren't available yet; tell the operator in the console instead",
+		);
+	}
 	const words = text.split(/\s+/).length;
 	if (CHAT_CHANNELS.has(thread.channel) && words > CHAT_WORD_LIMIT) {
 		throw new ToolError(
@@ -466,6 +531,9 @@ function readThread(daemon: Daemon, args: Args): string {
 	const lines = [
 		`thread ${id} · ${thread.channel} · ${thread.title}${thread.url ? ` · ${thread.url}` : ''}`,
 		`owner: ${thread.owner ?? 'none (the Router handles it)'}`,
+		...(thread.channel === 'github'
+			? [githubThreadState(db, id) ?? 'GitHub: not fetched yet']
+			: []),
 		`tasks that followed it: ${followed.length > 0 ? followed.map((t) => `${t.handle} (${t.state}) ${t.title}`).join('; ') : 'none'}`,
 		'',
 	];

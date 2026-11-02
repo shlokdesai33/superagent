@@ -41,7 +41,7 @@ curl -N --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
 
 ## The script channel
 
-`superagent daemon --script-channel` turns on `POST /v1/events`, which injects a message on a test channel, `script`, the same way GitHub and Slack will arrive. It's for tests and development:
+`superagent daemon --script-channel` turns on `POST /v1/events`, which injects a message on a test channel, `script`, the same way GitHub events arrive. It's for tests and development:
 
 ```sh
 curl --unix-socket ~/.superagent/agent.sock -H 'Superagent-Protocol: 1' \
@@ -58,6 +58,8 @@ The agent runs on Particle's `particle-1` model, the only model it will ever sup
 ## GitHub
 
 GitHub is optional: the agent needs only a Particle key. It uses your own `gh` login, reading the token with `gh auth token` into memory each time it needs it (at start, hourly, after GitHub rejects it, and every minute while GitHub is off); the agent never stores it, and keeps it out of commands, the model, logs, the feed and the TUI like its other keys. Without `gh` installed and logged in, GitHub is off: the health screen and `superagent status` say how to turn it on (install `gh`, run `gh auth login`), it isn't counted as a problem, and it turns on by itself within a minute of logging in. `"github": false` in `config.json` keeps it off. When it's on, the agent checks your login, the `repo` scope, and that you can push to each configured repository, whose GitHub name comes from its `origin` remote or a `"githubRepo": "owner/name"` on its entry. For tests, `SUPERAGENT_GH`, `SUPERAGENT_GITHUB_API_URL` and `SUPERAGENT_GITHUB_POLL_MS` replace the `gh` executable, the API's address and the one-minute check.
+
+Work on GitHub starts in the console: "fix issue #42" makes the Router start a task that follows `github:owner/name#42` (or `app#42` with several repositories). The Worker's first message has the issue and its last comments, and from then on the daemon polls that issue once a minute and hands its new comments, and its closing or reopening, straight to the task, labeled when they were posted while the machine slept. Nothing else on GitHub is read. The agent recognizes its own comments by a hidden `<!-- superagent … -->` marker, since they're posted as you. Workers use `gh` and `git push` in their own shell, logged in as you: in the sandbox `gh` reads its stored login and writes only its cache, and commands get `GH_PROMPT_DISABLED`, `GH_NO_UPDATE_NOTIFIER` and `GH_SPINNER_DISABLED`. A `gh` login that exists only as a `GH_TOKEN` variable isn't passed to commands, since that would put the token in their environment.
 
 ## The Router
 
