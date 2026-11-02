@@ -17,9 +17,20 @@ import type {
 	TaskSummary,
 } from '../protocol.ts';
 import { connect } from './connection.ts';
-import type { InputEvent } from './input.ts';
+import {
+	backspace,
+	clear,
+	deleteForward,
+	deleteWord,
+	insert,
+	left,
+	right,
+	vertical,
+} from './draft.ts';
+import type { InputEvent, KeyName } from './input.ts';
 import {
 	type Connection,
+	type Item,
 	type Model,
 	apply,
 	fromSnapshot,
@@ -36,8 +47,11 @@ import {
 	type KeyScreen,
 	type Toast,
 	type Ui,
+	drafting,
+	emptyTyping,
 	mergedSteps,
 	toRouter,
+	typed,
 } from './state.ts';
 import type { Terminal } from './terminal.ts';
 import { type Theme, backgroundFromOsc11 } from './theme.ts';
@@ -93,8 +107,10 @@ export class App {
 			selectedIndex: 0,
 			scroll: { home: 0, page: 0, free: false },
 			overflow: { above: false, below: false },
-			typing: null,
+			draftRows: [0],
+			typing: emptyTyping(),
 			confirmStop: null,
+			confirmQuit: false,
 			toast: null,
 			arrivals: [],
 			leaving: [],
@@ -258,6 +274,7 @@ export class App {
 		const { screen } = this.ui;
 		if (screen.name === 'key') return;
 		this.ui.confirmStop = null;
+		this.ui.confirmQuit = false;
 		this.ui.screen = {
 			name: 'key',
 			reason,
@@ -515,50 +532,168 @@ export class App {
 			return;
 		}
 		if (event.kind === 'attributes') return;
-		if (event.kind === 'ctrl' && event.letter === 'c') {
-			this.quit();
+		const { screen } = this.ui;
+		// The key screen takes every key for the key; the draft waits behind it.
+		if (screen.name === 'key') {
+			if (event.kind === 'ctrl' && event.letter === 'c') this.quit();
+			else {
+				this.onKeyInput(event, screen);
+				this.render();
+			}
 			return;
 		}
-		if (this.ui.screen.name === 'key') this.onKeyInput(event, this.ui.screen);
-		else if (this.ui.typing) this.onTypingInput(event);
-		else if (this.ui.confirmStop) {
-			const handle = this.ui.confirmStop;
+		if (event.kind === 'ctrl' && event.letter === 'c') {
+			if (this.ui.confirmQuit || !drafting(this.ui)) {
+				this.quit();
+				return;
+			}
+			this.ui.confirmQuit = true;
 			this.ui.confirmStop = null;
-			if (event.kind === 'char' && event.ch === 's')
-				this.act({ type: 'stop_task', handle });
-		} else this.onCommand(event);
+			this.render();
+			return;
+		}
+		const escape = event.kind === 'key' && event.name === 'escape';
+		// A pending question is cancelled by any other key, which still acts,
+		// except esc, which only cancels.
+		const asked = this.ui.confirmQuit || this.ui.confirmStop !== null;
+		const stop = this.ui.confirmStop;
+		this.ui.confirmQuit = false;
+		this.ui.confirmStop = null;
+		if (stop !== null && event.kind === 'ctrl' && event.letter === 'x') {
+			this.act({ type: 'stop_task', handle: stop });
+		} else if (!(asked && escape)) {
+			this.onKey(event);
+		}
 		this.render();
 	}
 
-	private onTypingInput(event: InputEvent): void {
-		const typing = this.ui.typing;
-		if (!typing) return;
-		if (event.kind === 'char') typing.text += event.ch;
-		else if (event.kind === 'paste')
-			typing.text += event.text.replaceAll(/\r\n|\r|\n|\t/g, ' ');
-		else if (event.kind === 'ctrl' && event.letter === 'u') typing.text = '';
-		else if (event.kind === 'key') {
-			if (event.name === 'enter') this.send();
-			else if (event.name === 'escape') this.ui.typing = null;
-			else if (event.name === 'tab') this.nextRepo();
-			else if (event.name === 'backspace') {
-				const chars = [
-					...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(
-						typing.text,
-					),
-				];
-				typing.text = chars
-					.slice(0, -1)
-					.map((part) => part.segment)
-					.join('');
+	private onKey(event: InputEvent): void {
+		const { typing } = this.ui;
+		if (event.kind === 'char') {
+			if (event.ch === '?' && !drafting(this.ui)) this.toggleKeys();
+			else insert(typing, event.ch);
+		} else if (event.kind === 'paste') {
+			insert(typing, event.text.replaceAll(/\r\n|\r|\n|\t/g, ' '));
+		} else if (event.kind === 'ctrl') {
+			this.onCtrl(event.letter);
+		} else if (event.kind === 'key') {
+			this.onNamedKey(event.name);
+		}
+	}
+
+	private onNamedKey(name: KeyName): void {
+		const { typing } = this.ui;
+		// Spaces alone are nothing typed, here as in the box and the hint.
+		const written = typed(this.ui);
+		switch (name) {
+			case 'enter':
+				if (written) this.send();
+				else {
+					clear(typing);
+					this.open();
+				}
+				break;
+			case 'escape':
+				if (written) clear(typing);
+				else if (typing.mode === 'answer') this.ui.typing = emptyTyping();
+				else {
+					clear(typing);
+					this.back();
+				}
+				break;
+			case 'tab':
+				this.nextRepo();
+				break;
+			case 'backspace':
+				backspace(typing);
+				break;
+			case 'delete':
+				deleteForward(typing);
+				break;
+			case 'left':
+				left(typing);
+				break;
+			case 'right':
+				right(typing);
+				break;
+			case 'home':
+				typing.cursor = 0;
+				break;
+			case 'end':
+				typing.cursor = typing.text.length;
+				break;
+			case 'up':
+				if (written) vertical(typing, this.ui.draftRows, -1);
+				else this.move(-1);
+				break;
+			case 'down':
+				if (written) vertical(typing, this.ui.draftRows, 1);
+				else this.move(1);
+				break;
+			case 'pageup':
+				this.move(-PAGE);
+				break;
+			case 'pagedown':
+				this.move(PAGE);
+				break;
+		}
+	}
+
+	/**
+	 * Letters type, so actions are on ctrl chords that terminals pass through:
+	 * not ctrl-s / ctrl-q (flow control), nor ctrl-h / ctrl-i / ctrl-m, which
+	 * arrive as backspace, tab and enter.
+	 */
+	private onCtrl(letter: string): void {
+		const { typing, screen } = this.ui;
+		switch (letter) {
+			case 'u':
+				clear(typing);
+				break;
+			case 'w':
+				deleteWord(typing);
+				break;
+			case 'a':
+				typing.cursor = 0;
+				break;
+			case 'e':
+				typing.cursor = typing.text.length;
+				break;
+			case 't':
+				this.ui.screen = { name: 'health' };
+				this.ui.scroll.page = 0;
+				break;
+			case 'o': {
+				const task = this.focusedTask();
+				if (task && screen.name === 'task') this.openLink(task);
+				else if (task) this.openTask(task.handle);
+				break;
 			}
+			case 'x': {
+				const task = this.focusedTask();
+				if (task && stoppable(task)) this.ui.confirmStop = task.handle;
+				break;
+			}
+			case 'r':
+				if (screen.name === 'health') {
+					this.act({ type: 'resume_tasks', handles: null });
+				}
+				break;
+			case 'k':
+				if (screen.name === 'health') {
+					this.openKeyScreen(
+						this.model.live?.health.model.key === 'missing'
+							? 'missing'
+							: 'replace',
+					);
+				}
+				break;
 		}
 	}
 
 	private send(): void {
 		const typing = this.ui.typing;
-		this.ui.typing = null;
-		if (!typing) return;
+		this.ui.typing = emptyTyping();
 		const text = typing.text.trim();
 		if (text === '') return;
 		if (
@@ -608,10 +743,6 @@ export class App {
 		repo.path = choices[(index + 1) % choices.length] ?? null;
 	}
 
-	private startTyping(): void {
-		this.ui.typing = { mode: 'free', handle: null, questionId: null, text: '' };
-	}
-
 	private answer(handle: string): boolean {
 		const task = this.model.live?.tasks.get(handle);
 		if (task?.status !== 'needs_you' || !task.question) return false;
@@ -620,8 +751,92 @@ export class App {
 			handle,
 			questionId: task.question.id,
 			text: '',
+			cursor: 0,
 		};
 		return true;
+	}
+
+	/** Enter with nothing typed: answer, open the task, or health for a problem. */
+	private open(): void {
+		if (this.ui.typing.mode === 'answer') return;
+		const { screen } = this.ui;
+		if (screen.name === 'task') {
+			this.answer(screen.handle);
+			return;
+		}
+		if (screen.name !== 'home') return;
+		const item = this.selectedItem();
+		if (item?.kind === 'problem') {
+			this.ui.screen = { name: 'health' };
+			this.ui.scroll.page = 0;
+		} else if (item?.kind === 'task' && !this.answer(item.task.handle)) {
+			this.openTask(item.task.handle);
+		}
+	}
+
+	/** The task open in the task view, or selected on home. */
+	private focusedTask(): TaskSummary | null {
+		const { screen } = this.ui;
+		if (screen.name === 'task') {
+			return this.model.live?.tasks.get(screen.handle) ?? null;
+		}
+		if (screen.name !== 'home') return null;
+		const item = this.selectedItem();
+		return item?.kind === 'task' ? item.task : null;
+	}
+
+	private selectedItem(): Item | null {
+		const live = this.model.live;
+		if (!live) return null;
+		this.syncSelection();
+		return (
+			homeItems(live).find((item) => item.key === this.ui.selected) ?? null
+		);
+	}
+
+	/** Moves the selection on home; scrolls the other screens. */
+	private move(step: number): void {
+		if (this.ui.screen.name !== 'home') {
+			this.ui.scroll.page = Math.max(0, this.ui.scroll.page + step);
+			return;
+		}
+		const live = this.model.live;
+		if (!live) return;
+		const items = homeItems(live);
+		this.syncSelection();
+		const { scroll, overflow } = this.ui;
+		if (step > 0 && overflow.below) {
+			scroll.free = true;
+			scroll.home += step;
+			return;
+		}
+		if (step < 0 && overflow.above && (scroll.free || items.length === 0)) {
+			scroll.home = Math.max(0, scroll.home + step);
+			return;
+		}
+		scroll.free = false;
+		const index = Math.max(
+			0,
+			Math.min(items.length - 1, this.ui.selectedIndex + step),
+		);
+		this.ui.selectedIndex = index;
+		this.ui.selected = items[index]?.key ?? null;
+	}
+
+	private toggleKeys(): void {
+		const { screen } = this.ui;
+		this.ui.screen =
+			screen.name === 'keys' ? screen.back : { name: 'keys', back: screen };
+		this.ui.scroll.page = 0;
+	}
+
+	/** Esc with nothing typed: the keys screen goes back where it came from. */
+	private back(): void {
+		const { screen } = this.ui;
+		if (screen.name === 'keys') {
+			this.ui.screen = screen.back;
+			this.ui.scroll.page = 0;
+		} else this.goHome();
 	}
 
 	private openTask(handle: string): void {
@@ -668,103 +883,6 @@ export class App {
 	private goHome(): void {
 		this.ui.screen = { name: 'home' };
 		this.ui.scroll.page = 0;
-	}
-
-	private onCommand(event: InputEvent): void {
-		const ch = event.kind === 'char' ? event.ch : null;
-		const key = event.kind === 'key' ? event.name : null;
-		const { screen } = this.ui;
-
-		if (ch === '/' || ch === 'i') {
-			this.startTyping();
-			return;
-		}
-		if (ch === '?') {
-			if (screen.name === 'keys') this.ui.screen = screen.back;
-			else this.ui.screen = { name: 'keys', back: screen };
-			this.ui.scroll.page = 0;
-			return;
-		}
-		if (ch === 'h') {
-			this.ui.screen = { name: 'health' };
-			this.ui.scroll.page = 0;
-			return;
-		}
-		if (key === 'escape') {
-			this.goHome();
-			return;
-		}
-		if (ch === 'q') {
-			if (screen.name === 'home') this.quit();
-			else this.goHome();
-			return;
-		}
-
-		const down =
-			ch === 'j' || key === 'down' ? 1 : key === 'pagedown' ? PAGE : 0;
-		const up = ch === 'k' || key === 'up' ? 1 : key === 'pageup' ? PAGE : 0;
-
-		if (screen.name !== 'home') {
-			if (down || up) {
-				const step = down - up;
-				this.ui.scroll.page = Math.max(0, this.ui.scroll.page + step);
-			}
-			if (screen.name === 'task') {
-				const task = this.model.live?.tasks.get(screen.handle);
-				if (key === 'enter') this.answer(screen.handle);
-				if (ch === 'o' && task) this.openLink(task);
-				if (ch === 's' && task && stoppable(task))
-					this.ui.confirmStop = task.handle;
-			}
-			if (screen.name === 'health' && ch === 'r') {
-				this.act({ type: 'resume_tasks', handles: null });
-			}
-			if (screen.name === 'health' && ch === 'p') {
-				this.openKeyScreen(
-					this.model.live?.health.model.key === 'missing'
-						? 'missing'
-						: 'replace',
-				);
-			}
-			return;
-		}
-
-		const live = this.model.live;
-		if (!live) return;
-		const items = homeItems(live);
-		this.syncSelection();
-		if (down || up) {
-			const { scroll, overflow } = this.ui;
-			if (down && overflow.below) {
-				scroll.free = true;
-				scroll.home += down;
-				return;
-			}
-			if (up && overflow.above && (scroll.free || items.length === 0)) {
-				scroll.home = Math.max(0, scroll.home - up);
-				return;
-			}
-			scroll.free = false;
-			const index = Math.max(
-				0,
-				Math.min(items.length - 1, this.ui.selectedIndex + down - up),
-			);
-			this.ui.selectedIndex = index;
-			this.ui.selected = items[index]?.key ?? null;
-			return;
-		}
-		const item = items.find((entry) => entry.key === this.ui.selected);
-		if (!item) return;
-		if (key === 'enter') {
-			if (item.kind === 'problem') this.ui.screen = { name: 'health' };
-			else if (item.kind === 'task' && !this.answer(item.task.handle)) {
-				this.openTask(item.task.handle);
-			}
-		} else if (ch === 'o' && item.kind === 'task') {
-			this.openTask(item.task.handle);
-		} else if (ch === 's' && item.kind === 'task' && stoppable(item.task)) {
-			this.ui.confirmStop = item.task.handle;
-		}
 	}
 
 	/** Keeps a selection on home: the same item, or the one now in its place. */
@@ -816,6 +934,7 @@ export class App {
 		if (this.ui.screen.name === 'home') this.ui.scroll.home = output.scroll;
 		else this.ui.scroll.page = output.scroll;
 		this.ui.overflow = output.overflow;
+		this.ui.draftRows = output.draftRows;
 		this.terminal.draw(output.rows);
 
 		let next = output.animating ? FRAME_MS : IDLE_MS - (now % IDLE_MS);

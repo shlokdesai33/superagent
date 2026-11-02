@@ -276,7 +276,7 @@ export function needsCount(live: Live): number {
 	return count;
 }
 
-/** Tasks the `s s` key can stop; on a failed task it dismisses. */
+/** Tasks `ctrl-x ctrl-x` can stop; on a failed task it dismisses. */
 /** What `o` opens in a task view: its PR, else the last thread it follows with a link. */
 export function linkOf(
 	task: TaskSummary,

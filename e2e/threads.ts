@@ -3,7 +3,7 @@
 // old task's temp folder. Run with `bun run e2e`; it exits non-zero if a
 // check fails.
 import { Database } from 'bun:sqlite';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { FeedLine, RoutedEvent, TaskSummary } from '../src/protocol.ts';
 import { startFakeParticle } from './fake-particle.ts';
@@ -420,6 +420,30 @@ try {
 		(exists) => !exists,
 	);
 	check('cleanup removes the temp folder of a task ended 8 days ago', true);
+
+	// 7. A daemon.pid left by a crash or a reboot whose pid now belongs to
+	//    another process: the agent still starts, and stop leaves it alone.
+	const stranger = Bun.spawn(['sleep', '60']);
+	const pidFile = join(agent.home, 'daemon.pid');
+	await agent.crash();
+	writeFileSync(pidFile, `${stranger.pid}\n`);
+	await agent.restart();
+	check("the agent starts though daemon.pid names another program's pid", true);
+	await agent.crash();
+	writeFileSync(pidFile, `${stranger.pid}\n`);
+	const stop = Bun.spawnSync(
+		['bun', join(import.meta.dir, '..', 'src', 'cli.ts'), 'stop'],
+		{ env: { ...Bun.env, SUPERAGENT_HOME: agent.home } },
+	);
+	await Bun.sleep(200);
+	check(
+		'superagent stop leaves that program running',
+		stranger.exitCode === null &&
+			stop.stdout.toString().includes("superagent isn't running"),
+		stop.stdout.toString().trim(),
+	);
+	stranger.kill();
+	await agent.restart();
 } catch (error) {
 	failures += 1;
 	process.stdout.write(
