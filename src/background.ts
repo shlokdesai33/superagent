@@ -7,7 +7,7 @@ import {
 	truncateSync,
 } from 'node:fs';
 import { DaemonUnreachable, NOT_ANSWERING, readSnapshot } from './client.ts';
-import { BACKGROUND_ENV, type DataPaths } from './home.ts';
+import { BACKGROUND_ENV, type DataPaths, isAgentProcess } from './home.ts';
 import type { Snapshot } from './protocol.ts';
 
 const ANSWER_WAIT_MS = 5_000;
@@ -103,7 +103,14 @@ export async function stopAgent(paths: DataPaths): Promise<boolean> {
 	} catch {
 		return false;
 	}
-	if (!Number.isInteger(pid) || pid <= 0 || !alive(pid)) return false;
+	if (
+		!Number.isInteger(pid) ||
+		pid <= 0 ||
+		!alive(pid) ||
+		!isAgentProcess(pid)
+	) {
+		return false;
+	}
 	process.kill(pid, 'SIGTERM');
 	// A stopped agent (SIGSTOP, ctrl-z) only acts on SIGTERM once it continues.
 	try {
