@@ -18,6 +18,16 @@ const MAX_DIFF_CHARS = 256 * 1024;
 const WORKTREE_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const LOG_RETENTION_MS = 30 * 24 * 60 * 60_000;
 const CLEANUP_INTERVAL_MS = 24 * 60 * 60_000;
+// The agent's own commits: a missing identity or a signing requirement in the
+// user's config would fail them.
+const AGENT_COMMIT = [
+	'-c',
+	'commit.gpgsign=false',
+	'-c',
+	'user.name=superagent',
+	'-c',
+	'user.email=superagent@localhost',
+];
 
 export type GitResult = { code: number; stdout: string; stderr: string };
 
@@ -220,7 +230,9 @@ async function chooseBase(
 		// the task's. `git worktree add --orphan` would need git 2.42.
 		const tree = firstLine((await run(['mktree'])).stdout);
 		const root = await run([
+			...AGENT_COMMIT,
 			'commit-tree',
+			'--no-gpg-sign',
 			tree,
 			'-m',
 			'superagent: start from an empty repository',
@@ -541,13 +553,7 @@ async function saveToBranch(
 		if ((await branchTree()) === snapshot) return { ok: true, commit: null };
 
 		const commit = await run([
-			// A signing requirement in the user's config would fail the save.
-			'-c',
-			'commit.gpgsign=false',
-			'-c',
-			'user.name=superagent',
-			'-c',
-			'user.email=superagent@localhost',
+			...AGENT_COMMIT,
 			'commit-tree',
 			'--no-gpg-sign',
 			'-p',

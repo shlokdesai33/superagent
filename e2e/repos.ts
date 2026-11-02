@@ -177,6 +177,52 @@ const routerSaw = async (id: string): Promise<string> => {
 	return request?.fresh ?? '';
 };
 
+/** Starts a task in a new repository with no commits and checks it works. */
+async function emptyRepoTask(
+	name: string,
+	id: string,
+	settings: Array<[string, string]>,
+	label: string,
+): Promise<void> {
+	const fresh = join(root, name);
+	execFileSync('git', ['init', '-q', fresh]);
+	for (const [key, value] of settings) {
+		execFileSync('git', ['-C', fresh, 'config', key, value]);
+	}
+	await agent.action({
+		type: 'send_console',
+		text: `start the project (${id})`,
+		repo: fresh,
+	});
+	const ended = await agent.waitFor(
+		`task ${id} to end`,
+		(line): line is TaskLine =>
+			line.type === 'task' &&
+			line.task.title === `Task ${id}` &&
+			(line.task.status === 'done' || line.task.status === 'failed'),
+	);
+	check(
+		`a task in a repository with no commits${label} works instead of failing`,
+		ended.task.status === 'done',
+		ended.task.result ?? ended.task.status,
+	);
+	const firstCommit = execFileSync(
+		'git',
+		['-C', (await detail(ended.task.handle)).workDir, 'log', '--format=%s'],
+		{ encoding: 'utf8' },
+	).trim();
+	check(
+		'its branch starts from an empty commit',
+		firstCommit === 'superagent: start from an empty repository',
+		firstCommit,
+	);
+	check(
+		"the repository's own branch still has no commits",
+		Bun.spawnSync(['git', '-C', fresh, 'rev-parse', '--verify', 'HEAD'])
+			.exitCode !== 0,
+	);
+}
+
 try {
 	// 1. Opened outside a repository: no default, as before.
 	let tui = await openTui(agent.home, outside);
@@ -344,41 +390,26 @@ try {
 		`${(await detail(b1.handle)).workDir} · ${(await detail(b2.handle)).workDir}`,
 	);
 
-	// 8. A repository with no commits yet, as right after `git init`.
-	const fresh = join(root, 'fresh');
-	execFileSync('git', ['init', '-q', fresh]);
-	await agent.action({
-		type: 'send_console',
-		text: 'start the project (R5)',
-		repo: fresh,
-	});
-	const r5 = await agent.waitFor(
-		'task R5 to end',
-		(line): line is TaskLine =>
-			line.type === 'task' &&
-			line.task.title === 'Task R5' &&
-			(line.task.status === 'done' || line.task.status === 'failed'),
+	// 8. A repository with no commits yet, as right after `git init`, also
+	//    with no git identity and with signing required.
+	await emptyRepoTask('fresh', 'R5', [], '');
+	await emptyRepoTask(
+		'fresh-anon',
+		'R6',
+		[
+			['user.name', ''],
+			['user.email', ''],
+		],
+		' and no git identity',
 	);
-	check(
-		'a task in a repository with no commits works instead of failing',
-		r5.task.status === 'done',
-		r5.task.result ?? r5.task.status,
-	);
-	const r5Detail = await detail(r5.task.handle);
-	const firstCommit = execFileSync(
-		'git',
-		['-C', r5Detail.workDir, 'log', '--format=%s'],
-		{ encoding: 'utf8' },
-	).trim();
-	check(
-		'its branch starts from an empty commit',
-		firstCommit === 'superagent: start from an empty repository',
-		firstCommit,
-	);
-	check(
-		"the repository's own branch still has no commits",
-		Bun.spawnSync(['git', '-C', fresh, 'rev-parse', '--verify', 'HEAD'])
-			.exitCode !== 0,
+	await emptyRepoTask(
+		'fresh-signed',
+		'R7',
+		[
+			['commit.gpgsign', 'true'],
+			['gpg.program', 'false'],
+		],
+		' and signing required',
 	);
 } catch (error) {
 	failures += 1;
