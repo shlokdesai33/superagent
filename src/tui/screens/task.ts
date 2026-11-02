@@ -34,7 +34,7 @@ export function taskBody(
 				{
 					segs: [
 						{
-							t: `No task ${handle} in the agent's current state.`,
+							t: `No task ${handle}.`,
 							fg: 'faint',
 						},
 					],
@@ -138,13 +138,7 @@ export function taskBody(
 		detail?.conversation ?? [],
 	);
 	if (conversation.length > 0) {
-		lines.push(
-			label(
-				'CONVERSATION',
-				undefined,
-				'every thread this task follows, one timeline',
-			),
-		);
+		lines.push(label('CONVERSATION'));
 		for (const message of conversation)
 			lines.push(...messageRows(message, measure));
 	}

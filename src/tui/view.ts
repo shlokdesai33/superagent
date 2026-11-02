@@ -272,14 +272,11 @@ function headerLine(model: Model, ui: Ui, content: number, now: number): Line {
 	const live = model.connection.state === 'live' ? model.live : null;
 	const meta: Seg[][] = [];
 	if (live) {
-		meta.push(figure(String(workingCount(live)), 'working'));
+		const working = workingCount(live);
+		if (working > 0) meta.push(figure(String(working), 'working'));
 		const used = live.usage.inputTokens + live.usage.outputTokens;
 		if (used > 0) meta.push(figure(tokens(used), 'tokens today'));
 	}
-	meta.push([
-		{ t: '?', fg: 'dim', b: true },
-		{ t: ' keys', fg: 'faint' },
-	]);
 
 	const compose = (parts: Seg[][]): Seg[] =>
 		parts.length === 0
@@ -292,17 +289,10 @@ function headerLine(model: Model, ui: Ui, content: number, now: number): Line {
 						...part,
 					]),
 				];
-	// The breadcrumb wins over the usage, then the working count; `? keys`
-	// goes only when the breadcrumb would still be cut short.
+	// The breadcrumb wins over the usage, then the working count.
 	let right = compose(meta);
-	const fits = (minimum: number) =>
-		width(right) + 2 + Math.min(width(left), minimum) <= content;
-	while (!fits(Infinity) && meta.length > 1) {
-		meta.splice(meta.length - 2, 1);
-		right = compose(meta);
-	}
-	if (!fits(24) && meta.length > 0) {
-		meta.length = 0;
+	while (width(right) + 2 + width(left) > content && meta.length > 0) {
+		meta.pop();
 		right = compose(meta);
 	}
 	return { segs: left, right };
@@ -339,13 +329,7 @@ function bodyLines(
 						b: true,
 					},
 				]),
-				...prose([
-					{
-						t: 'Run the same superagent for both; this screen reconnects by itself.',
-						fg: 'faint',
-					},
-				]),
-				...prose([{ t: connection.detail, fg: 'dim' }]),
+				...prose([{ t: 'Run ', fg: 'faint' }, chip('superagent restart')]),
 			],
 			animating: false,
 		};
@@ -357,14 +341,7 @@ function bodyLines(
 				lines: [
 					{ segs: [] },
 					...prose([{ t: "superagent isn't running", fg: 'fg', b: true }]),
-					...prose([
-						{ t: 'Start it with ', fg: 'faint' },
-						chip('superagent start'),
-						{ t: ' · this screen reconnects by itself', fg: 'faint' },
-					]),
-					...prose([
-						{ t: `${connection.detail} · retrying every 1.5 s`, fg: 'dim' },
-					]),
+					...prose([{ t: 'Run ', fg: 'faint' }, chip('superagent start')]),
 				],
 				animating: false,
 			};
@@ -460,23 +437,22 @@ function routerLines(
 			segs.push(
 				sep,
 				{ t: String(router.waiting), fg: 'fg' },
-				{ t: " more waiting, they'll be decided together", fg: 'faint' },
+				{ t: ' more waiting', fg: 'faint' },
 			);
 		} else if (router.batchSize > 1) {
 			segs.push(
 				sep,
 				{ t: String(router.batchSize), fg: 'fg' },
-				{ t: ' events in one call', fg: 'faint' },
+				{ t: ' events', fg: 'faint' },
 			);
 		}
 	} else {
-		segs.push({
-			t: router.last ? `last: ${router.last.text}` : 'last: nothing yet',
-			fg: 'faint',
-		});
+		if (router.last) {
+			segs.push({ t: `last: ${router.last.text}`, fg: 'faint' });
+		}
 		if (router.waiting > 0) {
 			segs.push(
-				sep,
+				...(router.last ? [sep] : []),
 				{ t: String(router.waiting), fg: 'fg' },
 				{ t: ' waiting', fg: 'faint' },
 			);
@@ -542,7 +518,7 @@ export function destination(ui: Ui): string {
 	if (mention)
 		return mention[1] ? `straight to ${mention[1]}` : 'straight to a task';
 	if (screen.name === 'task') return `straight to ${screen.handle}`;
-	return 'the Router decides what to do';
+	return 'the Router';
 }
 
 /** `new tasks in <repo>` while console messages name a default repository. */
@@ -565,7 +541,7 @@ function inputLines(
 	const repo = offline ? null : newTasksIn(model, ui);
 	let to = destination(ui);
 	if (repo !== null && toRouter(ui)) {
-		const full = `the Router decides · ${repo}`;
+		const full = `the Router · ${repo}`;
 		// Narrow terminals keep room to type.
 		to = content - width(full) >= MIN_TYPING ? full : repo;
 	}
@@ -617,10 +593,10 @@ function inputLines(
 		return band;
 	}
 	const placeholder = offline
-		? "superagent isn't running"
+		? ''
 		: ui.screen.name === 'task'
 			? 'press / to write to this task'
-			: 'press / to ask, or start with @ to message a task';
+			: 'press / to ask, or @handle to message a task';
 	const segs: Seg[] = [
 		{ t: '› ', fg: offline ? 'faint' : 'accent' },
 		{ t: placeholder, fg: 'faint', i: true },

@@ -27,11 +27,8 @@ const MAX_RATE_WAIT_MS = 15 * 60_000;
 const NOT_INSTALLED =
 	"gh isn't installed · install it from cli.github.com, then run gh auth login";
 const NOT_LOGGED_IN = "gh isn't logged in · run gh auth login";
-const DISABLED =
-	'turned off in config.json · remove "github": false to turn it on';
-const CHECKING = 'checking your gh login';
 const REJECTED = 'GitHub rejected your gh token';
-const OFFLINE = "can't reach GitHub · retrying every minute";
+const OFFLINE = "can't reach GitHub";
 
 /** The GitHub channel as health shows it. */
 export type GitHubLive = {
@@ -48,12 +45,12 @@ export function initialGitHub(config: Config): GitHubLive {
 	return config.github
 		? {
 				state: 'connecting',
-				detail: CHECKING,
+				detail: null,
 				problems: [],
 				repos: [],
 				login: null,
 			}
-		: { state: 'off', detail: DISABLED, problems: [], repos: [], login: null };
+		: { state: 'off', detail: null, problems: [], repos: [], login: null };
 }
 
 /** A failed reply's first retry: half a tick, so 30 s, doubling from there. */
@@ -64,7 +61,7 @@ export function githubRetryMs(): number {
 /** Why a `github:` thread can't be used right now, or `null` when GitHub is on. */
 export function githubOff(daemon: Daemon): string | null {
 	return daemon.github.state === 'off'
-		? `GitHub is off (${daemon.github.detail ?? 'not set up'}); tell the operator if they asked for GitHub work`
+		? `GitHub is off (${daemon.github.detail ?? 'turned off in config.json'}); tell the operator if they asked for GitHub work`
 		: null;
 }
 
@@ -181,7 +178,7 @@ export function startGitHub(
 		daemon.feed.publish({ type: 'health', health: health(daemon) });
 	};
 
-	const off = (detail: string) => {
+	const off = (detail: string | null) => {
 		token = null;
 		checked = false;
 		rejected = false;
@@ -191,18 +188,13 @@ export function startGitHub(
 
 	const up = () => {
 		const parts = [
-			`@${login ?? '?'} via gh`,
+			`@${login ?? '?'}`,
 			`${repos} ${repos === 1 ? 'repo' : 'repos'}`,
 		];
 		const followed = followedCount(daemon);
 		if (followed > 0) {
 			parts.push(
 				`${followed} ${followed === 1 ? 'thread' : 'threads'} followed`,
-			);
-		}
-		if (rate) {
-			parts.push(
-				`${rate.remaining.toLocaleString('en-US')} of ${rate.limit.toLocaleString('en-US')} API calls left`,
 			);
 		}
 		if (waitUntil > Date.now())
@@ -475,7 +467,7 @@ export function startGitHub(
 
 	const tick = async () => {
 		if (!daemon.config.github) {
-			off(DISABLED);
+			off(null);
 			return;
 		}
 		if (token === null || rejected || Date.now() - readAt >= TOKEN_REREAD_MS) {

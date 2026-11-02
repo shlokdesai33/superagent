@@ -19,7 +19,6 @@ import {
 	BARS,
 	MEASURE,
 	blank,
-	bracketed,
 	chip,
 	label,
 	oneLine,
@@ -158,17 +157,7 @@ export function homeBody(
 	}
 
 	if (lines.length === 0) {
-		lines.push(
-			{ segs: [{ t: 'Nothing is happening yet.', fg: 'fg' }] },
-			{
-				segs: [
-					{
-						t: 'Press / to ask for something.',
-						fg: 'faint',
-					},
-				],
-			},
-		);
+		lines.push({ segs: [{ t: 'No tasks yet.', fg: 'fg' }] });
 	}
 	return { lines, animating };
 }
@@ -193,8 +182,7 @@ function row(
 		ctx.content - width(segs) - 2,
 		Math.floor(ctx.content / 2),
 	);
-	const shown =
-		right && !right.some((seg) => seg.b) ? truncate(right, room) : right;
+	const shown = right ? truncate(right, room) : right;
 	return {
 		segs,
 		...(shown ? { right: shown } : {}),
@@ -222,9 +210,7 @@ function problemRow(
 			{ t: '! ', fg: 'warn', b: true },
 			{ t: oneLine(problem.text), fg: 'fg', b: selected },
 		],
-		selected
-			? bracketed([['enter', 'health']])
-			: [{ t: ago(ctx.now - problem.since), fg: 'faint' }],
+		[{ t: ago(ctx.now - problem.since), fg: 'faint' }],
 		fade,
 		false,
 	);
@@ -247,13 +233,7 @@ function needsRows(
 				handleSeg(task.handle, selected),
 				{ t: oneLine(task.title), fg: 'fg', b: selected },
 			],
-			selected
-				? bracketed([
-						['enter', 'answer'],
-						['o', 'open'],
-						['s', 'stop'],
-					])
-				: origin(task.origin),
+			origin(task.origin),
 			fade,
 			ghost,
 		),
@@ -287,12 +267,7 @@ function failedRow(
 			handleSeg(task.handle, selected),
 			{ t: oneLine(task.title), fg: 'fg', b: selected },
 		],
-		selected
-			? bracketed([
-					['enter', 'open'],
-					['s', 'dismiss'],
-				])
-			: [{ t: oneLine(task.result ?? 'failed'), fg: 'faint' }],
+		[{ t: oneLine(task.result ?? 'failed'), fg: 'faint' }],
 		fade,
 		ghost,
 	);

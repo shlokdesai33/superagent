@@ -246,7 +246,7 @@ try {
 		);
 		check(
 			'80 columns: the destination preview stays on the composer’s first row',
-			(band?.rows[0] ?? '').includes('→ the Router decides what to do'),
+			(band?.rows[0] ?? '').includes('→ the Router'),
 		);
 
 		let mark = tui.mark();

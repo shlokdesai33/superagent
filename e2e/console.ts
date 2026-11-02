@@ -242,9 +242,8 @@ try {
 	);
 	const problem = problemOf(noCredit, 'model');
 	check(
-		'out of credit is a problem that says so and that the agent retries',
-		problem?.text ===
-			'Particle account is out of credit · the agent retries every 2 minutes',
+		'out of credit is a problem that says so',
+		problem?.text === 'Particle account is out of credit',
 		problem?.text,
 	);
 	check(
@@ -254,10 +253,7 @@ try {
 		problem?.fix ?? 'no fix',
 	);
 	await tui.waitFor('! 1 problem', mark);
-	await tui.waitFor(
-		'! Particle account is out of credit · the agent retries',
-		mark,
-	);
+	await tui.waitFor('! Particle account is out of credit', mark);
 	check('the home screen lists it under NEEDS YOU and in the header', true);
 	await tui.waitFor(
 		'└ waiting · Particle account is out of credit · tries again in',
@@ -312,9 +308,9 @@ try {
 		'model',
 	);
 	check(
-		'403 says the key may not use chat completions, and that it retries',
+		'403 says the key may not use chat completions',
 		noScope?.text ===
-			"Particle's API key isn't allowed to use chat completions · the agent retries every 2 minutes" &&
+			"Particle's API key isn't allowed to use chat completions" &&
 			noScope.fix?.includes('superagent login particle') === true,
 		noScope?.text,
 	);
@@ -331,9 +327,8 @@ try {
 		'model',
 	);
 	check(
-		'401 says the key was rejected, how to fix it, and that it retries',
-		rejected?.text ===
-			'Particle rejected the API key · the agent retries every 2 minutes' &&
+		'401 says the key was rejected and how to fix it',
+		rejected?.text === 'Particle rejected the API key' &&
 			rejected.fix?.includes('superagent login particle') === true,
 		rejected?.text,
 	);
@@ -470,8 +465,8 @@ try {
 	const failing = problemOf(broken, 'router:failing');
 	check(
 		"the Router's own failure shows as a problem with where to look",
-		failing?.text.startsWith('The Router failed and retries with backoff:') ===
-			true && failing.fix === 'superagent logs shows the error',
+		failing?.text.startsWith('The Router failed:') === true &&
+			failing.fix === 'superagent logs shows the error',
 		failing?.text,
 	);
 	const waiting = await agent.waitFor(

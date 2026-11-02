@@ -185,7 +185,7 @@ try {
 		!tui.seen().includes('new tasks in'),
 	);
 	await tui.type('/tidy my notes (R1)');
-	await tui.waitFor('→ the Router decides what to do');
+	await tui.waitFor('→ the Router');
 	check(
 		'outside a repository, tab has nothing to change',
 		!tui.seen().includes('tab change repo'),
@@ -211,14 +211,14 @@ try {
 	check('inside a repository, the UI names it for new tasks', true);
 	mark = tui.mark();
 	await tui.type('/fix the login bug (R2)');
-	await tui.waitFor('→ the Router decides · new tasks in webapp', mark);
+	await tui.waitFor('→ the Router · new tasks in webapp', mark);
 	check(
 		'while typing, the preview says where new tasks go, and tab can change it',
 		tui.seen(mark).includes('tab change repo'),
 	);
 	mark = tui.mark();
 	await tui.type('\r');
-	await tui.waitFor("added webapp to the agent's repositories", mark);
+	await tui.waitFor('✓ Sent · added webapp', mark);
 	check('sending from it adds the repository, and the toast says so', true);
 	const added = configRepos();
 	check(
@@ -266,11 +266,11 @@ try {
 	// 5. Tab steps to the agent's other repository, then to none.
 	mark = tui.mark();
 	await tui.type('/draft release notes (R4)\t');
-	await tui.waitFor('→ the Router decides · new tasks in other', mark);
+	await tui.waitFor('→ the Router · new tasks in other', mark);
 	check('tab changes the default to another repository', true);
 	mark = tui.mark();
 	await tui.type('\t');
-	await tui.waitFor('→ the Router decides what to do', mark);
+	await tui.waitFor('→ the Router', mark);
 	check('tab again clears it', true);
 	await tui.type('\r');
 	await agent.waitFor(
@@ -290,7 +290,7 @@ try {
 	);
 	mark = tui.mark();
 	await tui.type('/');
-	await tui.waitFor('→ the Router decides what to do', mark);
+	await tui.waitFor('→ the Router', mark);
 	check(
 		'the cleared default stays cleared for the session',
 		!tui.seen(mark).includes('new tasks in'),

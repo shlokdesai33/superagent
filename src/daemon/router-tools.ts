@@ -28,6 +28,7 @@ import {
 	requiredInteger,
 	requiredString,
 	string,
+	strings,
 	tool,
 } from './tool-args.ts';
 
@@ -51,94 +52,71 @@ const TASK_STATES = new Set([
 export const ROUTER_TOOLS: FunctionTool[] = [
 	tool(
 		'reply',
-		`Send a message to a thread. The only way to reach a person. In chat channels (the console) replies are at most ${CHAT_WORD_LIMIT} words. On GitHub threads they're comments of at most ${GITHUB_WORD_LIMIT} words, markdown allowed, posted as the operator with a sign-off saying it's the agent.`,
+		`Send a message to a thread. Console replies: at most ${CHAT_WORD_LIMIT} words. GitHub: a comment of at most ${GITHUB_WORD_LIMIT} words, markdown allowed, posted as the operator with an agent sign-off.`,
 		{
-			thread: string("The thread's ID, such as console or github:acme/app#42"),
-			text: string('The message'),
-			task: string('The handle of the task this reply is about, if any'),
-			reply_to: integer(
-				'GitHub only: the event this answers, 57 for #57; a review comment is answered in its thread, anything else is quoted',
-			),
+			thread: string(),
+			text: string(),
+			task: string('Handle of the task it is about'),
+			reply_to: integer('GitHub: the event it answers, 57 for #57'),
 		},
 		['thread', 'text'],
 	),
 	tool(
 		'start_task',
-		'Start a task: a Worker that does the work, with its own working folder.',
+		'Start a Worker on the work, with its own folder.',
 		{
 			title: string(`At most ${TITLE_CHARS} characters`),
 			instructions: string('Everything the Worker needs to know'),
-			threads: {
-				type: 'array',
-				items: { type: 'string' },
-				description:
-					'IDs of the threads the task takes over, such as github:acme/app#42 for a GitHub issue; the console stays with you',
-			},
+			threads: strings(
+				'Threads it takes over, such as github:acme/app#42; the console stays with you',
+			),
 			repo: string(
-				'A repository from the batch message, for code work; "none" for a scratch folder. Omitted: the one its GitHub threads are on, else its event\'s default repository, else the only repository',
+				'Default: its GitHub threads\' repository, else its event\'s default repository, else the only one. Another only when the message asks; "none" when not about code',
 			),
 			event: integer(
-				'The event the task comes from, 42 for #42; default: the latest in this batch',
+				'The event it is for, 42 for #42; default: the latest. Needed when events have different default repositories',
 			),
 		},
 		['title', 'instructions', 'threads'],
 	),
 	tool(
 		'send_to_task',
-		"Send a note to a task's Worker. Reopens the task if it had ended.",
+		"Send a note to a task's Worker; reopens an ended task.",
 		{
-			handle: string('The task handle'),
-			text: string('The note'),
-			threads: {
-				type: 'array',
-				items: { type: 'string' },
-				description:
-					'More threads for the task to take over, such as github:acme/app#43',
-			},
+			handle: string(),
+			text: string(),
+			threads: strings('More threads for it to take over'),
 		},
 		['handle', 'text'],
 	),
 	tool(
 		'stop_task',
 		'Stop a task and its commands.',
-		{
-			handle: string('The task handle'),
-			reason: string('Why, for people'),
-		},
+		{ handle: string(), reason: string('Why, for people') },
 		['handle', 'reason'],
 	),
 	tool(
 		'read_trigger',
-		`Read one event in full, in pages of ${TRIGGER_PAGE_CHARS.toLocaleString('en-US')} characters.`,
-		{
-			id: integer('The event number, 42 for #42'),
-			from: integer('Character offset to start from; default 0'),
-		},
+		`Read an event in full, ${TRIGGER_PAGE_CHARS.toLocaleString('en-US')} characters a page.`,
+		{ id: integer('42 for #42'), from: integer() },
 		['id'],
 	),
 	tool(
 		'read_thread',
-		`Read the last ${THREAD_MESSAGES} messages of a thread, its owner and the tasks that followed it.`,
-		{
-			id: string("The thread's ID"),
-			before: integer('Only messages with a lower ID, to page back'),
-		},
+		`Read a thread's last ${THREAD_MESSAGES} messages, owner and tasks; GitHub threads also their polled state.`,
+		{ id: string(), before: integer() },
 		['id'],
 	),
 	tool(
 		'read_task',
-		`Read a task: state, threads, open question, last ${TASK_STEPS} steps, result and report.`,
-		{ handle: string('The task handle') },
+		`Read a task: state, threads, question, last ${TASK_STEPS} steps, result, report.`,
+		{ handle: string() },
 		['handle'],
 	),
 	tool(
 		'list_tasks',
 		`List tasks, newest first, at most ${LIST_TASKS}.`,
-		{
-			state: string(
-				'Only tasks in this state: active, needs_you, done, failed or stopped',
-			),
-		},
+		{ state: string('active, needs_you, done, failed or stopped') },
 		[],
 	),
 ];
