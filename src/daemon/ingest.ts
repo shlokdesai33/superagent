@@ -252,7 +252,11 @@ export function ingest(daemon: Daemon, event: InboundEvent): number | null {
 	});
 
 	if (decision.route === 'router') daemon.router.wake();
-	if (decision.route === 'task') daemon.runWorker(decision.taskId);
+	if (decision.route === 'task') {
+		daemon.runWorker(decision.taskId, {
+			message: ANSWER_KINDS.has(event.kind) && event.author.name !== 'watchdog',
+		});
+	}
 
 	// The river shows only what arrives from outside.
 	if (event.channel === 'internal') {
